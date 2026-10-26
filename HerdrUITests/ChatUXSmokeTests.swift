@@ -3,7 +3,8 @@ import XCTest
 final class ChatUXSmokeTests: XCTestCase {
     private func launch(failingRefresh: Bool = false, pendingQuestion: Bool = false, large: Bool = false,
                         copyFixture: Bool = false, plan: String = "", mermaid: Bool = false,
-                        longSession: Bool = false, environment: [String: String] = [:]) -> XCUIApplication {
+                        longSession: Bool = false, subagents: Bool = false,
+                        environment: [String: String] = [:]) -> XCUIApplication {
         continueAfterFailure = false
         let app = XCUIApplication.launched(mock: "chatview", environment: [
             "HERDR_STEADY_CARET": "1", "HERDR_MOCK_STILL": "1", "HERDR_CHAT_UX_SMOKE": "1",
@@ -13,7 +14,8 @@ final class ChatUXSmokeTests: XCTestCase {
             "HERDR_CHAT_UX_COPY": copyFixture ? "1" : "0",
             "HERDR_CHAT_UX_PLAN": plan,
             "HERDR_CHAT_UX_MERMAID": mermaid ? "1" : "0",
-            "HERDR_CHAT_UX_LONG_SESSION": longSession ? "1" : "0"
+            "HERDR_CHAT_UX_LONG_SESSION": longSession ? "1" : "0",
+            "HERDR_CHAT_UX_SUBAGENTS": subagents ? "1" : "0"
         ].merging(environment) { _, new in new })
         let agent = app.staticTexts["herdr-app"].firstMatch
         if !agent.exists {
@@ -63,8 +65,13 @@ final class ChatUXSmokeTests: XCTestCase {
         let model = app.staticTexts["chat-model"]
         XCTAssertTrue(model.waitForExistence(timeout: 12), app.debugDescription)
         XCTAssertTrue(model.label.contains("fixture-model"))
+        XCTAssertEqual(model.label, "Model: fixture, fixture-model, effort high",
+                       "the model line names omp's effort (fixture-model · high)")
         XCTAssertTrue(app.staticTexts["Review the table"].exists)
         XCTAssertTrue(app.staticTexts["Ship after review"].exists)
+        // The pause icon marks a blocked item; the long "Blocked · <blocker>" line is gone.
+        let blockedText = NSPredicate(format: "label CONTAINS %@ OR label CONTAINS %@", "Blocked ·", "Independent review")
+        XCTAssertEqual(app.descendants(matching: .any).matching(blockedText).count, 0, app.debugDescription)
         record(app, "Native current model, expanded TODO and fixture recap")
 
         app.buttons["terminal-actions"].tap()
@@ -133,6 +140,50 @@ final class ChatUXSmokeTests: XCTestCase {
         more.tap()
         XCTAssertTrue(rows[5].waitForExistence(timeout: 5), "+3 more expands too: \(app.debugDescription)")
         XCTAssertEqual(rows.map(\.exists), Array(repeating: true, count: 6))
+    }
+
+    /// Round 3 item 1: omp's `task` subagents show under the plan like the terminal's
+    /// Subagents box: running ones as rows, finished ones folded; a row opens that
+    /// subagent's own conversation, read-only.
+    func testSubagentsCardShowsRunningRowsAndOpensASubagentTranscript() {
+        let app = launch(subagents: true)
+        let toggle = app.buttons["chat-subagents-toggle"]
+        XCTAssertTrue(toggle.waitForExistence(timeout: 12), app.debugDescription)
+        XCTAssertEqual(toggle.label, "Subagents, 2 running")
+        let rows = app.descendants(matching: .any).matching(identifier: "chat-subagent-row")
+        XCTAssertEqual(rows.count, 2, "finished subagents start folded: \(app.debugDescription)")
+        XCTAssertTrue(rows.element(boundBy: 0).label.hasPrefix("DaemonHeadReview, Review the daemon head, running"),
+                      rows.element(boundBy: 0).label)
+        XCTAssertTrue(rows.element(boundBy: 1).label.hasPrefix("AppHeadReview, Review the app head, running"),
+                      rows.element(boundBy: 1).label)
+        let finished = app.buttons["chat-subagents-finished"]
+        XCTAssertTrue(finished.exists, app.debugDescription)
+        XCTAssertEqual(finished.label, "1 finished")
+        record(app, "Subagents card: two running, one finished folded")
+
+        finished.tap()
+        expectation(for: NSPredicate(format: "count == 3"), evaluatedWith: rows)
+        waitForExpectations(timeout: 5)
+        XCTAssertEqual(rows.element(boundBy: 2).label, "MermaidRender, Render the diagram, completed, 5 min")
+        finished.tap()
+        expectation(for: NSPredicate(format: "count == 2"), evaluatedWith: rows)
+        waitForExpectations(timeout: 5)
+
+        toggle.tap()
+        expectation(for: NSPredicate(format: "count == 0"), evaluatedWith: rows)
+        waitForExpectations(timeout: 5)
+        toggle.tap()
+        expectation(for: NSPredicate(format: "count == 2"), evaluatedWith: rows)
+        waitForExpectations(timeout: 5)
+
+        rows.element(boundBy: 1).tap()
+        let conversation = app.staticTexts["AppHeadReview fixture conversation."]
+        XCTAssertTrue(conversation.waitForExistence(timeout: 10), app.debugDescription)
+        XCTAssertTrue(app.buttons["chat-subagent-done"].exists)
+        record(app, "A subagent's own conversation, read-only")
+        app.buttons["chat-subagent-done"].tap()
+        XCTAssertTrue(conversation.waitForNonExistence(timeout: 5), app.debugDescription)
+        XCTAssertTrue(toggle.exists)
     }
 
     func testFinishedPlanShowsOnlyItsHeader() {
@@ -344,10 +395,12 @@ final class ChatUXSmokeTests: XCTestCase {
     /// TestFlight build 221 lagged on every keystroke in a long agent session: the page
     /// that holds the composer redrew the chat with each character, and the chat redrew
     /// every one of its ~650 rows. On a page shaped like that session (`HERDR_CHAT_UX_LONG_SESSION`)
-    /// typing must draw no transcript row at all.
+    /// typing must draw no transcript row at all, with the Subagents card (and its ticking
+    /// elapsed times) on screen too.
     func testTypingInTheComposerDoesNotReRenderTheTranscript() {
-        let app = launch(longSession: true)
+        let app = launch(longSession: true, subagents: true)
         XCTAssertTrue(app.staticTexts["A complete fixture response."].waitForExistence(timeout: 12), app.debugDescription)
+        XCTAssertTrue(app.buttons["chat-subagents-toggle"].waitForExistence(timeout: 5), app.debugDescription)
         let field = app.textViews["terminal-reply-input"]
         XCTAssertTrue(field.waitForExistence(timeout: 5))
         field.tap()

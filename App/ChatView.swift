@@ -38,6 +38,8 @@ final class ChatModel: ObservableObject {
     @Published private(set) var outgoing: [TranscriptOutgoingMessage] = []
     @Published private(set) var sessionModel: TranscriptModel?
     @Published private(set) var currentPlan: [TranscriptPlanItem] = []
+    /// omp's `task` subagents: running, and finished since the newest prompt.
+    @Published private(set) var subagents: [TranscriptSubagent] = []
     @Published private(set) var recap: TranscriptRecap?
 
     var hasPendingSend: Bool {
@@ -67,8 +69,9 @@ final class ChatModel: ObservableObject {
 
     let store: TranscriptStore
 
-    init(target: String) {
-        store = TranscriptStore(target: target)
+    /// `subagent`: the model pages that subagent's own conversation (read-only) instead.
+    init(target: String, subagent: String? = nil) {
+        store = TranscriptStore(target: target, subagent: subagent)
         store.onChange = { [weak self] in self?.sync() }
     }
 
@@ -130,7 +133,7 @@ final class ChatModel: ObservableObject {
     /// Answers omp's open question with one of its options (owner only). The card shows
     /// the choice at once; a refusal puts the buttons back with the reason.
     func answer(client: HerdrClient, askID: String, option: String) async {
-        guard answeringAskID == nil else { return }
+        guard answeringAskID == nil, store.subagent == nil else { return }
         answeringAskID = askID
         answerProblem = nil
         defer { answeringAskID = nil }
@@ -238,6 +241,7 @@ final class ChatModel: ObservableObject {
         assign(\.working, store.working)
         assign(\.sessionModel, store.model)
         assign(\.currentPlan, store.currentPlan)
+        assign(\.subagents, store.subagents)
         assign(\.recap, store.recap)
         assign(\.hasOlder, store.hasOlder)
         assign(\.loadingOlder, store.loadingOlder)
@@ -248,6 +252,7 @@ final class ChatModel: ObservableObject {
             case .agentNotFound: assign(\.failure, "This agent is gone.")
             case .unavailable: assign(\.failure, "omp's session file can't be read right now.")
             case .cursorExpired: assign(\.failure, nil)
+            case .subagentNotFound: assign(\.failure, "This subagent's conversation can't be found.")
             }
         } else if let error = store.lastError {
             // A guest whose host refuses the method for guests: the Chat tab goes away.
@@ -337,7 +342,7 @@ private enum ChatRow: Identifiable, Equatable {
             case .reply(_, let reply, _), .summary(_, let reply): return reply
             case .note(_, _, let note): return note.title + "\n" + note.body
             case .plan(_, let items):
-                return items.map { [$0.phase, $0.text, $0.blocker].compactMap { $0 }.joined(separator: "\n") }.joined(separator: "\n")
+                return items.map { [$0.phase, $0.text].compactMap { $0 }.joined(separator: "\n") }.joined(separator: "\n")
             case .ask(_, let ask, _):
                 return (ask.questions.flatMap { [$0.question] + $0.options } + (ask.answer ?? [])).joined(separator: "\n")
             case .turnFailed(_, _, let error): return error ?? ""
@@ -444,6 +449,8 @@ struct ChatView: View {
     @State private var openQuestionID: String?
     /// The message whose Select Text sheet is open.
     @State private var selectingText: ChatSelectableText?
+    /// The subagent whose conversation is open (owner only).
+    @State private var openSubagent: TranscriptSubagent?
 
     /// Which rows are drawn (`drawnStart`): the newest `renderWindow` until the chat lands,
     /// then from a fixed row down, so rows arriving at the tail never push out the top of
@@ -571,6 +578,9 @@ struct ChatView: View {
         }
         .sheet(item: $selectingText) { item in
             ChatSelectTextSheet(text: item.text)
+        }
+        .sheet(item: $openSubagent) { subagent in
+            ChatSubagentSheet(client: client, target: model.target, subagent: subagent)
         }
         .environment(\.chatTextScale, textScale)
         .environment(\.chatSearchQuery, findRequest?.term ?? "")
@@ -716,17 +726,18 @@ struct ChatView: View {
 
     @ViewBuilder private var sessionFooter: some View {
         if !model.currentPlan.isEmpty { planCard(model.currentPlan) }
+        if !model.subagents.isEmpty { subagentsCard(model.subagents) }
         if live, model.failure == nil,
            agentStatus == "working" || (agentStatus == nil && model.working != nil) {
             ChatWorkingDots(intent: model.working?.intent)
         }
         recapDivider
         if let sessionModel = model.sessionModel {
-            Text(sessionModel.id)
+            Text(sessionModel.label)
                 .font(Typography.machine(11.5 * textScale))
                 .foregroundStyle(Palette.textFaint)
                 .padding(.leading, 4).padding(.vertical, 4)
-                .accessibilityLabel("Model: \(sessionModel.provider), \(sessionModel.id)")
+                .accessibilityLabel(sessionModel.accessibilityLabel)
                 .accessibilityIdentifier("chat-model")
         }
         if let failure = model.failure {
@@ -1014,16 +1025,9 @@ struct ChatView: View {
                         .foregroundStyle(item.done ? ChatStyle.ok :
                             item.status == .inProgress ? Palette.working : Palette.textDim)
                         .frame(width: 15).padding(.top, 3)
-                    VStack(alignment: .leading, spacing: 3) {
-                        Text(item.text).font(Typography.app(14 * textScale, item.status == .inProgress ? .semibold : .regular))
-                            .strikethrough(item.done, color: Palette.textFaint.opacity(0.6))
-                            .fixedSize(horizontal: false, vertical: true)
-                        if item.status == .blocked {
-                            Text(item.blocker.map { "Blocked · \($0)" } ?? "Blocked")
-                                .font(Typography.app(12 * textScale)).foregroundStyle(Palette.textFaint)
-                                .fixedSize(horizontal: false, vertical: true)
-                        }
-                    }
+                    Text(item.text).font(Typography.app(14 * textScale, item.status == .inProgress ? .semibold : .regular))
+                        .strikethrough(item.done, color: Palette.textFaint.opacity(0.6))
+                        .fixedSize(horizontal: false, vertical: true)
                 }
                 .foregroundStyle(item.done ? Palette.textFaint : Palette.textDim)
                 .frame(maxWidth: .infinity, alignment: .leading)
@@ -1057,6 +1061,216 @@ struct ChatView: View {
 
     private func togglePlan() {
         withAnimation(reduceMotion ? nil : .easeInOut(duration: 0.15)) { toggle("plan") }
+    }
+
+    /// omp's `task` subagents, like the terminal's Subagents box: each running one with what
+    /// it does now and for how long, the finished ones folded into one line. An owner's row
+    /// with a transcript opens that conversation read-only; a guest's rows do not open.
+    private func subagentsCard(_ subagents: [TranscriptSubagent]) -> some View {
+        let running = subagents.filter(\.status.isRunning)
+        let finished = subagents.filter { !$0.status.isRunning }
+        let open = !expanded.contains("subagents-closed")
+        let showsFinished = expanded.contains("subagents-finished")
+        let summary = running.isEmpty ? "\(finished.count) finished" : "\(running.count) running"
+        return VStack(alignment: .leading, spacing: 8) {
+            Button { toggleCard("subagents-closed") } label: {
+                HStack(spacing: 6) {
+                    ChatRowView.chevron(open: open, color: Palette.textFaint)
+                    Text("SUBAGENTS · \(summary.uppercased())")
+                        .font(Typography.machine(10.5 * textScale, .semibold)).tracking(1.2).foregroundStyle(Palette.textFaint)
+                    Spacer(minLength: 8)
+                }
+                .frame(maxWidth: .infinity, alignment: .leading)
+                .contentShape(Rectangle())
+            }
+            .buttonStyle(.plain)
+            .accessibilityLabel("Subagents, \(summary)")
+            .accessibilityHint(open ? "Hides the subagents" : "Shows the subagents")
+            .accessibilityIdentifier("chat-subagents-toggle")
+            if open {
+                ForEach(running) { subagentRow($0) }
+                if !finished.isEmpty {
+                    Button { toggleCard("subagents-finished") } label: {
+                        HStack(spacing: 6) {
+                            ChatRowView.chevron(open: showsFinished, color: Palette.textFaint)
+                            Text("\(finished.count) finished")
+                                .font(Typography.app(12 * textScale, .semibold)).foregroundStyle(Palette.textFaint)
+                        }
+                        .frame(maxWidth: .infinity, alignment: .leading)
+                        .contentShape(Rectangle())
+                    }
+                    .buttonStyle(.plain)
+                    .accessibilityLabel("\(finished.count) finished")
+                    .accessibilityHint(showsFinished ? "Hides the finished subagents" : "Shows the finished subagents")
+                    .accessibilityIdentifier("chat-subagents-finished")
+                    if showsFinished {
+                        ForEach(finished) { subagentRow($0) }
+                    }
+                }
+            }
+        }
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .padding(.horizontal, 12).padding(.vertical, 10)
+        .background(RoundedRectangle(cornerRadius: 14).fill(Palette.surface))
+        .overlay(RoundedRectangle(cornerRadius: 14).strokeBorder(Palette.hairline, lineWidth: 1))
+        .accessibilityElement(children: .contain)
+        .accessibilityIdentifier("chat-subagents")
+    }
+
+    private func subagentRow(_ subagent: TranscriptSubagent) -> some View {
+        ChatSubagentRow(subagent: subagent, opens: !viewer.isGuest && subagent.hasTranscript) {
+            openSubagent = subagent
+        }
+        .equatable()
+    }
+
+    private func toggleCard(_ key: String) {
+        withAnimation(reduceMotion ? nil : .easeInOut(duration: 0.15)) { toggle(key) }
+    }
+}
+
+/// One subagent in the chat's Subagents card. Equatable on what it draws, so a refresh or a
+/// toggle that leaves it alone skips it; a running row's elapsed time ticks in its own
+/// `TimelineView`, so only that line redraws each second.
+private struct ChatSubagentRow: View, Equatable {
+    let subagent: TranscriptSubagent
+    /// Tapping opens its conversation (an owner's subagent with a transcript).
+    let opens: Bool
+    let onOpen: () -> Void
+
+    @Environment(\.chatTextScale) private var textScale
+
+    nonisolated static func == (lhs: ChatSubagentRow, rhs: ChatSubagentRow) -> Bool {
+        lhs.subagent == rhs.subagent && lhs.opens == rhs.opens
+    }
+
+    var body: some View {
+        if opens {
+            Button(action: onOpen) { content }
+                .buttonStyle(.plain)
+                .accessibilityLabel(spoken)
+                .accessibilityHint("Opens its conversation")
+                .accessibilityIdentifier("chat-subagent-row")
+        } else {
+            content
+                .accessibilityElement(children: .combine)
+                .accessibilityLabel(spoken)
+                .accessibilityIdentifier("chat-subagent-row")
+        }
+    }
+
+    private var content: some View {
+        HStack(alignment: .firstTextBaseline, spacing: 8) {
+            mark.frame(width: 12)
+            VStack(alignment: .leading, spacing: 2) {
+                (Text(subagent.id).fontWeight(.semibold).foregroundColor(Palette.text)
+                    + Text(subagent.label.map { ": \($0)" } ?? "").foregroundColor(Palette.textDim))
+                    .font(Typography.app(14 * textScale))
+                    .lineLimit(1)
+                detail
+                    .font(Typography.app(12.5 * textScale))
+                    .foregroundStyle(Palette.textFaint)
+                    .lineLimit(1)
+            }
+            Spacer(minLength: 4)
+            if opens {
+                Image(systemName: "chevron.right")
+                    .font(.system(size: 10, weight: .bold))
+                    .foregroundStyle(Palette.textFaint)
+            }
+        }
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .contentShape(Rectangle())
+    }
+
+    @ViewBuilder private var mark: some View {
+        switch subagent.status {
+        case .running:
+            Circle().fill(Palette.working)
+                .frame(width: 6, height: 6)
+                .alignmentGuide(.firstTextBaseline) { $0[.bottom] + 3 }
+        case .completed:
+            Text("✓").font(Typography.app(13 * textScale, .semibold)).foregroundStyle(ChatStyle.ok)
+        case .failed, .aborted:
+            Text("✗").font(Typography.app(13 * textScale, .semibold)).foregroundStyle(Palette.died)
+        case .unknown:
+            Text("?").font(Typography.app(13 * textScale, .semibold)).foregroundStyle(Palette.textFaint)
+        }
+    }
+
+    /// Running: its newest tool intent and how long it has run, ticking. Finished: how it
+    /// ended and how long it took.
+    @ViewBuilder private var detail: some View {
+        if subagent.status.isRunning {
+            TimelineView(.periodic(from: .now, by: 1)) { context in
+                let nowMs = UInt64(max(context.date.timeIntervalSince1970 * 1000, 0))
+                let elapsed = subagent.startedMs > 0 && nowMs > subagent.startedMs
+                    ? ChatDay.duration(ms: nowMs - subagent.startedMs) : nil
+                Text([subagent.lastIntent, elapsed].compactMap { $0 }.joined(separator: " · "))
+            }
+        } else {
+            Text([statusWord.capitalized, duration].compactMap { $0 }.joined(separator: " · "))
+        }
+    }
+
+    private var statusWord: String {
+        switch subagent.status {
+        case .running: return "running"
+        case .completed: return "completed"
+        case .failed: return "failed"
+        case .aborted: return "aborted"
+        case .unknown: return "status unknown"
+        }
+    }
+
+    private var duration: String? {
+        if let ms = subagent.durationMs { return ChatDay.duration(ms: ms) }
+        guard let finished = subagent.finishedMs, finished > subagent.startedMs, subagent.startedMs > 0 else { return nil }
+        return ChatDay.duration(ms: finished - subagent.startedMs)
+    }
+
+    private var spoken: String {
+        var parts = [subagent.id]
+        if let label = subagent.label, !label.isEmpty { parts.append(label) }
+        parts.append(statusWord)
+        if subagent.status.isRunning {
+            if let intent = subagent.lastIntent { parts.append(intent) }
+        } else if let duration {
+            parts.append(duration)
+        }
+        return parts.joined(separator: ", ")
+    }
+}
+
+/// A subagent's own conversation, read-only: the chat over its session file
+/// (`agent.transcript` with `subagent`), with no composer. It polls while the subagent runs.
+private struct ChatSubagentSheet: View {
+    let client: HerdrClient
+    let subagent: TranscriptSubagent
+    @StateObject private var model: ChatModel
+    @Environment(\.dismiss) private var dismiss
+
+    init(client: HerdrClient, target: String, subagent: TranscriptSubagent) {
+        self.client = client
+        self.subagent = subagent
+        _model = StateObject(wrappedValue: ChatModel(target: target, subagent: subagent.id))
+    }
+
+    var body: some View {
+        NavigationStack {
+            ChatView(client: client, model: model, viewer: .owner, eventsPaneID: nil, isActive: true,
+                     live: subagent.status.isRunning, agentStatus: nil, ground: Palette.groundMachine,
+                     onOpenTerminal: { dismiss() })
+                .navigationTitle(subagent.id)
+                .navigationBarTitleDisplayMode(.inline)
+                .toolbar {
+                    ToolbarItem(placement: .confirmationAction) {
+                        Button("Done") { dismiss() }
+                            .accessibilityIdentifier("chat-subagent-done")
+                    }
+                }
+        }
+        .accessibilityIdentifier("chat-subagent-transcript")
     }
 }
 
