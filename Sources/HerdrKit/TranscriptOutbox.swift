@@ -43,7 +43,7 @@ public struct TranscriptOutgoingMessage: Identifiable, Sendable, Equatable {
 /// at most once, so two identical sends cannot both disappear when only one is recorded.
 /// Matching says only that the text is now in the transcript, not which device wrote it.
 /// Text is compared as the agent records it: trimmed, with CRLF and CR read as LF.
-public struct TranscriptOutbox: Sendable {
+public struct TranscriptOutbox: Sendable, Equatable {
     public private(set) var messages: [TranscriptOutgoingMessage] = []
     public private(set) var recordedPromptIDs: Set<String> = []
     private var lastSessionID: String?

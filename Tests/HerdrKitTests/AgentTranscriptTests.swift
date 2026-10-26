@@ -546,7 +546,76 @@ final class TranscriptStoreTests: XCTestCase {
         let sent = transport.requestLines.count
         try await store.loadOlder(client: client)
         XCTAssertEqual(transport.requestLines.count, sent)
-        XCTAssertEqual(transport.requests.compactMap { $0.params["limit"] as? Int }, [20, 20, 20])
+        // The newest page is a few turns, so a long session's chat draws at once; the reader
+        // scrolls up for more, a full page at a time.
+        XCTAssertEqual(transport.requests.compactMap { $0.params["limit"] as? Int }, [5, 20, 20])
+    }
+
+    func testNewestPageAsksForFiveTurnsAndOlderPagesForTwenty() async throws {
+        let (client, transport) = scripted { params in
+            params["before"] == nil
+                ? Self.page([Self.entry("u2", "user", extra: #""text":"b""#)], before: "c1")
+                : Self.page([Self.entry("u1", "user", extra: #""text":"a""#)])
+        }
+        let store = TranscriptStore(target: "w1:p1")
+        await store.refresh(client: client)
+        try await store.loadOlder(client: client)
+        XCTAssertEqual(TranscriptStore.newestPageTurns, 5)
+        XCTAssertEqual(transport.requests.map { $0.params["limit"] as? Int }, [5, 20])
+        XCTAssertEqual(transport.requests.last?.params["before"] as? String, "c1")
+    }
+
+    func testARefreshThatBringsNothingNewDoesNotNotify() async {
+        var round = 0
+        let (client, _) = scripted { params in
+            if params["after"] == nil {
+                return Self.page([Self.entry("u1", "user", extra: #""text":"go""#), Self.entry("r1")], after: "a1")
+            }
+            round += 1
+            // Round 1 is empty; round 2 re-sends the reply unchanged; round 3 changes it.
+            switch round {
+            case 1: return Self.page([], after: "a1")
+            case 2: return Self.page([Self.entry("r1")], after: "a2")
+            default: return Self.page([Self.entry("r1", extra: #""text":"y","final":true"#)], after: "a3")
+            }
+        }
+        let store = TranscriptStore(target: "w1:p1")
+        var changes = 0
+        store.onChange = { changes += 1 }
+        await store.refresh(client: client)
+        XCTAssertEqual(changes, 1, "the first page is drawn")
+        let turns = store.turns
+
+        await store.refresh(client: client)
+        XCTAssertEqual(changes, 1, "an empty refresh must not redraw the chat")
+        await store.refresh(client: client)
+        XCTAssertEqual(changes, 1, "re-sent, unchanged entries must not redraw the chat")
+        XCTAssertEqual(store.turns, turns, "the turns are stable across refreshes that change nothing")
+
+        await store.refresh(client: client)
+        XCTAssertEqual(changes, 2, "a changed entry redraws")
+        XCTAssertNotEqual(store.turns, turns)
+    }
+
+    func testAReloadThatBringsBackTheSamePageDoesNotNotify() throws {
+        func page(_ text: String) throws -> AgentTranscriptPage {
+            struct Envelope: Decodable { let result: AgentTranscriptPage }
+            return try JSONDecoder().decode(Envelope.self, from: Data(Self.page([
+                Self.entry("u1", "user", extra: #""text":"go""#),
+                Self.entry("r1", extra: #""text":"\#(text)","final":true"#)
+            ], before: "c1").utf8)).result
+        }
+        let store = TranscriptStore(target: "w1:p1")
+        var changes = 0
+        store.onChange = { changes += 1 }
+        store.applyNewest(try page("done"))
+        XCTAssertEqual(changes, 1)
+        let turns = store.turns
+        store.applyNewest(try page("done"))
+        XCTAssertEqual(changes, 1, "the same page again must not redraw the chat")
+        XCTAssertEqual(store.turns, turns)
+        store.applyNewest(try page("changed"))
+        XCTAssertEqual(changes, 2)
     }
 
     func testAfterRefreshReplacesChangedEntriesInPlaceAndAppendsNewOnes() async throws {

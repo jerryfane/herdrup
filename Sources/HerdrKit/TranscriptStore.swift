@@ -194,9 +194,13 @@ public enum TranscriptGrouping {
 /// it replaces the copy in place.
 @MainActor
 public final class TranscriptStore {
-    /// Turns per page (the server clamps to 1...50). Nonisolated: it is the init's default
-    /// argument, which the caller evaluates in its own context.
+    /// Turns per older page (the server clamps to 1...50). Nonisolated: it is the init's
+    /// default argument, which the caller evaluates in its own context.
     public nonisolated static let pageTurns: UInt32 = 20
+    /// Turns on the first (newest) page. A turn is everything from one prompt to the next,
+    /// so on a long agent session 20 turns ran to ~1700 entries (~760 KB) before the chat
+    /// could draw; the reader scrolls up for more, a `pageTurns` page at a time.
+    public nonisolated static let newestPageTurns: UInt32 = 5
 
     public let target: String
     public private(set) var entries: [TranscriptEntry] = []
@@ -238,13 +242,16 @@ public final class TranscriptStore {
     /// does not flash its buttons back between the tap and the next refresh.
     private var localAnswers: [String: [String]] = [:]
     private let pageTurns: UInt32
+    private let newestPageTurns: UInt32
     /// The clock that ages unmatched sends (`TranscriptOutbox.demoteUnseen`); tests inject one.
     private let now: () -> Date
 
     public init(target: String, pageTurns: UInt32 = TranscriptStore.pageTurns,
+                newestPageTurns: UInt32 = TranscriptStore.newestPageTurns,
                 now: @escaping () -> Date = { Date() }) {
         self.target = target
         self.pageTurns = pageTurns
+        self.newestPageTurns = newestPageTurns
         self.now = now
     }
 
@@ -308,7 +315,7 @@ public final class TranscriptStore {
         generation += 1
         let version = generation
         do {
-            let page = try await client.agentTranscript(target: target, limit: pageTurns)
+            let page = try await client.agentTranscript(target: target, limit: newestPageTurns)
             guard version == generation else { return }
             applyNewest(page)
         } catch is CancellationError {
@@ -397,12 +404,21 @@ public final class TranscriptStore {
     // MARK: Merging (internal for tests)
 
     func applyNewest(_ page: AgentTranscriptPage) {
+        let newest = Self.unique(page.entries)
+        let outboxBefore = outbox
+        outbox.reconcile(page.entries, sessionID: page.sessionID)
+        // A reload that brings back exactly what is shown (an expired cursor, a poll racing a
+        // reload) has nothing new to draw: no regroup, no change notification.
+        let unchanged = loaded && lastError == nil && hasSnapshot
+            && newest == entries && (page.before != nil) == hasOlder
+            && page.model == model && page.plan == plan && page.recap == recap
+            && page.pendingAsk == pendingAsk && page.working == working
+            && page.sessionID == sessionID && outbox == outboxBefore
         hasSnapshot = true
         model = page.model
         plan = page.plan
         recap = page.recap
-        outbox.reconcile(page.entries, sessionID: page.sessionID)
-        entries = Self.unique(page.entries)
+        entries = newest
         beforeCursor = page.before
         hasOlder = page.before != nil
         afterCursor = page.after
@@ -411,6 +427,7 @@ public final class TranscriptStore {
         working = page.working
         lastError = nil
         loaded = true
+        guard !unchanged else { return }
         regroup()
     }
 
@@ -422,28 +439,47 @@ public final class TranscriptStore {
         regroup()
     }
 
+    /// Merges a live (`after`) page. Most polls bring nothing (or re-send entries unchanged):
+    /// then the turns are not regrouped and `onChange` is not called, so the chat does not
+    /// redraw for them. Only entries, the open question or whether omp works change the
+    /// turns; the model, plan, recap and outbox only need the change notification.
     func mergeAfter(_ page: AgentTranscriptPage) {
-        model = page.model
-        plan = page.plan
-        recap = page.recap
-        var index: [String: Int] = [:]
+        let outboxBefore = outbox
         outbox.reconcile(page.entries, sessionID: page.sessionID ?? sessionID)
-        for (position, entry) in entries.enumerated() { index[entry.id] = position }
-        for entry in page.entries {
-            if let position = index[entry.id] {
-                entries[position] = entry
-            } else {
-                index[entry.id] = entries.count
-                entries.append(entry)
+        var entriesChanged = false
+        if !page.entries.isEmpty {
+            var index: [String: Int] = [:]
+            for (position, entry) in entries.enumerated() { index[entry.id] = position }
+            for entry in page.entries {
+                if let position = index[entry.id] {
+                    guard entries[position] != entry else { continue }
+                    entries[position] = entry
+                } else {
+                    index[entry.id] = entries.count
+                    entries.append(entry)
+                }
+                entriesChanged = true
             }
         }
         if let after = page.after { afterCursor = after }
         if let session = page.sessionID { sessionID = session }
+        let regroups = entriesChanged || page.pendingAsk != pendingAsk
+            || (page.working == nil) != (working == nil)
+        let notifies = regroups || page.working != working
+            || page.model != model || page.plan != plan || page.recap != recap
+            || outbox != outboxBefore || lastError != nil || !loaded
+        model = page.model
+        plan = page.plan
+        recap = page.recap
         pendingAsk = page.pendingAsk
         working = page.working
         lastError = nil
         loaded = true
-        regroup()
+        if regroups {
+            regroup()
+        } else if notifies {
+            onChange?()
+        }
     }
 
     private func regroup() {

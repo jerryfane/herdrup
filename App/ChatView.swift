@@ -58,6 +58,10 @@ final class ChatModel: ObservableObject {
     /// The server cannot give this agent a transcript (not omp, no session file, an older
     /// server or peer): the page goes back to the terminal for good.
     @Published private(set) var unsupported = false
+    /// The chat's lines, flattened from `turns` and `outgoing` once per change of either
+    /// (not per draw), with each row's position by id.
+    fileprivate private(set) var rows: [ChatRow] = []
+    fileprivate private(set) var rowIndex: [String: Int] = [:]
 
     let store: TranscriptStore
 
@@ -86,14 +90,16 @@ final class ChatModel: ObservableObject {
         followSend()
     }
 
-    /// Until when a pending send keeps the poll at one second: the minute before an
-    /// unmatched send is demoted, plus the poll that demotes it.
+    /// The poll's interval while a send waits to show up in the transcript.
+    static let fastPollSeconds: UInt64 = 3
+    /// Until when a pending send keeps the poll fast: the minute before an unmatched send
+    /// is demoted, plus the poll that demotes it.
     private var fastPollUntil = Date.distantPast
     /// The poll's current sleep; a staged or updated send cancels it to poll sooner.
     private var pollWait: Task<Void, Never>?
 
     private func followSend() {
-        fastPollUntil = Date().addingTimeInterval(TranscriptOutbox.unseenAfter + 1)
+        fastPollUntil = Date().addingTimeInterval(TranscriptOutbox.unseenAfter + TimeInterval(Self.fastPollSeconds))
         pollWait?.cancel()
     }
 
@@ -156,9 +162,9 @@ final class ChatModel: ObservableObject {
     }
 
     /// Keeps the chat current while it is on screen: the agent's own events where the
-    /// server sends them (owner), a 1 s poll while a send waits to show up in the
-    /// transcript, a 3 s poll while omp works, and a slow poll otherwise as a backstop for a
-    /// missed event (and for guests, who have no event stream).
+    /// server sends them (owner), a 3 s poll while a send waits to show up in the
+    /// transcript or while omp works, and a slow poll otherwise as a backstop for a missed
+    /// event (and for guests, who have no event stream).
     func follow(client: HerdrClient, paneID: String?) async {
         await store.refresh(client: client)
         await withTaskGroup(of: Void.self) { group in
@@ -183,7 +189,7 @@ final class ChatModel: ObservableObject {
     private func waitForPoll() async -> Bool {
         let seconds: UInt64
         if hasPendingSend && Date() < fastPollUntil {
-            seconds = 1
+            seconds = Self.fastPollSeconds
         } else {
             seconds = store.isWorking ? 3 : 30
         }
@@ -216,64 +222,115 @@ final class ChatModel: ObservableObject {
         }
     }
 
+    /// Republishes the store. Each value is assigned only when it changed: an equal
+    /// assignment still sends `objectWillChange`, which redraws the whole chat.
     private func sync() {
-        turns = store.turns
-        working = store.working
-        outgoing = store.outbox.messages
-        sessionModel = store.model
-        currentPlan = store.currentPlan
-        recap = store.recap
-        hasOlder = store.hasOlder
-        loadingOlder = store.loadingOlder
-        loaded = store.loaded
+        let turnsChanged = store.turns != turns
+        let outgoingChanged = store.outbox.messages != outgoing
+        if turnsChanged { turns = store.turns }
+        if outgoingChanged { outgoing = store.outbox.messages }
+        if turnsChanged || outgoingChanged {
+            rows = ChatRow.rows(turns: turns, outgoing: outgoing)
+            rowIndex = Dictionary(rows.enumerated().map { ($1.id, $0) }, uniquingKeysWith: { first, _ in first })
+        }
+        assign(\.working, store.working)
+        assign(\.sessionModel, store.model)
+        assign(\.currentPlan, store.currentPlan)
+        assign(\.recap, store.recap)
+        assign(\.hasOlder, store.hasOlder)
+        assign(\.loadingOlder, store.loadingOlder)
+        assign(\.loaded, store.loaded)
         if let error = store.lastError as? AgentTranscriptError {
             switch error {
-            case .unsupported: unsupported = true
-            case .agentNotFound: failure = "This agent is gone."
-            case .unavailable: failure = "omp's session file can't be read right now."
-            case .cursorExpired: failure = nil
+            case .unsupported: assign(\.unsupported, true)
+            case .agentNotFound: assign(\.failure, "This agent is gone.")
+            case .unavailable: assign(\.failure, "omp's session file can't be read right now.")
+            case .cursorExpired: assign(\.failure, nil)
             }
         } else if let error = store.lastError {
             // A guest whose host refuses the method for guests: the Chat tab goes away.
             let code = (error as? APIError)?.code
             if code == "forbidden" || code == "guest_forbidden" {
-                unsupported = true
-                failure = nil
+                assign(\.unsupported, true)
+                assign(\.failure, nil)
             } else {
-                failure = "Couldn't load the chat."
+                assign(\.failure, "Couldn't load the chat.")
             }
         } else {
-            failure = nil
+            assign(\.failure, nil)
         }
+    }
+
+    private func assign<Value: Equatable>(_ keyPath: ReferenceWritableKeyPath<ChatModel, Value>, _ value: Value) {
+        if self[keyPath: keyPath] != value { self[keyPath: keyPath] = value }
     }
 }
 
+/// A turn's prompt as its row draws it: only what the bubble shows, so comparing rows
+/// does not compare the turn's whole work.
+private struct ChatPrompt: Equatable {
+    /// The turn's id.
+    let id: String
+    let text: String
+    let author: TranscriptAuthor?
+    let attachment: GramAttachmentPrompt.Parsed?
+}
+
 /// One line of the chat list, flattened from the turns so every row scrolls by id.
-private enum ChatRow: Identifiable {
+/// Built once per change of the transcript (`ChatModel.rows`); an unchanged entry gives an
+/// equal row with the same id, so its view is not redrawn.
+private enum ChatRow: Identifiable, Equatable {
     case day(id: String, ms: UInt64)
-    case prompt(TranscriptTurn)
+    case prompt(ChatPrompt)
     case item(TranscriptItem)
     case outgoing(TranscriptOutgoingMessage)
 
     var id: String {
         switch self {
         case .day(let id, _): return "day:" + id
-        case .prompt(let turn): return "prompt:" + turn.id
+        case .prompt(let prompt): return "prompt:" + prompt.id
         case .item(let item): return "item:" + item.id
         case .outgoing(let message): return "outgoing:" + message.id
         }
+    }
+
+    static func rows(turns: [TranscriptTurn], outgoing: [TranscriptOutgoingMessage]) -> [ChatRow] {
+        var rows: [ChatRow] = []
+        var previousMs: UInt64?
+        for turn in turns {
+            if turn.prompt != nil, turn.startMs > 0 {
+                if ChatDay.needsSeparator(previousMs: previousMs, ms: turn.startMs) {
+                    rows.append(.day(id: turn.id, ms: turn.startMs))
+                }
+                previousMs = turn.startMs
+                rows.append(.prompt(ChatPrompt(id: turn.id, text: turn.promptText ?? "", author: turn.promptAuthor,
+                                               attachment: turn.attachmentPrompt)))
+            }
+            for item in turn.items { rows.append(.item(item)) }
+        }
+        rows.append(contentsOf: outgoing.map(ChatRow.outgoing))
+        return rows
+    }
+
+    var isWork: Bool {
+        if case .item(.work) = self { return true }
+        return false
+    }
+
+    var askID: String? {
+        if case .item(.ask(let id, _, _)) = self { return id }
+        return nil
     }
 
     /// The row's searchable text before markdown is stripped (`plainSearchText`).
     var searchSource: String {
         switch self {
         case .day: return ""
-        case .prompt(let turn):
-            guard case .user(let prompt, _) = turn.prompt?.kind else { return "" }
-            if let bundle = GramAttachmentPrompt.parse(prompt) {
+        case .prompt(let prompt):
+            if let bundle = prompt.attachment {
                 return ([bundle.caption] + bundle.files.map(\.name)).joined(separator: "\n")
             }
-            return prompt
+            return prompt.text
         case .outgoing(let message):
             return ([message.text] + message.files.map(\.name)).joined(separator: "\n")
         case .item(let item):
@@ -409,7 +466,7 @@ struct ChatView: View {
             if key.query != searchKey.query { selectedSearchHit = nil }
             searchKey = key
             searchResult = key.query.isEmpty ? .empty
-                : TranscriptSearch.search(rows.lazy.map { searchTexts.row(for: $0) }, query: key.query)
+                : TranscriptSearch.search(model.rows.lazy.map { searchTexts.row(for: $0) }, query: key.query)
         }
         let hits = searchResult.hits
         guard !hits.isEmpty else {
@@ -430,7 +487,7 @@ struct ChatView: View {
         onFindResult(index + 1, hits.count, searchResult.capped)
         atBottom = false
         followingLatest = false
-        if let row = rows.first(where: { $0.id == hit.rowID }), case .item(.work(let work)) = row {
+        if let position = model.rowIndex[hit.rowID], case .item(.work(let work)) = model.rows[position] {
             expanded.insert("t:" + work.id)
             expanded.insert("s:" + work.id)
             for item in work.steps { expanded.insert("d:" + item.id) }
@@ -514,7 +571,7 @@ struct ChatView: View {
         .overlay {
             if !model.loaded {
                 ProgressView().tint(Palette.textDim).accessibilityIdentifier("chat-loading")
-            } else if rows.isEmpty, model.failure == nil {
+            } else if model.rows.isEmpty, model.failure == nil {
                 Text("No messages yet").font(Typography.app(14 * textScale)).foregroundStyle(Palette.textFaint)
             }
         }
@@ -551,7 +608,7 @@ struct ChatView: View {
         let hitsByRow = Dictionary(grouping: hits, by: \.rowID)
         return VStack(alignment: .leading, spacing: 10) {
             topSentinel(proxy)
-            ForEach(rows) { row in
+            ForEach(model.rows) { row in
                 searchableRow(row, hits: hitsByRow[row.id] ?? [])
             }
             sessionFooter
@@ -692,30 +749,13 @@ struct ChatView: View {
 
     // MARK: - Rows
 
-    private var rows: [ChatRow] {
-        var rows: [ChatRow] = []
-        var previousMs: UInt64?
-        for turn in model.turns {
-            if turn.prompt != nil, turn.startMs > 0 {
-                if ChatDay.needsSeparator(previousMs: previousMs, ms: turn.startMs) {
-                    rows.append(.day(id: turn.id, ms: turn.startMs))
-                }
-                previousMs = turn.startMs
-                rows.append(.prompt(turn))
-            }
-            for item in turn.items { rows.append(.item(item)) }
-        }
-        rows.append(contentsOf: model.outgoing.map(ChatRow.outgoing))
-        return rows
-    }
-
     @ViewBuilder
     private func rowView(_ row: ChatRow) -> some View {
         switch row {
         case .day(_, let ms):
             dayLabel(ms)
-        case .prompt(let turn):
-            promptBubble(turn)
+        case .prompt(let prompt):
+            promptBubble(prompt)
         case .item(let item):
             itemView(item)
         case .outgoing(let message):
@@ -814,7 +854,7 @@ struct ChatView: View {
     /// Fetches the next older page and keeps the row that was on top where it was.
     private func loadOlder(_ proxy: ScrollViewProxy, retry: Bool = false) {
         guard landed, findRequest == nil, model.hasOlder, !model.loadingOlder, retry || !model.olderFailed else { return }
-        let anchor = rows.first?.id
+        let anchor = model.rows.first?.id
         Task {
             await model.loadOlder(client: client)
             guard let anchor else { return }
@@ -835,21 +875,21 @@ struct ChatView: View {
     }
 
     @ViewBuilder
-    private func promptBubble(_ turn: TranscriptTurn) -> some View {
-        let byline = byline(for: turn.promptAuthor)
+    private func promptBubble(_ prompt: ChatPrompt) -> some View {
+        let byline = byline(for: prompt.author)
         VStack(alignment: .trailing, spacing: 4) {
             if let byline {
                 Text(byline).font(Typography.app(12 * textScale, .medium)).foregroundStyle(Palette.textFaint)
                     .padding(.trailing, 6)
             }
-            if let attachment = turn.attachmentPrompt {
+            if let attachment = prompt.attachment {
                 if !attachment.caption.isEmpty { promptText(attachment.caption) }
                 ChatAttachmentBundle(files: attachment.files, client: client)
                     .frame(maxWidth: sizeClass == .regular ? 480 : 296)
             } else {
-                promptText(turn.promptText ?? "")
+                promptText(prompt.text)
             }
-            if model.store.outbox.recordedPromptIDs.contains(turn.id) {
+            if model.store.outbox.recordedPromptIDs.contains(prompt.id) {
                 Text("In transcript").font(Typography.app(11 * textScale)).foregroundStyle(Palette.textFaint)
                     .padding(.trailing, 6)
             }
