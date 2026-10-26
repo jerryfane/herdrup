@@ -71,6 +71,7 @@ final class AgentAvatarUITests: XCTestCase {
         vetrina = app.descendants(matching: .any)["agent-row-w1:p2"]
         XCTAssertTrue(vetrina.waitForExistence(timeout: 10))
         XCTAssertTrue(row(vetrina, shows: "bot", in: app), "Bot should survive a relaunch, got \(vetrina.label)")
+        attach(app, "agent-avatars-list")
 
         // Gram is name-keyed: vetrina's bubbles wear the same mascot.
         let gram = app.buttons["Gram"].firstMatch
@@ -78,6 +79,7 @@ final class AgentAvatarUITests: XCTestCase {
         gram.tap()
         XCTAssertTrue(app.descendants(matching: .any)["gram-bubble-g1"].waitForExistence(timeout: 10))
         XCTAssertTrue(avatar(app, "bot").waitForExistence(timeout: 10), "a Gram bubble from vetrina should show Bot")
+        attach(app, "agent-avatars-gram")
         XCTAssertTrue(avatar(app, "tri").exists, "a Gram bubble from clientloop should show its Tri")
     }
 
