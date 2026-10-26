@@ -245,8 +245,8 @@ private struct ColumnResizePointer: UIViewRepresentable {
 
     final class Coordinator: NSObject, UIPointerInteractionDelegate {
         func pointerInteraction(_ interaction: UIPointerInteraction, styleFor region: UIPointerRegion) -> UIPointerStyle? {
-            let style = UIPointerStyle(shape: .verticalBeam(length: 24), constrainedAxis: [])
-            style.accessories = [.arrow(.left), .arrow(.right)]
+            let style = UIPointerStyle(shape: .verticalBeam(length: 24), constrainedAxes: [])
+            style.accessories = [UIPointerAccessory.arrow(.left), UIPointerAccessory.arrow(.right)]
             return style
         }
     }
