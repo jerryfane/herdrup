@@ -12,6 +12,23 @@ final class AgentAvatarUITests: XCTestCase {
         app.descendants(matching: .any).matching(identifier: "agent-avatar-\(id)").firstMatch
     }
 
+    /// Whether `bubble` wears the `id` avatar: the bubble row draws it beside the bubble, on
+    /// its left and bottom-aligned with it, so the Agents list and Gram's header stack can't
+    /// stand in for it.
+    private func bubble(_ bubble: XCUIElement, wears id: String, in app: XCUIApplication,
+                        timeout: TimeInterval = 10) -> Bool {
+        let deadline = Date().addingTimeInterval(timeout)
+        repeat {
+            let frame = bubble.frame
+            let candidates = app.descendants(matching: .any).matching(identifier: "agent-avatar-\(id)")
+            if candidates.allElementsBoundByIndex.contains(where: {
+                $0.frame.maxX <= frame.minX + 1 && abs($0.frame.maxY - frame.maxY) < 4
+            }) { return true }
+            RunLoop.current.run(until: Date().addingTimeInterval(0.25))
+        } while Date() < deadline
+        return false
+    }
+
     /// The row shows `mascot`: by the avatar's own identifier, or, where the row's button
     /// merges its children into one element, by the avatar's name in the row's label.
     private func row(_ row: XCUIElement, shows mascot: String, in app: XCUIApplication,
@@ -77,10 +94,15 @@ final class AgentAvatarUITests: XCTestCase {
         let gram = app.buttons["Gram"].firstMatch
         XCTAssertTrue(gram.waitForExistence(timeout: 10))
         gram.tap()
-        XCTAssertTrue(app.descendants(matching: .any)["gram-bubble-g1"].waitForExistence(timeout: 10))
-        XCTAssertTrue(avatar(app, "bot").waitForExistence(timeout: 10), "a Gram bubble from vetrina should show Bot")
+        let fromVetrina = app.descendants(matching: .any)["gram-bubble-g1"]
+        XCTAssertTrue(fromVetrina.waitForExistence(timeout: 10))
+        XCTAssertTrue(bubble(fromVetrina, wears: "bot", in: app), "a Gram bubble from vetrina should show Bot")
+        // hetzner-1's clientloop is not the local clientloop (Tri): the roster has no agent of
+        // that name on that machine, so its bubble wears the default.
+        let relayed = app.descendants(matching: .any)["gram-bubble-g2"]
+        XCTAssertTrue(relayed.waitForExistence(timeout: 5))
+        XCTAssertTrue(bubble(relayed, wears: "herdy", in: app), "a relayed sender with no roster entry shows Herdy")
         attach(app, "agent-avatars-gram")
-        XCTAssertTrue(avatar(app, "tri").exists, "a Gram bubble from clientloop should show its Tri")
     }
 
     func testAGuestSeesTheOwnersMascotAndCannotEditIt() {
