@@ -35,6 +35,26 @@ let package = Package(
         // transport's crypto is worth a fixed, reviewed revision rather than a
         // range. Proven to build+link for iOS-simulator (spike/citadel-ios).
         .package(url: "https://github.com/orlandos-nl/Citadel.git", exact: "0.12.1"),
+        // swift-nio-ssh is OVERRIDDEN with our own fork of Citadel's fork, at one
+        // revision. Wellz26 0.3.6 (a05e6bbe) killed the app (Mac crash, build 220):
+        // a read buffered in the multiplexer was delivered after a child channel had
+        // closed locally, servicing it sent a window adjust, and
+        // ChildChannelStateMachine.sendChannelWindowAdjust hit preconditionFailure
+        // (ChildChannelStateMachine.swift:432, from SSHChildChannel.swift:942 via
+        // NIOSSHHandler.channelReadComplete). jerryfane/swift-nio-ssh tag
+        // 0.3.6-herdr.1 is a05e6bbe plus the fix: no window adjust once either side
+        // has sent CHANNEL_CLOSE, and the closed states throw instead of crashing as
+        // proposed upstream in https://github.com/apple/swift-nio-ssh/pull/239.
+        //
+        // HOW THE OVERRIDE WORKS: package identity is the URL's last path component,
+        // so this root dependency and Citadel's Wellz26 one are the same package
+        // `swift-nio-ssh`; the root's location wins, and a `revision:` requirement at
+        // the root overrides Citadel's "0.3.4"..<"0.4.0" range. SwiftPM warns that
+        // Citadel's dependency "conflicts with dependency on" this URL; that warning
+        // is expected. Drop this override once Citadel ships a swift-nio-ssh with
+        // the fix, and bump the revision with any Citadel bump.
+        .package(url: "https://github.com/jerryfane/swift-nio-ssh.git",
+                 revision: "7d87c52e86e5affae0480a411b9baaf1dd121aba"),
     ],
     targets: [
         // libssh2 is gone: CitadelTransport (pure-Swift nio-ssh + Citadel)
@@ -43,7 +63,9 @@ let package = Package(
         // iOS at all — the libssh2 XCFramework could not link there.
         .target(
             name: "HerdrKit",
-            dependencies: [.product(name: "Citadel", package: "Citadel")]),
+            dependencies: [.product(name: "Citadel", package: "Citadel"),
+                           // Imported directly (HostKeyPinning), and names the override above.
+                           .product(name: "NIOSSH", package: "swift-nio-ssh")]),
         // `AgentActivityState` IS A TEST DEPENDENCY HERE, and it is the mechanical
         // cross-check I previously reported as impossible. The forcing argument against
         // sharing these types is about the SHIPPED binaries — the widget links only
