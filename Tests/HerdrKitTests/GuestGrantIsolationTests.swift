@@ -25,4 +25,30 @@ final class GuestGrantIsolationTests: XCTestCase {
         }
         XCTAssertEqual(host.requests, ["allowed"])
     }
+
+    func testAShareFollowsTheOwnerRenamingItsAgent() throws {
+        let access = GuestAccess(guestID: "g1", guestName: "guest", machineLabel: "Host",
+                                 ownerName: "Owner", agentName: "llm-opt", agentTarget: "term_1",
+                                 endpoint: FakeHost().endpoint, acceptedAt: Date(timeIntervalSince1970: 1))
+        func listing(_ json: String) throws -> [AgentInfo] {
+            try JSONDecoder().decode([AgentInfo].self, from: Data(json.utf8))
+        }
+        let unchanged = try listing(#"[{"terminal_id":"term_1","pane_id":"w1:p1","name":"llm-opt"}]"#)
+        XCTAssertNil(access.renamed(listing: unchanged))
+        // Another terminal's agent, whatever it is called, is not this share.
+        let elsewhere = try listing(#"[{"terminal_id":"term_2","pane_id":"w1:p2","name":"llm-new"}]"#)
+        XCTAssertNil(access.renamed(listing: elsewhere))
+        XCTAssertNil(access.renamed(listing: []))
+
+        let renamed = try XCTUnwrap(access.renamed(listing: listing(
+            #"[{"terminal_id":"term_1","pane_id":"w1:p1","name":"llm-new"}]"#)))
+        XCTAssertEqual(renamed.agentName, "llm-new")
+        XCTAssertEqual(renamed.id, access.id)
+        XCTAssertEqual(renamed.agentTarget, "term_1")
+        XCTAssertEqual(renamed.endpoint, access.endpoint)
+        XCTAssertEqual(renamed.acceptedAt, access.acceptedAt)
+        // The saved share keeps its shape: the renamed one round-trips through the store's JSON.
+        let saved = try JSONDecoder().decode(GuestAccess.self, from: JSONEncoder().encode(renamed))
+        XCTAssertEqual(saved, renamed)
+    }
 }

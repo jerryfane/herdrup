@@ -328,6 +328,10 @@ struct GuestHomeView: View {
             let shared = agents.first { $0.terminalID == access.agentTarget }
                 ?? agents.first { $0.name == access.agentName }
             status = .live(shared.map { AgentRow(info: $0) })
+            // The owner renamed the agent: the share follows it, saved for every screen.
+            if let renamed = access.renamed(listing: agents) {
+                SharedMachinesStore.shared.update(renamed)
+            }
         } catch is CancellationError {
             return
         } catch {

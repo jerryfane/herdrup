@@ -76,6 +76,15 @@ final class SharedMachinesStore: ObservableObject {
         persist()
     }
 
+    /// Saves what the host reports about a grant now (the owner renamed its agent). A grant
+    /// this phone already left stays gone.
+    func update(_ access: GuestAccess) {
+        guard let index = machines.firstIndex(where: { $0.id == access.id }),
+              machines[index] != access else { return }
+        machines[index] = access
+        persist()
+    }
+
     /// Removes a grant; its host stops pushing to this phone for it.
     func remove(_ access: GuestAccess) {
         GuestPushCenter.shared.leaving(access)
