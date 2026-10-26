@@ -6607,6 +6607,11 @@ struct TerminalPaneContent: View {
                     restoreClearedReply()
                 }
             }
+            // The request returned: look for the prompt in the transcript now, not at the
+            // next agent event or poll. Off this task, so the composer is not held for it.
+            if let outgoingModel, outgoingID != nil {
+                Task { await outgoingModel.refresh(client: client) }
+            }
         }
         if isKeyAction { keySendTask = task }
     }
@@ -6687,6 +6692,10 @@ struct TerminalPaneContent: View {
             } catch {
                 outgoingModel?.updateOutgoing(outgoingID, state: .unconfirmed)
                 actionNote = "couldn't confirm delivery — check the terminal before sending again"
+            }
+            // The prompt request returned: look for it in the transcript now.
+            if let outgoingModel {
+                Task { await outgoingModel.refresh(client: client) }
             }
             // Only a definite pre-write rejection keeps the chips and caption
             // for a one-tap retry. A lost response may follow a PTY write, so

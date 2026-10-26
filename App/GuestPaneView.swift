@@ -823,6 +823,11 @@ struct GuestPaneView: View {
                     uploader.forget(sentIDs)
                 }
             }
+            // The request returned: look for the prompt in the transcript now rather than
+            // at the next poll (guests have no event stream).
+            if outgoingID != nil, promptAttempted {
+                Task { await chatModel.refresh(client: client) }
+            }
         }
     }
 

@@ -38,13 +38,19 @@ final class ChatMockConversation: @unchecked Sendable {
     /// `HERDR_MOCK_CHAT_ANSWER=<code>`: `agent.answer` refuses with that error code (the
     /// "Answer in Terminal" fallback); unset, it answers.
     static let answerRefusal = ProcessInfo.processInfo.environment["HERDR_MOCK_CHAT_ANSWER"]
+    /// `HERDR_MOCK_CHAT_ANSWERED=<option>`: the owner's question starts answered, so the
+    /// agent is not blocked on a menu and a reply goes out as a prompt (`agent.prompt`).
+    private static let answeredAtLaunch = ProcessInfo.processInfo.environment["HERDR_MOCK_CHAT_ANSWERED"]
 
     let audience: Audience
     private let lock = NSLock()
     private var answered: String?
+    /// Prompts sent through `agent.prompt`, as the agent records them: trimmed.
+    private var prompted: [(text: String, ms: UInt64)] = []
 
     private init(audience: Audience) {
         self.audience = audience
+        answered = audience == .owner ? Self.answeredAtLaunch : nil
     }
 
     var askID: String { audience == .owner ? "call_ask_merge" : "call_ask_bench" }
@@ -118,6 +124,14 @@ final class ChatMockConversation: @unchecked Sendable {
         }
     }
 
+    /// `agent.prompt` (owner): the agent submits the prompt and records it trimmed, as pi
+    /// does, so the next page carries it as a new turn.
+    func prompt(id: String, params: [String: Any]) -> String {
+        let text = (params["text"] as? String ?? "").trimmingCharacters(in: .whitespacesAndNewlines)
+        lock.withLock { prompted.append((text: text, ms: Self.ms(Date()))) }
+        return Self.encode(id: id, result: ["type": "agent_prompted", "delivery": "submitted"])
+    }
+
     // MARK: The conversation
 
     /// Older filler turns first (so there is history to page in), then the mockup's turns.
@@ -136,6 +150,9 @@ final class ChatMockConversation: @unchecked Sendable {
             ]
         }
         turns += audience == .owner ? ownerTurns() : guestTurns()
+        for (index, sent) in prompted.enumerated() {
+            turns.append([Self.entry("sent\(index)u", sent.ms, ["kind": "user", "text": sent.text, "author": "owner"])])
+        }
         return turns
     }
 
@@ -313,7 +330,7 @@ struct ChatMockTransport: HerdrTransport {
         case "agent.answer":
             return ChatMockConversation.owner.answer(id: id, params: params)
         case "agent.prompt":
-            return #"{"id":"\#(id)","result":{"type":"agent_prompted","delivery":"submitted"}}"#
+            return ChatMockConversation.owner.prompt(id: id, params: params)
         default:
             return try await base.roundTrip(requestLine)
         }
