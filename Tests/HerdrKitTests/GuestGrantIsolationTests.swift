@@ -50,5 +50,37 @@ final class GuestGrantIsolationTests: XCTestCase {
         // The saved share keeps its shape: the renamed one round-trips through the store's JSON.
         let saved = try JSONDecoder().decode(GuestAccess.self, from: JSONEncoder().encode(renamed))
         XCTAssertEqual(saved, renamed)
+
+        // A projection without terminal_id lists the agent by its pane id: still this share.
+        let byPane = GuestAccess(guestID: "g1", guestName: "guest", machineLabel: "Host",
+                                 ownerName: "Owner", agentName: "llm-opt", agentTarget: "w1:p1",
+                                 endpoint: FakeHost().endpoint, acceptedAt: Date(timeIntervalSince1970: 1))
+        let paneOnly = try listing(#"[{"pane_id":"w1:p1","name":"llm-new"}]"#)
+        XCTAssertNil(paneOnly.first?.terminalID)
+        XCTAssertEqual(byPane.renamed(listing: paneOnly)?.agentName, "llm-new")
+        XCTAssertNil(try byPane.renamed(listing: listing(#"[{"pane_id":"w1:p1","name":"llm-opt"}]"#)))
+        XCTAssertNil(try byPane.renamed(listing: listing(#"[{"pane_id":"w1:p2","name":"llm-new"}]"#)))
+        // The grant names the pane while the host also reports a distinct terminal id.
+        XCTAssertEqual(try byPane.renamed(listing: listing(
+            #"[{"terminal_id":"term_9","pane_id":"w1:p1","name":"llm-new"}]"#))?.agentName, "llm-new")
+        XCTAssertTrue(byPane.isSharedAgent(try XCTUnwrap(paneOnly.first)))
+        XCTAssertFalse(access.isSharedAgent(try XCTUnwrap(elsewhere.first)))
+    }
+
+    /// Between the owner renaming the agent and the next home poll the saved name is
+    /// stale: a guest's gram.post addresses the agent by the name the pane's listing has.
+    func testAGuestGramPostAddressesTheListedName() throws {
+        let access = GuestAccess(guestID: "g1", guestName: "guest", machineLabel: "Host",
+                                 ownerName: "Owner", agentName: "llm-opt", agentTarget: "term_1",
+                                 endpoint: FakeHost().endpoint, acceptedAt: Date(timeIntervalSince1970: 1))
+        func agent(_ json: String) throws -> AgentInfo {
+            try JSONDecoder().decode(AgentInfo.self, from: Data(json.utf8))
+        }
+        XCTAssertEqual(access.liveAgentName(listed: try agent(
+            #"{"terminal_id":"term_1","pane_id":"w1:p1","name":"llm-new"}"#)), "llm-new")
+        // No listing yet, or one without a name: the saved name.
+        XCTAssertEqual(access.liveAgentName(listed: nil), "llm-opt")
+        XCTAssertEqual(access.liveAgentName(listed: try agent(#"{"pane_id":"w1:p1"}"#)), "llm-opt")
+        XCTAssertEqual(access.liveAgentName(listed: try agent(#"{"pane_id":"w1:p1","name":""}"#)), "llm-opt")
     }
 }

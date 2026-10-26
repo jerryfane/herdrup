@@ -324,8 +324,9 @@ struct GuestHomeView: View {
             let agents = try await client.agentList()
             // The host already lists only the shared agent; the app still shows nothing
             // else, so a host bug cannot reveal the owner's other agents.
-            // Matched by the grant's terminal id, else by name (the projection may omit it).
-            let shared = agents.first { $0.terminalID == access.agentTarget }
+            // Matched by the grant's terminal or pane id, else by name (the projection may
+            // omit terminal_id).
+            let shared = agents.first(where: access.isSharedAgent)
                 ?? agents.first { $0.name == access.agentName }
             status = .live(shared.map { AgentRow(info: $0) })
             // The owner renamed the agent: the share follows it, saved for every screen.
