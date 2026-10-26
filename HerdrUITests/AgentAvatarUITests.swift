@@ -12,18 +12,22 @@ final class AgentAvatarUITests: XCTestCase {
         app.descendants(matching: .any).matching(identifier: "agent-avatar-\(id)").firstMatch
     }
 
-    /// Whether `bubble` wears the `id` avatar: the bubble row draws it beside the bubble, on
-    /// its left and bottom-aligned with it, so the Agents list and Gram's header stack can't
-    /// stand in for it.
+    /// Whether `bubble` wears the `id` avatar. A sender's run of bubbles shares one avatar,
+    /// drawn in the left gutter beside the run's LAST bubble, so the bubble's avatar is the
+    /// first gutter avatar at or below the bubble's bottom. The Agents list and Gram's
+    /// header stack sit elsewhere and can't stand in for it.
     private func bubble(_ bubble: XCUIElement, wears id: String, in app: XCUIApplication,
                         timeout: TimeInterval = 10) -> Bool {
+        let avatars = app.descendants(matching: .any)
+            .matching(NSPredicate(format: "identifier BEGINSWITH %@", "agent-avatar-"))
         let deadline = Date().addingTimeInterval(timeout)
         repeat {
             let frame = bubble.frame
-            let candidates = app.descendants(matching: .any).matching(identifier: "agent-avatar-\(id)")
-            if candidates.allElementsBoundByIndex.contains(where: {
-                $0.frame.maxX <= frame.minX + 1 && abs($0.frame.maxY - frame.maxY) < 4
-            }) { return true }
+            let gutter = avatars.allElementsBoundByIndex
+                .map { (id: $0.identifier, frame: $0.frame) }
+                .filter { $0.frame.maxX <= frame.minX + 1 && $0.frame.maxY >= frame.maxY - 4 }
+                .min { $0.frame.maxY < $1.frame.maxY }
+            if gutter?.id == "agent-avatar-\(id)" { return true }
             RunLoop.current.run(until: Date().addingTimeInterval(0.25))
         } while Date() < deadline
         return false
