@@ -5,6 +5,7 @@ import UIKit
 import SwiftTerm
 import GameController
 import HerdrKit
+import os
 
 /// One-shot claim gate: `claim()` returns true to EXACTLY ONE caller, so a
 /// `CheckedContinuation` raced between two tasks (a read vs a timeout) is resumed at
@@ -129,9 +130,13 @@ struct LiveTerminalView: UIViewRepresentable {
     /// Reports whether the pane is parked at its newest output. Invoked ONLY when
     /// the value changes, so it cannot re-render SwiftUI on every scroll frame.
     var onTailStateChange: (Bool) -> Void = { _ in }
-    /// Reports whether an older page of history is loading (the host shows
-    /// `TerminalHistoryLoadingCapsule`). Invoked only when the value changes.
-    var onHistoryLoadingChange: (Bool) -> Void = { _ in }
+    /// Reports what the history capsule at the top should show (see
+    /// `TerminalHistoryCapsule`): an older page loading, the offer to load one, or nothing.
+    /// Invoked only when the value changes.
+    var onHistoryPagingChange: (TerminalHistoryPaging) -> Void = { _ in }
+    /// Bumped by the host when the reader taps "Load earlier output": each increment
+    /// requests one page, compared like `jumpToTailToken`.
+    var loadEarlierHistoryToken: Int = 0
     /// The host's CURRENT belief about tail state, used to seed a fresh Coordinator on
     /// a remount. Without it a `streamGen` remount resets the Coordinator's baseline to
     /// `true` while the host still holds `false`, and the next jump's `atTail: true`
@@ -208,7 +213,8 @@ struct LiveTerminalView: UIViewRepresentable {
         // host's `@State` survives, so defaulting them replays the last jump as a second
         // Ctrl+End and mis-dedupes the tail callback.
         context.coordinator.seedBaselines(jumpToTailToken: jumpToTailToken, atTail: isAtTail,
-                                          userInputToken: userInputToken)
+                                          userInputToken: userInputToken,
+                                          loadEarlierHistoryToken: loadEarlierHistoryToken)
         surface.terminal.getTerminal().preservesScrollbackLayout = true
         context.coordinator.attach(surface)
         return surface
@@ -228,7 +234,7 @@ struct LiveTerminalView: UIViewRepresentable {
         // it every pass rather than only at mount.
         context.coordinator.liveness = liveness
         context.coordinator.onTailStateChange = onTailStateChange
-        context.coordinator.onHistoryLoadingChange = onHistoryLoadingChange
+        context.coordinator.onHistoryPagingChange = onHistoryPagingChange
         // setForeground BEFORE performJumpToTail, deliberately. The jump sends bytes and is
         // now foreground-guarded, and a guard that reads a flag this pass has not yet
         // written is not a guard at all.
@@ -246,6 +252,7 @@ struct LiveTerminalView: UIViewRepresentable {
         terminalView.caretBlinkPaused = !isForeground || scenePhase != .active || Self.steadyCaret
         context.coordinator.directFocusIntended = wantsTerminalKeyFocus && !viewOnly
         context.coordinator.performJumpToTail(ifTokenChanged: jumpToTailToken)
+        context.coordinator.loadEarlierHistory(ifTokenChanged: loadEarlierHistoryToken)
         // Before the focus decision below: a host-delivered keycap is the user acting
         // on this pane, so it must drop a retained frame at once.
         context.coordinator.noteHostInput(ifTokenChanged: userInputToken)
@@ -1035,6 +1042,13 @@ struct LiveTerminalView: UIViewRepresentable {
         static let historyScrollbackCap = 20_000
         /// How long a page that failed in transit waits before the next scroll may retry it.
         static let historyRetryDelay: Duration = .seconds(2)
+        /// How long the offset must rest before a stop near the top retries a page that
+        /// the moving scroll could not start.
+        static let historySettleDelay: Duration = .milliseconds(300)
+        #if DEBUG
+        /// The contentOffset observer's paging diagnostics (see `observeContentOffset`).
+        static let historyLog = Logger(subsystem: "herdrup", category: "terminal-history")
+        #endif
 
         /// The `pane.history` token for the rows above the oldest one this emulator holds:
         /// from the latest keyframe, then from each page. nil = nothing (more) to load.
@@ -1044,25 +1058,141 @@ struct LiveTerminalView: UIViewRepresentable {
         /// a page requested before that belongs to history that is no longer here.
         private var historyGeneration = 0
         private var historyRetryAt: ContinuousClock.Instant?
-        /// See `LiveTerminalView.onHistoryLoadingChange`. Refreshed by `updateUIView`.
-        var onHistoryLoadingChange: ((Bool) -> Void)?
-        private var historyLoading = false {
+        /// `pane.history` request in flight.
+        private var historyLoading = false
+        /// Whether reaching the top pages by geometry alone, whatever moved it. A Mac wheel or
+        /// trackpad scroll moves `contentOffset` without the `isDragging`/`isDecelerating` a
+        /// finger sets, so a gesture-only gate never paged there. Disarmed on every reset,
+        /// because seeding writes offset 0 before settling at the tail and must not fetch a
+        /// page nobody asked for; armed once the seed rests at the tail more than a screen
+        /// below the top (from there only the reader can bring the top near), by a finger
+        /// scroll, or by the "Load earlier output" tap.
+        private var historyArmed = false
+        /// The seed has come to rest at the tail since the last reset. Until then a pane near
+        /// the top is the seed passing through, and offers nothing.
+        private var historySettled = false
+        /// A check that runs once the offset stops near the top (see `scheduleHistorySettleCheck`).
+        private var historySettleTask: Task<Void, Never>?
+        /// See `LiveTerminalView.onHistoryPagingChange`. Refreshed by `updateUIView`.
+        var onHistoryPagingChange: ((TerminalHistoryPaging) -> Void)?
+        /// nil until the first publish, so a `streamGen` remount always replaces whatever the
+        /// host showed for the coordinator it replaced.
+        private var historyPaging: TerminalHistoryPaging? {
             didSet {
-                guard historyLoading != oldValue else { return }
-                let publish = onHistoryLoadingChange, loading = historyLoading
-                DispatchQueue.main.async { publish?(loading) }
+                guard historyPaging != oldValue, let state = historyPaging else { return }
+                let publish = onHistoryPagingChange
+                DispatchQueue.main.async { publish?(state) }
             }
         }
+        /// Last `loadEarlierHistoryToken` acted on; seeded like the jump token.
+        private var lastLoadEarlierHistoryToken = 0
 
         /// A keyframe replaced the history: whatever page was in flight is void, and paging
         /// restarts from this keyframe's cursor (nil = it offers none).
         private func adoptHistoryCursor(_ cursor: String?) {
             historyPageTask?.cancel()
             historyPageTask = nil
+            historySettleTask?.cancel()
+            historySettleTask = nil
             historyGeneration &+= 1
             historyRetryAt = nil
             historyLoading = false
+            historyArmed = false
+            historySettled = false
             historyCursor = cursor
+            historyPaging = .hidden
+            // Judged once the seed this reset feeds has landed: a pane that cannot scroll
+            // never moves its offset, so no observation would judge it.
+            Task { @MainActor [weak self] in self?.pageHistoryOnScroll(userDriven: false) }
+        }
+
+        /// The contentOffset observer's paging step; `userDriven` is a finger's drag or coast.
+        ///
+        /// Judged on the view's geometry NOW, not the offset the observation captured: the
+        /// observer hops to the main actor, so a reset's seed queues hops that carry its own
+        /// passing offset 0, and a hop queued before a reset can run after it. Read live, both
+        /// see the settled seed, which is at the tail.
+        @MainActor
+        private func pageHistoryOnScroll(userDriven: Bool) {
+            guard !stopped, let view else { return }
+            let offsetY = view.contentOffset.y, viewportHeight = view.bounds.height
+            if userDriven { historyArmed = true }
+            if historyArmed {
+                loadOlderHistoryIfNeeded(offsetY: offsetY, viewportHeight: viewportHeight)
+                // Near the top with nothing started (a retry delay, say): try again once the
+                // offset rests, since a reader parked at the top produces no more changes.
+                if historyPageTask == nil, offsetY < viewportHeight {
+                    scheduleHistorySettleCheck(after: Self.historySettleDelay)
+                }
+            } else if offsetY >= view.contentSize.height - viewportHeight
+                        - CGFloat(max(cellPixels().height, 2)) / 2 {
+                // At the tail (or nothing to scroll): the seed has settled. Armed AFTER the
+                // check above, so this report itself cannot page; and not at all within a
+                // screen of the top, where the capsule offers the page instead, so nothing is
+                // fetched before anyone asks.
+                historySettled = true
+                if offsetY >= viewportHeight { historyArmed = true }
+            }
+            refreshHistoryPaging()
+        }
+
+        /// Pages once the offset has stopped near the top. One check pending at a time; it
+        /// waits out a gesture still in progress and any retry delay.
+        @MainActor
+        private func scheduleHistorySettleCheck(after delay: Duration) {
+            guard !stopped, historySettleTask == nil, historyCursor != nil else { return }
+            historySettleTask = Task { @MainActor [weak self] in
+                try? await Task.sleep(for: delay)
+                guard let self, !Task.isCancelled else { return }
+                self.historySettleTask = nil
+                guard self.historyArmed, self.historyPageTask == nil, let view = self.view,
+                      view.contentOffset.y < view.bounds.height else { return }
+                if view.isTracking || view.isDecelerating {
+                    self.scheduleHistorySettleCheck(after: Self.historySettleDelay)
+                    return
+                }
+                if let retryAt = self.historyRetryAt, ContinuousClock.now < retryAt {
+                    self.scheduleHistorySettleCheck(after: retryAt - ContinuousClock.now)
+                    return
+                }
+                self.loadOlderHistoryIfNeeded(offsetY: view.contentOffset.y,
+                                              viewportHeight: view.bounds.height)
+                self.refreshHistoryPaging()
+            }
+        }
+
+        /// The reader tapped "Load earlier output": page now, past any retry delay, and let
+        /// geometry page from here on. Not annotated `@MainActor`, like `performJumpToTail`:
+        /// `updateUIView` calls it on the main thread.
+        func loadEarlierHistory(ifTokenChanged token: Int) {
+            guard token != lastLoadEarlierHistoryToken else { return }
+            lastLoadEarlierHistoryToken = token
+            MainActor.assumeIsolated {
+                guard !stopped, let view else { return }
+                historyArmed = true
+                historyRetryAt = nil
+                loadOlderHistoryIfNeeded(offsetY: view.contentOffset.y, viewportHeight: view.bounds.height)
+                refreshHistoryPaging()
+            }
+        }
+
+        /// Publishes what the capsule shows. Offered when a cursor remains, nothing is loading,
+        /// and the reader is within one screen of the top of the scrollback once the seed has
+        /// settled (or a scroll armed paging): a pane too short to arm itself, a wheel resting
+        /// at the top, a page that failed. Before that it is a seed passing through the top.
+        @MainActor
+        private func refreshHistoryPaging() {
+            if historyLoading {
+                historyPaging = .loading
+                return
+            }
+            guard !stopped, historyCursor != nil, let view,
+                  !view.getTerminal().isCurrentBufferAlternate else {
+                historyPaging = .hidden
+                return
+            }
+            let nearTop = view.contentOffset.y < view.bounds.height
+            historyPaging = (historyArmed || historySettled) && nearTop ? .offered : .hidden
         }
 
         /// Called on every scroll position change: within one screen of the top of the
@@ -1075,6 +1205,7 @@ struct LiveTerminalView: UIViewRepresentable {
             if let retryAt = historyRetryAt, ContinuousClock.now < retryAt { return }
             let client = self.client, pane = self.paneID, generation = historyGeneration
             historyLoading = true
+            refreshHistoryPaging()
             historyPageTask = Task { @MainActor [weak self] in
                 let result: Result<PaneHistoryPage, Error>
                 do {
@@ -1087,6 +1218,11 @@ struct LiveTerminalView: UIViewRepresentable {
                 self.historyPageTask = nil
                 self.historyLoading = false
                 self.applyHistoryPage(result)
+                // A page that moved nothing (no rows, a failure) leaves a reader parked at
+                // the top with no offset change to page the next one.
+                self.scheduleHistorySettleCheck(
+                    after: self.historyRetryAt == nil ? Self.historySettleDelay : Self.historyRetryDelay)
+                self.refreshHistoryPaging()
             }
         }
 
@@ -1209,10 +1345,12 @@ struct LiveTerminalView: UIViewRepresentable {
         /// Adopt the host's current jump token and tail belief WITHOUT acting on either.
         /// Called once per Coordinator, before `attach`, so a `streamGen` remount neither
         /// re-sends a jump it already performed nor swallows the next tail callback.
-        func seedBaselines(jumpToTailToken: Int, atTail: Bool, userInputToken: Int) {
+        func seedBaselines(jumpToTailToken: Int, atTail: Bool, userInputToken: Int,
+                           loadEarlierHistoryToken: Int) {
             lastJumpToTailToken = jumpToTailToken
             lastReportedAtTail = atTail
             lastUserInputToken = userInputToken
+            lastLoadEarlierHistoryToken = loadEarlierHistoryToken
         }
 
         /// Last host-input token acted on, seeded like the jump token so a `streamGen`
@@ -1447,6 +1585,7 @@ struct LiveTerminalView: UIViewRepresentable {
                     coverInstalls: { [weak surface] in surface?.coverInstallCount ?? 0 },
                     lastCoverMilliseconds: { [weak surface] in surface?.lastCoverMilliseconds ?? 0 },
                     isForeground: { [weak self] in self?.foreground ?? false })
+                HistoryPagingDriver.register(view)
             }
             #endif
             // THIS coordinator owns the grid: SwiftTerm must propose, never commit.
@@ -1588,6 +1727,10 @@ struct LiveTerminalView: UIViewRepresentable {
             // forwarded tap can never leak mouse bytes to the PTY.
             let pan = UIPanGestureRecognizer(target: self, action: #selector(handleScrollPan(_:)))
             pan.delegate = self
+            // On the Mac (Designed for iPad) a trackpad or wheel arrives as scroll events,
+            // which a pan recognizer ignores unless it opts in; without this a Claude Code
+            // pane could not be scrolled there at all.
+            if Self.indirectScrollInput { pan.allowedScrollTypesMask = .all }
             view.addGestureRecognizer(pan)
             scrollPan = pan
             // Two-finger tap jumps to the live tail. Every SwiftTerm recognizer is
@@ -3567,7 +3710,6 @@ struct LiveTerminalView: UIViewRepresentable {
                 // would turn a diagnostic nicety into a crash on whatever thread UIKit chose.
                 let offsetY = scroll.contentOffset.y
                 let maxOffset = scroll.contentSize.height - scroll.bounds.height
-                let viewportHeight = scroll.bounds.height
                 // USER-DRIVEN MOTION ONLY, and read HERE, synchronously, while the scroll is
                 // actually happening. This is the whole correction to the previous version.
                 //
@@ -3587,6 +3729,13 @@ struct LiveTerminalView: UIViewRepresentable {
                 // the ordering question the touch-down approach would have raised: nothing here
                 // depends on whether a gesture delegate runs before UIScrollView updates its state.
                 let userDriven = scroll.isDragging || scroll.isDecelerating
+                #if DEBUG
+                // Step 0 of the Mac paging report: which flags a trackpad or wheel scroll sets.
+                // Only near the top, so a busy pane's auto-follow cannot flood the log.
+                if offsetY < scroll.bounds.height {
+                    Self.historyLog.debug("offset \(Double(offsetY), privacy: .public) of \(Double(maxOffset), privacy: .public) tracking=\(scroll.isTracking) dragging=\(scroll.isDragging) decelerating=\(scroll.isDecelerating)")
+                }
+                #endif
                 Task { @MainActor [weak self] in
                     guard let self, !self.stopped else { return }
                     // WHEN THE CONTENT LAST MOVED UNDER A FINGER, which is the signal the focus-tap
@@ -3594,11 +3743,10 @@ struct LiveTerminalView: UIViewRepresentable {
                     if userDriven { self.lastContentMotion = CACurrentMediaTime() }
                     self.publishTopRowProbe()
                     self.prediction.viewScrolled()   // guesses stand only on the live screen
-                    // Only a finger reaching the top pages. Seeding writes contentOffset 0
-                    // before it settles at the tail, and that must not fetch history nobody asked for.
-                    if userDriven {
-                        self.loadOlderHistoryIfNeeded(offsetY: offsetY, viewportHeight: viewportHeight)
-                    }
+                    // Geometry pages once armed, whatever moved the offset (a Mac wheel or
+                    // trackpad sets neither flag); a finger always may. Seeding writes offset 0
+                    // before it settles at the tail while disarmed, so it fetches nothing.
+                    self.pageHistoryOnScroll(userDriven: userDriven)
                     // HALF a cell, matching SwiftTerm's own auto-follow threshold rather than a
                     // number I picked. syncYDispFromContentOffset re-engages auto-follow only within
                     // max(contentOffsetTolerance, cellDimension.height / 2) (iOSTerminalView.swift
@@ -3621,6 +3769,8 @@ struct LiveTerminalView: UIViewRepresentable {
 
         /// Accumulated vertical drag since the last emitted scroll tick.
         private var scrollAccum: CGFloat = 0
+        /// Running as "Designed for iPad" on a Mac, where scrolling is trackpad/wheel input.
+        static let indirectScrollInput = ProcessInfo.processInfo.isiOSAppOnMac
         /// The alt-screen scroll pan recognizer, disabled on teardown so a drag can't
         /// send bytes to a pane that has exited/been replaced.
         private var scrollPan: UIPanGestureRecognizer?
@@ -3729,6 +3879,16 @@ struct LiveTerminalView: UIViewRepresentable {
                 scrollAccum = min(max(scrollAccum, -maxCarry), maxCarry)
                 emitScroll(up: ticks > 0, count: count,
                            at: gr.location(in: view), term: term)
+            case .ended where Self.indirectScrollInput:
+                // A wheel notch or a short trackpad scroll is a whole gesture on the Mac and
+                // can end short of one line of travel; round its remainder to one tick
+                // rather than dropping it, so every notch scrolls. Touch keeps its threshold.
+                scrollAccum += gr.translation(in: view).y
+                let line = max(1, paneFont.lineHeight)
+                if abs(scrollAccum) >= line / 2 {
+                    emitScroll(up: scrollAccum > 0, count: 1, at: gr.location(in: view), term: term)
+                }
+                scrollAccum = 0
             default:
                 break
             }

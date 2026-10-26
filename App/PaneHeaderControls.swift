@@ -120,26 +120,60 @@ struct TerminalTextSizeMenuSection: View {
     }
 }
 
-/// Shown at the top of the terminal while an older page of its history loads, in the words
-/// and ink of Gram's "Loading older messages…" sentinel, on a surface capsule so it reads
-/// over terminal output. Not a control: the page lands by itself, and touches pass through
-/// to the terminal, which keeps scrolling underneath.
-struct TerminalHistoryLoadingCapsule: View {
-    var identifier = "terminal-history-loading"
+/// What the capsule at the top of a terminal shows (see `TerminalHistoryCapsule`).
+enum TerminalHistoryPaging: Equatable {
+    case hidden
+    /// Older history exists above the top and nothing is loading: tap to load a page.
+    case offered
+    case loading
+}
 
-    var body: some View {
-        HStack(spacing: 8) {
-            ProgressView().controlSize(.small).tint(Palette.textFaint)
-            Text("Loading earlier output…")
+/// Shown at the top of the terminal while it is within a screen of the top of its history
+/// and older history exists. Loading, it is a status in the words and ink of Gram's "Loading
+/// older messages…" sentinel, and touches pass through to the terminal, which keeps scrolling
+/// underneath. Otherwise it is a "Load earlier output" control, Chat's Retry for a terminal:
+/// the way to the next page when no scroll will reach it (a wheel resting at the top, a pane
+/// too short to scroll, keyboard or VoiceOver). Same surface capsule in both states, so the
+/// switch does not jump.
+struct TerminalHistoryCapsule: View {
+    let state: TerminalHistoryPaging
+    /// Identifier prefix: `<prefix>-history-loading` and `<prefix>-load-earlier`.
+    var identifierPrefix = "terminal"
+    let loadEarlier: () -> Void
+
+    @ViewBuilder var body: some View {
+        switch state {
+        case .hidden:
+            EmptyView()
+        case .loading:
+            capsule {
+                ProgressView().controlSize(.small).tint(Palette.textFaint)
+                Text("Loading earlier output…")
+            }
+            .foregroundStyle(Palette.textFaint)
+            .allowsHitTesting(false)
+            .accessibilityElement(children: .combine)
+            .accessibilityIdentifier("\(identifierPrefix)-history-loading")
+        case .offered:
+            Button(action: loadEarlier) {
+                capsule {
+                    Image(systemName: "arrow.up.to.line").font(.system(size: 11, weight: .semibold))
+                    Text("Load earlier output")
+                }
+                .foregroundStyle(Palette.textDim)
+            }
+            .buttonStyle(.plain)
+            .accessibilityLabel(Text("Load earlier output"))
+            .accessibilityIdentifier("\(identifierPrefix)-load-earlier")
         }
-        .font(Typography.app(12))
-        .foregroundStyle(Palette.textFaint)
-        .padding(.horizontal, 12).padding(.vertical, 7)
-        .background(Palette.surface).clipShape(Capsule())
-        .overlay(Capsule().strokeBorder(Palette.hairline, lineWidth: 1))
-        .padding(.top, 8)
-        .allowsHitTesting(false)
-        .accessibilityElement(children: .combine)
-        .accessibilityIdentifier(identifier)
+    }
+
+    private func capsule<Content: View>(@ViewBuilder _ content: () -> Content) -> some View {
+        HStack(spacing: 8) { content() }
+            .font(Typography.app(12))
+            .padding(.horizontal, 12).padding(.vertical, 7)
+            .background(Palette.surface).clipShape(Capsule())
+            .overlay(Capsule().strokeBorder(Palette.hairline, lineWidth: 1))
+            .padding(.top, 8)
     }
 }
