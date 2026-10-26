@@ -413,6 +413,9 @@ struct ChatView: View {
     /// `(index, total, capped)`: `capped` when the matches stop at `TranscriptSearch.matchCap`.
     var onFindResult: (Int, Int, Bool) -> Void = { _, _, _ in }
 
+    /// Regular width (iPad, Mac) gets the resizable column; it changes on rotation or a window
+    /// resize, never per keystroke.
+    @Environment(\.horizontalSizeClass) private var sizeClass
     @Environment(\.accessibilityReduceMotion) private var reduceMotion
     @AppStorage(ChatTextSize.storageKey) private var chatFontSize = ChatTextSize.defaultPoints
     @AppStorage(ChatColumnWidth.storageKey) private var storedColumnWidth = ChatColumnWidth.defaultWidth
