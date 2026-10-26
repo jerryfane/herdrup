@@ -131,6 +131,8 @@ struct GuestPaneView: View {
                              onOpenTerminal: { tab = .terminal },
                              findRequest: findRequest,
                              onFindResult: { index, total, capped in findMatches = (index, total, capped) })
+                    // Typing redraws this page; the chat skips it (`ChatView ==`).
+                    .equatable()
                 }
                 if showingGram {
                     GuestGramList(client: client, access: access, model: gram)
