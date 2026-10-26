@@ -1438,15 +1438,6 @@ public actor HerdrClient {
         return AgentAvatarImageData(mime: result.mime, data: data)
     }
 
-    /// A daemon that predates `method` cannot deserialize the request: serde answers
-    /// `invalid_request` / "unknown variant `<method>`". Some transports report a plain
-    /// method-not-found code instead.
-    static func isUnknownMethod(_ error: APIError, _ method: String) -> Bool {
-        if error.code == "method_not_found" || error.code == "unknown_method" { return true }
-        let lowered = error.message.lowercased()
-        return error.code == "invalid_request" && lowered.contains("unknown variant") && lowered.contains(method)
-    }
-
     /// `agent.archive` params. `reason`/`by`/`force` are OMITTED when nil/false so a plain
     /// archive sends `{ target }` and matches the server's optional/skip-if-none.
     struct AgentArchiveParams: Encodable {
