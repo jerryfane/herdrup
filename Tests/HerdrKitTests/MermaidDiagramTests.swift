@@ -51,4 +51,64 @@ final class MermaidDiagramTests: XCTestCase {
         XCTAssertTrue(doc.contains("default-src 'none'"))
         XCTAssertTrue(doc.contains("background: #13162A"))
     }
+
+    /// The disk cache's round trip: whatever scale the PNG was rasterised at, it reloads at
+    /// the size it was shown at (a 3× raster of a 320 pt diagram is 960 px and reloads at
+    /// scale 3, so 320 pt again; read at the screen's scale alone, a 1× raster would have
+    /// come back at a third of its size).
+    func testStoredRenderReloadsAtTheSizeItWasShownAt() throws {
+        let stored = MermaidDiagram.StoredRender(svg: "<svg/>", width: 320, height: 180)
+        let decoded = try JSONDecoder().decode(MermaidDiagram.StoredRender.self,
+                                               from: JSONEncoder().encode(stored))
+        XCTAssertEqual(decoded, stored)
+        for pixels in [320, 640, 960] {
+            let scale = try XCTUnwrap(decoded.scale(pixelWidth: pixels))
+            XCTAssertEqual(Double(pixels) / scale, 320, accuracy: 0.0001)
+        }
+        XCTAssertEqual(decoded.scale(pixelWidth: 960), 3)
+        XCTAssertNil(decoded.scale(pixelWidth: 0), "An empty PNG is not a render")
+        XCTAssertNil(decoded.scale(pixelWidth: 100_000), "A PNG that does not belong to this size is not reused")
+        XCTAssertNil(MermaidDiagram.StoredRender(svg: "", width: 0, height: 0).scale(pixelWidth: 960))
+    }
+
+    /// Only the diagram's own failures keep it on its code for the session; a broken page, or
+    /// a timeout before mermaid had the diagram, leaves it free to try again.
+    func testOnlyTheDiagramsOwnFailuresAreRemembered() {
+        XCTAssertTrue(MermaidDiagram.failureIsTheDiagrams(.diagram, phase: .drawing))
+        XCTAssertTrue(MermaidDiagram.failureIsTheDiagrams(.timedOut, phase: .drawing))
+        XCTAssertFalse(MermaidDiagram.failureIsTheDiagrams(.timedOut, phase: .settingUp))
+        XCTAssertFalse(MermaidDiagram.failureIsTheDiagrams(.page, phase: .drawing))
+        XCTAssertFalse(MermaidDiagram.failureIsTheDiagrams(.page, phase: .settingUp))
+    }
+}
+
+final class MermaidPageSlotTests: XCTestCase {
+    private final class Page {}
+
+    /// A page build that a timed-out render started must never install itself after the
+    /// renderer replaced the page, neither over nothing nor over the newer build's page.
+    func testABuildStartedBeforeARecycleNeverInstalls() {
+        var slot = MermaidPageSlot<Page>()
+        let staleToken = slot.lease()
+        XCTAssertTrue(slot.isCurrent(staleToken))
+
+        slot.recycle()  // the render that started the build timed out
+        XCTAssertFalse(slot.isCurrent(staleToken))
+
+        let freshToken = slot.lease()
+        let fresh = Page()
+        XCTAssertTrue(slot.install(fresh, token: freshToken))
+        XCTAssertFalse(slot.install(Page(), token: staleToken), "The stale build finishing late")
+        XCTAssertTrue(slot.page === fresh)
+    }
+
+    func testRecycleDropsTheCurrentPageAndHandsItBack() {
+        var slot = MermaidPageSlot<Page>()
+        let page = Page()
+        let token = slot.lease()
+        XCTAssertTrue(slot.install(page, token: token))
+        XCTAssertTrue(slot.recycle() === page)
+        XCTAssertNil(slot.page)
+        XCTAssertNil(slot.recycle())
+    }
 }

@@ -79,3 +79,90 @@ public enum MermaidDiagram {
         """
     }
 }
+
+extension MermaidDiagram {
+    /// What the disk cache keeps beside a render's PNG: the SVG for the viewer and the size
+    /// the image is shown at, in points. The PNG's own pixel size alone cannot say how big
+    /// to draw it, because the raster's scale is the page's, not necessarily today's screen.
+    public struct StoredRender: Codable, Equatable, Sendable {
+        public let svg: String
+        public let width: Double
+        public let height: Double
+
+        public init(svg: String, width: Double, height: Double) {
+            self.svg = svg
+            self.width = width
+            self.height = height
+        }
+
+        /// The scale to load a PNG `pixelWidth` pixels wide at, so it draws `width` points
+        /// wide again; nil when the pair cannot be right (an empty or mismatched file).
+        public func scale(pixelWidth: Int) -> Double? {
+            guard width > 0, pixelWidth > 0 else { return nil }
+            let scale = Double(pixelWidth) / width
+            return scale >= 0.5 && scale <= 8 ? scale : nil
+        }
+    }
+
+    /// Where a render stopped when it failed.
+    public enum RenderPhase: Sendable {
+        /// Still building the page (loading mermaid, the network block, the theme).
+        case settingUp
+        /// The page was ready and mermaid had this diagram.
+        case drawing
+    }
+
+    /// How a render failed.
+    public enum RenderFailure: Sendable {
+        /// Mermaid rejected the source or drew nothing.
+        case diagram
+        /// The page broke under it (WebContent crash, page replaced, setup failed).
+        case page
+        /// It ran out of time.
+        case timedOut
+    }
+
+    /// Whether a failure is the diagram's own, so it is shown as code for the rest of the
+    /// session instead of being tried again. A broken page, or a timeout before mermaid had
+    /// the diagram, says nothing about the diagram: it gets another try on a fresh page.
+    public static func failureIsTheDiagrams(_ failure: RenderFailure, phase: RenderPhase) -> Bool {
+        switch failure {
+        case .diagram: return true
+        case .page: return false
+        case .timedOut: return phase == .drawing
+        }
+    }
+}
+
+/// The renderer's one page, apart from WebKit: which page is current, and whether a page
+/// still being built may become it. Replacing the page (`recycle`) invalidates every build
+/// in flight, so a build that a timed-out render started can never install itself later
+/// over the page a newer render built.
+public struct MermaidPageSlot<Page: AnyObject> {
+    public private(set) var page: Page?
+    private var generation = 0
+
+    public init() {}
+
+    /// The token a new build installs its page with.
+    public func lease() -> Int { generation }
+
+    /// Whether a build holding `token` is still wanted.
+    public func isCurrent(_ token: Int) -> Bool { token == generation }
+
+    /// Makes `page` the current page if its build is still wanted; false otherwise.
+    @discardableResult
+    public mutating func install(_ page: Page, token: Int) -> Bool {
+        guard isCurrent(token) else { return false }
+        self.page = page
+        return true
+    }
+
+    /// Drops the current page and invalidates every build in flight; returns the old page.
+    @discardableResult
+    public mutating func recycle() -> Page? {
+        generation &+= 1
+        defer { page = nil }
+        return page
+    }
+}

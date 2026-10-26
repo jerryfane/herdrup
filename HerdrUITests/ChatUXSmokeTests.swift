@@ -149,9 +149,10 @@ final class ChatUXSmokeTests: XCTestCase {
         XCTAssertEqual(rows.map(\.exists), [true, true, true])
     }
 
-    /// #523 item 1: a closed ```mermaid fence is drawn as a diagram (not its code), tapping it
-    /// opens the zoomable viewer, "Show code" swaps in the source, and search still finds
-    /// words that are only in the diagram source.
+    /// #523 item 1: a closed ```mermaid fence is drawn as a diagram (not its code), rasterised
+    /// sharp for this screen; tapping it opens the zoomable viewer, "Show code" swaps in the
+    /// source, search still finds words that are only in the diagram source, and after a
+    /// relaunch the diagram comes back from the disk cache at the same size.
     func testMermaidReplyRendersADiagramThatOpensTheViewer() {
         let app = launch(mermaid: true)
         let block = app.descendants(matching: .any)["chat-mermaid"].firstMatch
@@ -163,7 +164,12 @@ final class ChatUXSmokeTests: XCTestCase {
         XCTAssertGreaterThan(image.frame.width, 40, "\(image.frame)")
         XCTAssertGreaterThan(image.frame.height, 40, "\(image.frame)")
         XCTAssertTrue(image.label.hasPrefix("Mermaid diagram, graph TD"), image.label)
-        XCTAssertEqual(image.value as? String, "drawn", "The raster must hold a drawing, not one flat colour")
+        // The image's DEBUG value: "drawn|blank <raster scale>x fresh|disk".
+        let screenScale = Self.screenScale(app)
+        let drawn = "drawn \(screenScale)x "
+        XCTAssertTrue((image.value as? String ?? "").hasPrefix(drawn),
+                      "The raster must hold a drawing at the screen's scale (\(drawn)): \(String(describing: image.value))")
+        let shownSize = image.frame.size
         let code = app.staticTexts.matching(NSPredicate(format: "label CONTAINS %@", "D[Render offscreen]")).firstMatch
         XCTAssertFalse(code.exists, "The diagram source must not be drawn as code")
         record(app, "Mermaid reply drawn as a diagram")
@@ -197,6 +203,25 @@ final class ChatUXSmokeTests: XCTestCase {
         field.typeText("Render offscreen")
         expectation(for: NSPredicate(format: "label == %@", "1/1"), evaluatedWith: app.staticTexts["terminal-find-count"])
         waitForExpectations(timeout: 5)
+
+        // A relaunch draws nothing: the diagram comes back from the disk cache, at the size
+        // it was shown at and still at the screen's scale.
+        app.terminate()
+        let relaunched = launch(mermaid: true)
+        let cachedImage = relaunched.buttons["chat-mermaid-image"].firstMatch
+        XCTAssertTrue(cachedImage.waitForExistence(timeout: 30), relaunched.debugDescription)
+        XCTAssertEqual(cachedImage.value as? String, drawn + "disk")
+        XCTAssertEqual(cachedImage.frame.width, shownSize.width, accuracy: 0.5)
+        XCTAssertEqual(cachedImage.frame.height, shownSize.height, accuracy: 0.5)
+        record(relaunched, "Mermaid diagram from the disk cache after relaunch")
+    }
+
+    /// Pixels per point of this device's screen, from a screenshot of it.
+    private static func screenScale(_ app: XCUIApplication) -> Int {
+        let shot = XCUIScreen.main.screenshot().image
+        let pixels = max(shot.size.width * shot.scale, shot.size.height * shot.scale)
+        let points = max(app.frame.width, app.frame.height)
+        return Int((pixels / max(points, 1)).rounded())
     }
 
     func testSearchRevealsThoughtAndKeepsActiveChat() {

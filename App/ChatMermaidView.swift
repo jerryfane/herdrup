@@ -143,10 +143,11 @@ struct ChatMermaidView: View {
         return CGSize(width: fit.width, height: fit.height)
     }
 
-    /// UI tests read this to tell a drawn diagram from a blank raster; empty in release.
+    /// UI tests read this (`MermaidRenderer.Rendered.probe`): drawn or blank, the raster's
+    /// scale, fresh or from disk. Empty in release.
     private static func drawnProbe(_ rendered: MermaidRenderer.Rendered) -> String {
         #if DEBUG
-        return rendered.looksDrawn ? "drawn" : "blank"
+        return rendered.probe
         #else
         return ""
         #endif

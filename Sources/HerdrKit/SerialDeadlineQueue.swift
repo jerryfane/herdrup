@@ -26,7 +26,18 @@ public final class SerialDeadlineQueue: @unchecked Sendable {
         _ job: @escaping @Sendable () async throws -> T,
         onTimeout: @escaping @Sendable () async -> Void = {}
     ) async throws -> T {
+        try await enqueue(timeout: timeout, job, onTimeout: onTimeout).value
+    }
+
+    /// Appends the job behind the current tail. Synchronous, so the lock is never held
+    /// across a suspension point (and stays legal in async code under Swift 6).
+    private func enqueue<T: Sendable>(
+        timeout: TimeInterval,
+        _ job: @escaping @Sendable () async throws -> T,
+        onTimeout: @escaping @Sendable () async -> Void
+    ) -> Task<T, Error> {
         lock.lock()
+        defer { lock.unlock() }
         let previous = tail
         let current = Task<T, Error> {
             await previous?.value
@@ -38,8 +49,7 @@ public final class SerialDeadlineQueue: @unchecked Sendable {
             }
         }
         tail = Task { _ = try? await current.value }
-        lock.unlock()
-        return try await current.value
+        return current
     }
 
     /// `job`'s result, or `DeadlineExceeded` after `timeout` seconds, whichever comes first.
