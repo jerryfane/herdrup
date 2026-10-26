@@ -67,6 +67,33 @@ final class ChatMarkdownTests: XCTestCase {
         XCTAssertEqual(ChatMarkdown.blocks(""), [])
     }
 
+    /// A closed ```mermaid fence is a diagram the Chat view draws; the source keeps every
+    /// line verbatim (indentation included) because mermaid parses it.
+    func testClosedMermaidFenceIsADiagram() {
+        XCTAssertEqual(ChatMarkdown.blocks("Plan:\n```mermaid\ngraph TD\n  A --> B\n```\nDone."), [
+            .paragraph("Plan:"),
+            .diagram(kind: "mermaid", source: "graph TD\n  A --> B"),
+            .paragraph("Done."),
+        ])
+        XCTAssertEqual(ChatMarkdown.blocks("~~~ Mermaid title\nsequenceDiagram\n~~~"), [
+            .diagram(kind: "mermaid", source: "sequenceDiagram"),
+        ])
+    }
+
+    /// A reply still streaming has no closing fence yet: it stays code until the fence closes,
+    /// so a half-written diagram is never rendered (or shown as a parse error).
+    func testUnclosedMermaidFenceStaysCode() {
+        XCTAssertEqual(ChatMarkdown.blocks("```mermaid\ngraph TD\n  A --> B"), [
+            .code(language: "mermaid", "graph TD\n  A --> B"),
+        ])
+    }
+
+    func testOtherFenceLanguagesStayCode() {
+        XCTAssertEqual(ChatMarkdown.blocks("```mermaidx\ngraph TD\n```"), [.code(language: "mermaidx", "graph TD")])
+        XCTAssertEqual(ChatMarkdown.blocks("```dot\ndigraph { a -> b }\n```"), [.code(language: "dot", "digraph { a -> b }")])
+        XCTAssertEqual(ChatMarkdown.blocks("```\ngraph TD\n```"), [.code(language: nil, "graph TD")])
+    }
+
     func testOrderedListKeepsItsStartNumber() {
         XCTAssertEqual(ChatMarkdown.blocks("3. three\n4. four"), [
             .list(ordered: true, start: 3, items: [ChatMarkdownListItem(text: "three"), ChatMarkdownListItem(text: "four")]),

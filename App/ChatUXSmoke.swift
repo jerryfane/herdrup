@@ -39,6 +39,12 @@ enum ChatUXSmoke {
                             "text": "Copy **this** reply, then *paste* it.\n\n```swift\nlet copied = true\nprint(copied)\n```",
                             "ts_ms": timestamp + 2])
         }
+        // A diagram reply (#523 item 1), only when a test asks for it: its row grows once the
+        // offscreen renderer finishes, which the tail and history-position tests must not see.
+        if ProcessInfo.processInfo.environment["HERDR_CHAT_UX_MERMAID"] == "1" {
+            entries.append(["id": "ux-mermaid", "kind": "reply", "final": true,
+                            "text": "Here is the flow:\n\n```mermaid\ngraph TD\n  A[Request] --> B{Cached?}\n  B -->|yes| C[Show image]\n  B -->|no| D[Render offscreen]\n  D --> C\n```\n\nThat is the whole pipeline.", "ts_ms": timestamp + 2])
+        }
         if responses > 1 {
             entries.append(["id": "ux-incoming", "kind": "reply", "final": true,
                             "text": "Incoming café update after refresh.", "ts_ms": timestamp + 3])

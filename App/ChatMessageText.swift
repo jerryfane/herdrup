@@ -31,7 +31,7 @@ enum ChatMessageText {
                     out += AttributedString(String(repeating: "    ", count: item.depth) + marker)
                     out += inline(item.text)
                 }
-            case .code(_, let code):
+            case .code(_, let code), .diagram(_, let code):
                 var text = AttributedString(code)
                 text.inlinePresentationIntent = .code
                 out += text

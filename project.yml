@@ -67,7 +67,13 @@ targets:
     type: application
     platform: iOS
     sources:
+      # Everything under App/ that is not code is copied into the bundle as a resource,
+      # including the Chat view's bundled mermaid (App/Resources/Mermaid/: mermaid.min.js,
+      # mermaid.html and its MIT licence, #523). The README there records the vendored
+      # version and checksum and is not shipped.
       - path: App
+        excludes:
+          - "Resources/Mermaid/README.md"
       # The Live Activity model (#90), shared verbatim with the widget extension so
       # both encode/decode the same ContentState. Kept out of HerdrKit (which must stay
       # Linux-buildable) and out of App/ (widget can't see App/).
