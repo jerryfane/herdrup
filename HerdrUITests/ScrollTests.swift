@@ -252,10 +252,6 @@ final class ScrollTests: XCTestCase {
             return probe.label.contains("hc-2001")
         }
         XCTAssertTrue(paged, "swiping to the top requested no page (\(probe.label))")
-        // The mock holds the page 2 s; the capsule must show while it is held.
-        let capsule = app.descendants(matching: .any)["terminal-history-loading"]
-        XCTAssertTrue(poll(2, every: 0.1) { capsule.exists },
-                      "the loading capsule never showed while a page was held")
 
         // The first page lands keeping the reader's rows, 500 rows below the new top; jump
         // back to the top rather than swipe through them. Taps while it is held do nothing.
@@ -268,6 +264,12 @@ final class ScrollTests: XCTestCase {
         }
         XCTAssertTrue(chained, "the second page did not use the first page's cursor (\(probe.label))")
         XCTAssertTrue(probe.label.contains("cursors=hc-2001,hc-1501"), probe.label)
+        // The mock holds that page 2 s; the capsule must show while it is held. Checked on
+        // this page, not the swiped one: a swipe's deceleration keeps XCTest waiting for
+        // the app to idle for about as long as the hold.
+        let capsule = app.descendants(matching: .any)["terminal-history-loading"]
+        XCTAssertTrue(poll(2, every: 0.1) { capsule.exists },
+                      "the loading capsule never showed while a page was held")
     }
 
     /// The non-drag variant: the Mac's wheel and trackpad move `contentOffset` with neither
