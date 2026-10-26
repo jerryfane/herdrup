@@ -88,10 +88,18 @@ final class AgentAvatarUITests: XCTestCase {
         XCTAssertTrue(row(shared, shows: "pip", in: app), "the guest should see the owner's Pip, got \(shared.label)")
 
         shared.tap()
-        let actions = app.descendants(matching: .any)["terminal-actions"]
-        XCTAssertTrue(actions.waitForExistence(timeout: 10))
+        // The guest pane's ⋯ (GuestPaneView), not the owner's `terminal-actions`.
+        let actions = app.buttons["guest-actions"]
+        XCTAssertTrue(actions.waitForExistence(timeout: 10), "the guest pane should offer ⋯")
         actions.tap()
-        XCTAssertFalse(app.buttons["agent-avatar-edit"].waitForExistence(timeout: 2), "guests have no Avatar… entry")
+        // The menu is open once one of its known entries shows; only then does the missing
+        // Avatar… entry mean anything.
+        let entries = app.buttons.matching(NSPredicate(format: "identifier IN %@",
+                                                       ["guest-font-increase", "guest-notifications"]))
+        XCTAssertTrue(entries.firstMatch.waitForExistence(timeout: 5), "the guest ⋯ menu should open")
+        XCTAssertFalse(app.buttons["agent-avatar-edit"].exists, "guests have no Avatar… entry")
         XCTAssertFalse(app.buttons["Avatar…"].exists)
+        XCTAssertEqual(app.descendants(matching: .any)["guest-forbidden-calls"].label, "",
+                       "a guest never calls agent.avatar.set")
     }
 }
