@@ -54,6 +54,8 @@ struct GuestHomeView: View {
     @State private var connection: GuestConnection?
     @State private var connectError: String?
     @State private var status: Status = .loading
+    /// The shared agent's picture as the owner chose it (herdrup#538); read-only here.
+    @State private var avatars = AgentAvatarDirectory()
     @State private var tab: Tab = .agents
     @State private var showingPane = false
     /// The agent screen's tab; a tapped push picks it.
@@ -128,6 +130,7 @@ struct GuestHomeView: View {
             paneTab = route.kind == .gram ? .gram : .terminal
             showingPane = true
         }
+        .environment(avatars)
     }
 
     private var agentsTab: some View {
@@ -237,7 +240,8 @@ struct GuestHomeView: View {
             Color.clear.frame(width: 20, height: 1)
             AgentAvatar(name: access.agentName,
                         badge: group.map(AgentAvatarBadge.init) ?? .none,
-                        badgeLabel: group?.label ?? "Agent unavailable")
+                        badgeLabel: group?.label ?? "Agent unavailable",
+                        info: row?.info)
                 .opacity(running ? 1 : 0.55)
                 .padding(.trailing, 12)
             VStack(alignment: .leading, spacing: 2) {
@@ -328,6 +332,9 @@ struct GuestHomeView: View {
             let shared = agents.first { $0.terminalID == access.agentTarget }
                 ?? agents.first { $0.name == access.agentName }
             status = .live(shared.map { AgentRow(info: $0) })
+            // The owner's picture for the shared agent (herdrup#538); guests never edit it.
+            avatars.client = client
+            avatars.update(agents: shared.map { [$0] } ?? [])
         } catch is CancellationError {
             return
         } catch {

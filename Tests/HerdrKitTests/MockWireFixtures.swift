@@ -26,14 +26,20 @@ enum MockWireFixtures {
       {"pane_id":"w1:p2","name":"vetrina","agent":"codex","agent_status":"blocked","cwd":"/root/vetrina","terminal_title_stripped":"overwrite config.ts?"},
       {"pane_id":"w2:p1","name":"trend-scout","agent":"codex","agent_status":"idle","cwd":"/root/trend-scout","terminal_title_stripped":"exited, code 1"},
       {"pane_id":"w2:p2","name":"herdr-app","agent":"claude","agent_status":"working","cwd":"/root/herdr","terminal_title_stripped":"editing src/acp.rs","account":"claudecrazy","account_config_dir":"/root/.claude-9"},
-      {"pane_id":"w3:p1","name":"clientloop","agent":"claude","agent_status":"idle","cwd":"/root/clientloop","terminal_title_stripped":"amigo-poc scaffold","account":"retired-account","account_unresolved":true},
+      {"pane_id":"w3:p1","terminal_id":"t-clientloop","name":"clientloop","avatar":{"style":"mascot","mascot":"tri","sha256":null,"updated_unix_ms":1723041000000},"agent":"claude","agent_status":"idle","cwd":"/root/clientloop","terminal_title_stripped":"amigo-poc scaffold","account":"retired-account","account_unresolved":true},
       {"pane_id":"w3:p2","name":"aste-screener","agent":"codex","agent_status":"idle","cwd":"/root/aste-screener","terminal_title_stripped":"apify-harvest"},
-      {"pane_id":"w4:p1","name":"discovery","agent":"gemini","agent_status":"idle","cwd":"/root/discovery-calls","terminal_title_stripped":"redaction-pass v3"},
+      {"pane_id":"w4:p1","terminal_id":"t-discovery","name":"discovery","avatar":{"style":"image","mascot":null,"sha256":"20d7932ab0342ec9aab4e2e3c26e95051c987786fb98c2ac2e4ef2ddc5ca8a99","updated_unix_ms":1723041000000},"agent":"gemini","agent_status":"idle","cwd":"/root/discovery-calls","terminal_title_stripped":"redaction-pass v3"},
       {"pane_id":"w4:p2","name":"bank-qa","agent":"claude","agent_status":"done","cwd":"/root/bank-qa","terminal_title_stripped":"deal-assistant rag"},
       {"pane_id":"mcb-air/w1:p9","name":"mcb-air/mcb-air","agent":"omp","agent_status":"unknown","last_known_status":"blocked","machine_id":"mcb-air","reachability":"degraded","cwd":"/Users/jerry/omp-workspace","terminal_title_stripped":"clone repo and help deimos"},
       {"pane_id":"w5:p1","name":"huurjacht","agent":"claude","agent_status":"idle","cwd":"/root/huurjacht","terminal_title_stripped":"pararius scrape","archived":{"at":"2026-08-26T18:00:00Z","by":"jerry","reason":"parked for the weekend"}}
     ]}}
     """#
+
+    /// The photo `discovery` wears in `agentList` (herdrup#538): a 32 px PNG of orange and
+    /// violet bands, answered by the mock `agent.avatar.get`. Its sha256 is the descriptor's.
+    static let avatarImageSHA256 = "20d7932ab0342ec9aab4e2e3c26e95051c987786fb98c2ac2e4ef2ddc5ca8a99"
+    static let avatarImageBase64 = "iVBORw0KGgoAAAANSUhEUgAAACAAAAAgCAIAAAD8GO2jAAAAM0lEQVR42mN4McmGpohh1IJRC4aABd2V32iKRi0YtWAoWDBaVIxaMGrBaH0wasGoBUAEAADlYGrPeOfmAAAAAElFTkSuQmCC"
+    static let avatarImage = #"{"id":"mock","result":{"type":"agent_avatar_image","mime":"image/png","data_base64":"\#(avatarImageBase64)"}}"#
 
     /// The panes herdr still lists, for the mock render. Excludes w2:p1 so that row lands
     /// in STOPPED via liveness (not a status string). Includes the federated `mcb-air/w1:p9`,

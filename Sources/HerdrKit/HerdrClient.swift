@@ -1361,6 +1361,92 @@ public actor HerdrClient {
             .agent
     }
 
+    struct AgentAvatarSetParams: Encodable {
+        let target: String
+        let choice: AgentAvatarChoice?
+
+        enum CodingKeys: String, CodingKey {
+            case target, avatar, mime
+            case imageBase64 = "image_base64"
+        }
+        enum DescriptorKeys: String, CodingKey { case style, mascot }
+
+        func encode(to encoder: Encoder) throws {
+            var c = encoder.container(keyedBy: CodingKeys.self)
+            try c.encode(target, forKey: .target)
+            switch choice {
+            case nil:
+                // An explicit null: clearing is a value, not an omitted field.
+                try c.encodeNil(forKey: .avatar)
+            case .mascot(let id)?:
+                var d = c.nestedContainer(keyedBy: DescriptorKeys.self, forKey: .avatar)
+                try d.encode("mascot", forKey: .style)
+                try d.encode(id, forKey: .mascot)
+            case .image(let data, let mime)?:
+                var d = c.nestedContainer(keyedBy: DescriptorKeys.self, forKey: .avatar)
+                try d.encode("image", forKey: .style)
+                try c.encode(data.base64EncodedString(), forKey: .imageBase64)
+                try c.encode(mime, forKey: .mime)
+            }
+        }
+    }
+
+    struct AgentAvatarSetResult: Decodable {
+        let avatar: AgentAvatarDescriptor?
+    }
+
+    struct AgentAvatarGetParams: Encodable {
+        let target: String
+        let sha256: String
+    }
+
+    struct AgentAvatarGetResult: Decodable {
+        let mime: String
+        let dataBase64: String
+        enum CodingKeys: String, CodingKey {
+            case mime
+            case dataBase64 = "data_base64"
+        }
+    }
+
+    /// Sets (or with nil, clears) an agent's picture (`agent.avatar.set`, herdrup#538).
+    /// Owner only. `target` is what `agent.rename` takes; the terminal id is the stable
+    /// one. Returns the stored descriptor (nil after a clear). Throws
+    /// `AgentAvatarError.unsupported` on a daemon without the method, else the server's
+    /// `APIError` (`invalid_avatar`, `avatar_too_large`, `agent_not_found`, ...).
+    public func agentAvatarSet(target: String, choice: AgentAvatarChoice?) async throws -> AgentAvatarDescriptor? {
+        do {
+            return try await call("agent.avatar.set", AgentAvatarSetParams(target: target, choice: choice),
+                                  as: AgentAvatarSetResult.self).avatar
+        } catch let error as APIError where Self.isUnknownMethod(error, "agent.avatar.set") {
+            throw AgentAvatarError.unsupported
+        }
+    }
+
+    /// An agent's picture bytes by content address (`agent.avatar.get`). Owners may read
+    /// any agent's; a guest only its granted agent's. Callers cache by `sha256`
+    /// (`AgentAvatarImageCache`), so each image crosses the wire once.
+    public func agentAvatarGet(target: String, sha256: String) async throws -> AgentAvatarImageData {
+        let result: AgentAvatarGetResult
+        do {
+            result = try await call("agent.avatar.get", AgentAvatarGetParams(target: target, sha256: sha256),
+                                    as: AgentAvatarGetResult.self)
+        } catch let error as APIError where Self.isUnknownMethod(error, "agent.avatar.get") {
+            throw AgentAvatarError.unsupported
+        }
+        guard let data = Data(base64Encoded: result.dataBase64) else { throw AgentAvatarError.malformedImage }
+        return AgentAvatarImageData(mime: result.mime, data: data)
+    }
+
+    /// A daemon that predates `method` cannot deserialize the request: serde answers
+    /// `invalid_request` / "unknown variant `<method>`". Some transports report a plain
+    /// method-not-found code instead.
+    static func isUnknownMethod(_ error: APIError, _ method: String) -> Bool {
+        if error.code == "method_not_found" || error.code == "unknown_method" { return true }
+        let lowered = error.message.lowercased()
+        return error.code == "invalid_request" && lowered.contains("unknown variant") && lowered.contains(method)
+    }
+
     /// `agent.archive` params. `reason`/`by`/`force` are OMITTED when nil/false so a plain
     /// archive sends `{ target }` and matches the server's optional/skip-if-none.
     struct AgentArchiveParams: Encodable {

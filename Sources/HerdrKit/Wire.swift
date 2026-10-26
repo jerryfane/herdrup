@@ -359,6 +359,10 @@ public struct AgentInfo: Decodable, Equatable, Sendable, Identifiable {
     /// Guest connections only: whether the shared agent is the pane's foreground
     /// program. False means guest access is paused. Absent for owners.
     public let guestRunning: Bool?
+    /// The owner's chosen picture for this agent (herdrup#538), shared with every owner
+    /// device and every guest of the agent. Absent means the default mascot. Decoded
+    /// leniently (`AgentAvatarDescriptor` never throws), so an odd value cannot fail the list.
+    public let avatar: AgentAvatarDescriptor?
 
     /// Stable list identity. A LIVE agent is keyed on its pane id, which is unique
     /// and stable while it runs. An ARCHIVED agent has NO pane — the server empties
@@ -433,7 +437,7 @@ public struct AgentInfo: Decodable, Equatable, Sendable, Identifiable {
 
     enum CodingKeys: String, CodingKey {
         case agent, name, composer, revision, turn, cwd, focused, reachability, archived
-        case account
+        case account, avatar
         case agentStatus = "agent_status"
         case inputPending = "input_pending"
         case inputPromptKind = "input_prompt_kind"
@@ -1150,6 +1154,9 @@ public struct ServerCapabilities: Decodable, Equatable, Sendable {
     public let agentTranscript: Bool
     /// `agent.answer` answers omp's pending `ask` question from the app (herdr#308).
     public let agentAnswer: Bool
+    /// `agent.avatar.set` / `agent.avatar.get` exist and `AgentInfo.avatar` is reported
+    /// (herdrup#538). False hides the avatar editing UI; agents still show Herdy.
+    public let agentAvatar: Bool
 
     enum CodingKeys: String, CodingKey {
         case liveHandoff = "live_handoff"
@@ -1163,6 +1170,7 @@ public struct ServerCapabilities: Decodable, Equatable, Sendable {
         case paneHistory = "pane_history"
         case agentTranscript = "agent_transcript"
         case agentAnswer = "agent_answer"
+        case agentAvatar = "agent_avatar"
     }
 
     public init(from decoder: Decoder) throws {
@@ -1181,6 +1189,7 @@ public struct ServerCapabilities: Decodable, Equatable, Sendable {
         paneHistory = try c.decodeIfPresent(Bool.self, forKey: .paneHistory) ?? false
         agentTranscript = try c.decodeIfPresent(Bool.self, forKey: .agentTranscript) ?? false
         agentAnswer = try c.decodeIfPresent(Bool.self, forKey: .agentAnswer) ?? false
+        agentAvatar = try c.decodeIfPresent(Bool.self, forKey: .agentAvatar) ?? false
     }
 }
 

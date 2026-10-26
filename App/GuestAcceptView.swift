@@ -95,12 +95,8 @@ struct GuestAcceptView: View {
 
     private var hero: some View {
         VStack(spacing: 0) {
-            ZStack {
-                RoundedRectangle(cornerRadius: 18).fill(AgentIdentity.gradient(for: nil))
-                Text(AgentIdentity.glyph(for: invite.agentName))
-                    .font(Typography.app(34, .bold)).foregroundStyle(.white)
-            }
-            .frame(width: 72, height: 72)
+            // The invite carries no avatar, so the card shows the default mascot (herdrup#538).
+            AgentAvatarView(agent: nil, name: invite.agentName, size: 72, glyphSize: 34)
             .padding(.bottom, 16)
             Text("\(invite.ownerName) shared \(invite.agentName) with you")
                 .font(Typography.app(24, .bold)).tracking(-0.24)
