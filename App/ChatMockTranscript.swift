@@ -66,20 +66,35 @@ final class ChatMockConversation: @unchecked Sendable {
     // MARK: Requests
 
     /// `agent.transcript`: the newest page, an older page (`before`), or a live refresh
-    /// (`after`, answered with the newest window: the client merges by id).
+    /// (`after`). Like herdr, an `after` page carries only what came since its cursor and
+    /// re-sends the newest agent turn (its question may have been answered since), never
+    /// older history: the client appends entries it has not seen at the tail, so older
+    /// turns there would draw below the conversation.
     func transcript(id: String, params: [String: Any]) -> String {
         let limit = max(1, min(params["limit"] as? Int ?? 20, 50))
-        let turns = lock.withLock { buildTurns() }
+        let (turns, sentCount) = lock.withLock { (buildTurns(), prompted.count) }
+        let start: Int
         let end: Int
+        let after = (params["before"] as? String) == nil ? params["after"] as? String : nil
+        let isAfter = after != nil
         if let before = params["before"] as? String {
             guard before.hasPrefix("t"), let index = Int(before.dropFirst()), index <= turns.count else {
                 return Self.error(id: id, code: "cursor_expired", message: "unknown cursor")
             }
             end = index
+            start = max(0, end - limit)
+        } else if let after {
+            guard after.hasPrefix("a"), let seen = Int(after.dropFirst()), seen <= turns.count else {
+                return Self.error(id: id, code: "cursor_expired", message: "unknown cursor")
+            }
+            end = turns.count
+            // The sent prompts follow the agent's turns: the newest agent turn is the last
+            // one before them.
+            start = max(0, min(seen, turns.count - sentCount) - 1)
         } else {
             end = turns.count
+            start = max(0, end - limit)
         }
-        let start = max(0, end - limit)
         let entries = turns[start..<end].flatMap { $0 }
         var result: [String: Any] = [
             "type": "agent_transcript",
@@ -87,7 +102,7 @@ final class ChatMockConversation: @unchecked Sendable {
             "pane_id": audience == .owner ? ChatMockTransport.paneID : GuestMockTransport.access.agentTarget,
             "session_id": "mock-session",
             "entries": entries,
-            "before": start > 0 ? "t\(start)" : NSNull(),
+            "before": !isAfter && start > 0 ? "t\(start)" : NSNull(),
             "after": "a\(turns.count)",
             "working": NSNull(),
             "pending_ask": NSNull(),
