@@ -3,7 +3,7 @@ import XCTest
 final class ChatUXSmokeTests: XCTestCase {
     private func launch(failingRefresh: Bool = false, pendingQuestion: Bool = false, large: Bool = false,
                         copyFixture: Bool = false, plan: String = "", mermaid: Bool = false,
-                        longSession: Bool = false) -> XCUIApplication {
+                        longSession: Bool = false, environment: [String: String] = [:]) -> XCUIApplication {
         continueAfterFailure = false
         let app = XCUIApplication.launched(mock: "chatview", environment: [
             "HERDR_STEADY_CARET": "1", "HERDR_MOCK_STILL": "1", "HERDR_CHAT_UX_SMOKE": "1",
@@ -14,7 +14,7 @@ final class ChatUXSmokeTests: XCTestCase {
             "HERDR_CHAT_UX_PLAN": plan,
             "HERDR_CHAT_UX_MERMAID": mermaid ? "1" : "0",
             "HERDR_CHAT_UX_LONG_SESSION": longSession ? "1" : "0"
-        ])
+        ].merging(environment) { _, new in new })
         let agent = app.staticTexts["herdr-app"].firstMatch
         if !agent.exists {
             let idle = app.buttons.matching(NSPredicate(format: "label BEGINSWITH %@", "Idle")).firstMatch
@@ -552,5 +552,181 @@ final class ChatUXSmokeTests: XCTestCase {
         app.buttons["terminal-actions"].tap()
         app.buttons["Reset"].tap()
         dismissTextSizeMenu(app)
+    }
+
+    // MARK: Chat column width (#523 items 2 and 12)
+
+    private func element(_ app: XCUIApplication, _ identifier: String) -> XCUIElement {
+        app.descendants(matching: .any)[identifier].firstMatch
+    }
+
+    /// Polls `read` until `done` holds or `timeout` passes; returns the last reading.
+    @discardableResult
+    private func settle(within timeout: TimeInterval = 5, _ read: () -> CGFloat, until done: (CGFloat) -> Bool) -> CGFloat {
+        var value = read()
+        let deadline = Date().addingTimeInterval(timeout)
+        while !done(value), Date() < deadline {
+            RunLoop.current.run(until: Date().addingTimeInterval(0.2))
+            value = read()
+        }
+        return value
+    }
+
+    /// A real touch drag on the column's right-edge handle: press just inside the edge (still
+    /// on the handle's band, and clear of a window edge when the column is Full) at the chat's
+    /// mid-height, then drag `dx` points sideways.
+    private func dragRightEdge(_ app: XCUIApplication, by dx: CGFloat) {
+        let column = element(app, "chat-column").frame
+        let chat = element(app, "chat-view").frame
+        let origin = app.frame.origin
+        let start = app.coordinate(withNormalizedOffset: .zero)
+            .withOffset(CGVector(dx: column.maxX - 6 - origin.x, dy: chat.midY - origin.y))
+        start.press(forDuration: 0.2, thenDragTo: start.withOffset(CGVector(dx: dx, dy: 0)))
+    }
+
+    /// The Chat-mode composer card sits under the column at its width (less the card's 12 pt
+    /// inset on each side), centred on it.
+    private func assertComposerMatchesColumn(_ app: XCUIApplication, _ moment: String) {
+        let column = element(app, "chat-column").frame
+        let card = element(app, "composer-card")
+        XCTAssertTrue(card.exists, app.debugDescription)
+        XCTAssertEqual(card.frame.width, column.width - 24, accuracy: 2, "\(moment): the composer takes the column's width")
+        XCTAssertEqual(card.frame.midX, column.midX, accuracy: 2, "\(moment): the composer is centred under the column")
+    }
+
+    /// iPhone keeps today's layout: no handles, a full-width column and composer. iPad shows
+    /// both handles, named for VoiceOver.
+    func testChatWidthHandlesOnlyOnRegularWidth() {
+        let app = launch()
+        let chat = element(app, "chat-view")
+        let column = element(app, "chat-column")
+        XCTAssertTrue(column.waitForExistence(timeout: 10), app.debugDescription)
+        let left = element(app, "chat-width-handle-left")
+        let right = element(app, "chat-width-handle-right")
+        if UIDevice.current.userInterfaceIdiom == .pad {
+            XCTAssertTrue(right.waitForExistence(timeout: 5), app.debugDescription)
+            XCTAssertTrue(left.exists, app.debugDescription)
+            XCTAssertEqual(right.label, "Chat width")
+            XCTAssertTrue((right.value as? String)?.hasSuffix("points") == true
+                          || (right.value as? String)?.contains("points,") == true,
+                          "the handle reads its width: \(String(describing: right.value))")
+            if column.frame.width < chat.frame.width - 30 {
+                XCTAssertEqual(left.frame.midX, column.frame.minX, accuracy: 1, "the left handle sits on the column's edge")
+                XCTAssertEqual(right.frame.midX, column.frame.maxX, accuracy: 1, "the right handle sits on the column's edge")
+            }
+            assertComposerMatchesColumn(app, "iPad Chat")
+            record(app, "iPad chat column with its edge handles")
+        } else {
+            XCTAssertFalse(left.exists, "no width handles on iPhone")
+            XCTAssertFalse(right.exists, "no width handles on iPhone")
+            XCTAssertEqual(column.frame.width, chat.frame.width, accuracy: 1, "the phone's column spans the chat")
+            let card = element(app, "composer-card")
+            XCTAssertTrue(card.exists, app.debugDescription)
+            XCTAssertEqual(card.frame.width, chat.frame.width - 24, accuracy: 2, "the phone's composer keeps the full width")
+            record(app, "iPhone chat keeps the full-width column and composer")
+        }
+    }
+
+    /// Dragging the right edge resizes the column around its centre and the composer follows;
+    /// near 720 it snaps to Readable; the width survives a relaunch; a double tap resets to Wide.
+    func testDraggingTheChatEdgeResizesTheColumn() throws {
+        try XCTSkipUnless(UIDevice.current.userInterfaceIdiom == .pad, "the chat width is resizable on regular width only")
+        // Landscape gives the detail column room for Wide (1000) and a drag down to Readable.
+        XCUIDevice.shared.orientation = .landscapeLeft
+        rotated = true
+        let hold = ["HERDR_CHAT_WIDTH_READOUT_HOLD": "8"]
+        let app = launch(environment: hold)
+        let chat = element(app, "chat-view")
+        let column = element(app, "chat-column")
+        let right = element(app, "chat-width-handle-right")
+        XCTAssertTrue(right.waitForExistence(timeout: 10), app.debugDescription)
+        var available = settle(within: 8, { chat.frame.width }, until: { $0 > 1000 })
+        // An earlier class may leave the app in a smaller window (iPadOS restores its size):
+        // minimising the sidebar gives the chat the window's width.
+        if available < 780 {
+            let minimise = app.buttons.matching(NSPredicate(format: "label == %@", "Minimise sidebar")).firstMatch
+            XCTAssertTrue(minimise.waitForExistence(timeout: 5), "chat only \(available) pt wide: \(app.debugDescription)")
+            minimise.tap()
+            minimisedSidebar = true
+            available = settle(within: 8, { chat.frame.width }, until: { $0 >= 780 })
+        }
+        XCTAssertGreaterThanOrEqual(available, 780, "the chat needs room to drag down to Readable: \(app.debugDescription)")
+        let wide = min(1000, available)
+        let initial = settle({ column.frame.width }, until: { abs($0 - wide) < 0.5 })
+        XCTAssertEqual(initial, wide, accuracy: 0.5, "the column starts Wide (or Full when narrower)")
+        XCTAssertEqual(column.frame.midX, chat.frame.midX, accuracy: 1, "the column is centred")
+        if initial < available - 30 {
+            XCTAssertEqual(right.frame.midX, column.frame.maxX, accuracy: 1, "the handle sits on the column's edge")
+        }
+        assertComposerMatchesColumn(app, "Wide")
+        let initialMinX = column.frame.minX
+        record(app, "Chat column at Wide (\(Int(initial)) pt of \(Int(available)))")
+
+        // Inwards: both edges move in by the drag, so the column narrows by twice it and stays
+        // centred. The target stays clear of Readable's snap zone.
+        let shrink: CGFloat = abs(initial - 120 - 720) <= 16 ? 200 : 120
+        dragRightEdge(app, by: -shrink / 2)
+        let narrowed = settle({ column.frame.width }, until: { abs($0 - (initial - shrink)) <= 4 })
+        XCTAssertEqual(narrowed, initial - shrink, accuracy: 4, "each point of drag narrows the column by two")
+        XCTAssertEqual(column.frame.minX - initialMinX, shrink / 2, accuracy: 2, "the left edge moves in with the right")
+        XCTAssertEqual(column.frame.midX, chat.frame.midX, accuracy: 1, "the column stays centred")
+        XCTAssertEqual(right.frame.midX, column.frame.maxX, accuracy: 1, "the handle follows the edge")
+        assertComposerMatchesColumn(app, "After a drag")
+        record(app, "Chat column narrowed by dragging its right edge")
+
+        // Aim at 714: within 12 pt of Readable, so it lands on exactly 720.
+        dragRightEdge(app, by: -(narrowed - 714) / 2)
+        let readable = settle({ column.frame.width }, until: { abs($0 - 720) < 0.5 })
+        XCTAssertEqual(readable, 720, accuracy: 0.5, "a width near 720 snaps to Readable")
+        let readout = app.staticTexts["chat-width-readout"]
+        XCTAssertTrue(readout.waitForExistence(timeout: 3), app.debugDescription)
+        XCTAssertEqual(readout.label, "720 pt · Readable")
+        XCTAssertEqual(right.value as? String, "720 points, Readable")
+        XCTAssertEqual(column.frame.midX, chat.frame.midX, accuracy: 1)
+        assertComposerMatchesColumn(app, "Readable")
+        record(app, "Chat column snapped to Readable with its readout")
+
+        // Remembered: a relaunch that keeps the stored width shows Readable again.
+        Thread.sleep(forTimeInterval: 1)
+        app.terminate()
+        let again = launch(environment: hold.merging(["HERDR_MOCK_CHAT_WIDTH": "keep"]) { _, new in new })
+        let againChat = element(again, "chat-view")
+        let againColumn = element(again, "chat-column")
+        let againRight = element(again, "chat-width-handle-right")
+        XCTAssertTrue(againRight.waitForExistence(timeout: 10), again.debugDescription)
+        let kept = settle({ againColumn.frame.width }, until: { abs($0 - 720) < 0.5 })
+        XCTAssertEqual(kept, 720, accuracy: 0.5, "the chosen width survives a relaunch")
+        assertComposerMatchesColumn(again, "After relaunch")
+        record(again, "Readable remembered across a relaunch")
+
+        // A double tap on a handle resets to Wide (Full when the chat is narrower).
+        againRight.doubleTap()
+        let againWide = min(1000, againChat.frame.width)
+        let reset = settle({ againColumn.frame.width }, until: { abs($0 - againWide) < 0.5 })
+        XCTAssertEqual(reset, againWide, accuracy: 0.5, "a double tap resets to Wide")
+        XCTAssertEqual(againColumn.frame.midX, againChat.frame.midX, accuracy: 1)
+        assertComposerMatchesColumn(again, "After reset")
+        if againChat.frame.width > 1000.5 {
+            XCTAssertEqual(againRight.value as? String, "1000 points, Wide")
+        }
+        record(again, "Double tap resets the chat column to Wide")
+    }
+
+    /// Set by the width test: puts the iPad back as the other tests expect it, pass or fail.
+    private var rotated = false
+    private var minimisedSidebar = false
+
+    override func tearDown() {
+        if minimisedSidebar {
+            let app = XCUIApplication()
+            let expand = app.buttons.matching(NSPredicate(format: "label == %@", "Expand sidebar")).firstMatch
+            if app.state == .runningForeground, expand.exists { expand.tap() }
+            minimisedSidebar = false
+        }
+        if rotated {
+            XCUIDevice.shared.orientation = .portrait
+            rotated = false
+        }
+        super.tearDown()
     }
 }

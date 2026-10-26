@@ -14,7 +14,9 @@ enum ChatViewer: Equatable {
 enum ChatStyle {
     /// The answered-question tick and a table's gains: the mockup's `--ok`.
     static let ok = Color(hex: 0x7FC89A)
-    static let columnWidth: CGFloat = 720
+    /// The readable column: the chat's cap on compact width, and the content sheet's.
+    /// On regular width the reader sizes the column (`ChatColumnLayout`).
+    static let columnWidth = CGFloat(ChatColumnWidth.readable)
 }
 
 /// Why an answer from the chat did not land, shown under the question.
@@ -413,6 +415,12 @@ struct ChatView: View {
 
     @Environment(\.accessibilityReduceMotion) private var reduceMotion
     @AppStorage(ChatTextSize.storageKey) private var chatFontSize = ChatTextSize.defaultPoints
+    @AppStorage(ChatColumnWidth.storageKey) private var storedColumnWidth = ChatColumnWidth.defaultWidth
+    /// The chat's whole width: the most the column can take.
+    @State private var chatWidth: CGFloat = 0
+    private var columnWidth: CGFloat {
+        ChatColumnLayout.width(stored: storedColumnWidth, available: chatWidth, regular: sizeClass == .regular)
+    }
     private var textScale: CGFloat { CGFloat(chatFontSize / ChatTextSize.defaultPoints) }
     @State private var expanded: Set<String> = []
     @State private var openNote: TranscriptNote?
@@ -602,6 +610,12 @@ struct ChatView: View {
                 Text("No messages yet").font(Typography.app(14 * textScale)).foregroundStyle(Palette.textFaint)
             }
         }
+        .overlay {
+            if sizeClass == .regular, chatWidth > 0 {
+                ChatColumnResizer(available: chatWidth, stored: $storedColumnWidth)
+            }
+        }
+        .onGeometryChange(for: CGFloat.self) { $0.size.width } action: { chatWidth = $0 }
         .task(id: model.loaded) {
             guard model.loaded, !landed, findRequest == nil else { return }
             for _ in 0..<8 {
@@ -647,7 +661,10 @@ struct ChatView: View {
         .padding(.horizontal, 16)
         .padding(.top, 8)
         .padding(.bottom, 12)
-        .frame(maxWidth: ChatStyle.columnWidth)
+        // Both bounds, so the column is exactly the chosen width (or the chat's, if narrower)
+        // whatever its rows, and the composer under it lines up.
+        .frame(minWidth: 0, maxWidth: columnWidth)
+        .background { columnProbe }
         .frame(maxWidth: .infinity)
         .background {
             ScrollActivityObserver(isEnabled: isActive, onChange: { scrolling in
@@ -931,6 +948,19 @@ struct ChatView: View {
         if ScreenshotMock.mode != nil {
             ChatCopyProbe()
             ChatRowRenderProbe()
+        }
+        #endif
+    }
+
+    /// UI tests measure the column the transcript is laid out in.
+    @ViewBuilder private var columnProbe: some View {
+        #if DEBUG
+        if ScreenshotMock.mode != nil {
+            Color.clear
+                .accessibilityElement()
+                .accessibilityIdentifier("chat-column")
+                .accessibilityLabel("Chat column")
+                .allowsHitTesting(false)
         }
         #endif
     }

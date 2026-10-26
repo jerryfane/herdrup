@@ -5,11 +5,18 @@ import SwiftUI
 
 /// The `chatview` mock's root: the Agents home over `ChatMockTransport`, with the omp agent
 /// `herdr-app` blocked on a question. Each launch starts from the Settings default named by
-/// `HERDR_MOCK_CHAT_OPENS_IN` (`chat` unless set), so one test's choice can't leak into the next.
+/// `HERDR_MOCK_CHAT_OPENS_IN` (`chat` unless set), and from the default chat column width
+/// unless `HERDR_MOCK_CHAT_WIDTH=keep` (a relaunch checking that the width is remembered), so
+/// one test's choice can't leak into the next.
 struct ChatViewMockHome: View {
-    private static let freshPreference: Void = UserDefaults.standard.set(
-        ProcessInfo.processInfo.environment["HERDR_MOCK_CHAT_OPENS_IN"] ?? ChatPreference.chat,
-        forKey: ChatPreference.key)
+    private static let freshPreference: Void = {
+        let environment = ProcessInfo.processInfo.environment
+        UserDefaults.standard.set(environment["HERDR_MOCK_CHAT_OPENS_IN"] ?? ChatPreference.chat,
+                                  forKey: ChatPreference.key)
+        if environment["HERDR_MOCK_CHAT_WIDTH"] != "keep" {
+            UserDefaults.standard.removeObject(forKey: ChatColumnWidth.storageKey)
+        }
+    }()
 
     @State private var client: HerdrClient = {
         _ = ChatViewMockHome.freshPreference
