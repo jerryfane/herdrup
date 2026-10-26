@@ -12,25 +12,28 @@ final class AgentAvatarUITests: XCTestCase {
         app.descendants(matching: .any).matching(identifier: "agent-avatar-\(id)").firstMatch
     }
 
-    /// Whether `bubble` wears the `id` avatar. A sender's run of bubbles shares one avatar,
-    /// drawn in the left gutter beside the run's LAST bubble, so the bubble's avatar is the
-    /// first gutter avatar at or below the bubble's bottom. The Agents list and Gram's
-    /// header stack sit elsewhere and can't stand in for it.
-    private func bubble(_ bubble: XCUIElement, wears id: String, in app: XCUIApplication,
-                        timeout: TimeInterval = 10) -> Bool {
+    /// The avatar `bubble` wears, as its `agent-avatar-` suffix ("none" when there is none).
+    /// A sender's run of bubbles shares one avatar, drawn in the left gutter beside the
+    /// run's LAST bubble, so the bubble's avatar is the first gutter avatar at or below the
+    /// bubble's bottom. The Agents list and Gram's header stack sit elsewhere and can't stand
+    /// in for it. Polls until it reads `expected` or `timeout` passes.
+    private func avatar(worn bubble: XCUIElement, expecting expected: String, in app: XCUIApplication,
+                        timeout: TimeInterval = 10) -> String {
         let avatars = app.descendants(matching: .any)
             .matching(NSPredicate(format: "identifier BEGINSWITH %@", "agent-avatar-"))
         let deadline = Date().addingTimeInterval(timeout)
+        var seen = "none"
         repeat {
             let frame = bubble.frame
             let gutter = avatars.allElementsBoundByIndex
                 .map { (id: $0.identifier, frame: $0.frame) }
                 .filter { $0.frame.maxX <= frame.minX + 1 && $0.frame.maxY >= frame.maxY - 4 }
                 .min { $0.frame.maxY < $1.frame.maxY }
-            if gutter?.id == "agent-avatar-\(id)" { return true }
+            seen = gutter.map { String($0.id.dropFirst("agent-avatar-".count)) } ?? "none"
+            if seen == expected { break }
             RunLoop.current.run(until: Date().addingTimeInterval(0.25))
         } while Date() < deadline
-        return false
+        return seen
     }
 
     /// The row shows `mascot`: by the avatar's own identifier, or, where the row's button
@@ -98,14 +101,17 @@ final class AgentAvatarUITests: XCTestCase {
         let gram = app.buttons["Gram"].firstMatch
         XCTAssertTrue(gram.waitForExistence(timeout: 10))
         gram.tap()
-        let fromVetrina = app.descendants(matching: .any)["gram-bubble-g1"]
+        // g1 is the owner's reply; g3 is vetrina's newest message (MockWireFixtures.gramList).
+        let fromVetrina = app.descendants(matching: .any)["gram-bubble-g3"]
         XCTAssertTrue(fromVetrina.waitForExistence(timeout: 10))
-        XCTAssertTrue(bubble(fromVetrina, wears: "bot", in: app), "a Gram bubble from vetrina should show Bot")
+        XCTAssertEqual(avatar(worn: fromVetrina, expecting: "bot", in: app), "bot",
+                       "a Gram bubble from vetrina should show Bot")
         // hetzner-1's clientloop is not the local clientloop (Tri): the roster has no agent of
         // that name on that machine, so its bubble wears the default.
         let relayed = app.descendants(matching: .any)["gram-bubble-g2"]
         XCTAssertTrue(relayed.waitForExistence(timeout: 5))
-        XCTAssertTrue(bubble(relayed, wears: "herdy", in: app), "a relayed sender with no roster entry shows Herdy")
+        XCTAssertEqual(avatar(worn: relayed, expecting: "herdy", in: app), "herdy",
+                       "a relayed sender with no roster entry shows Herdy")
         attach(app, "agent-avatars-gram")
     }
 
