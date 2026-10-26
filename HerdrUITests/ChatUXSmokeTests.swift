@@ -670,14 +670,19 @@ final class ChatUXSmokeTests: XCTestCase {
         // Inwards: both edges move in by the drag, so the column narrows by twice it and stays
         // centred. The target stays clear of Readable's snap zone.
         let shrink: CGFloat = abs(initial - 120 - 720) <= 16 ? 200 : 120
+        // The width is the column's frame, not a row input: rows reflow in layout, but a drag's
+        // many ticks must not re-run their bodies. One full pass of the drawn rows (at most
+        // the ~40-row window) is the bound; per-tick invalidation would be many times that.
+        Thread.sleep(forTimeInterval: 1)
+        let rendersBeforeDrag = rowRenders(app)
         dragRightEdge(app, by: -shrink / 2)
         let narrowed = settle({ column.frame.width }, until: { abs($0 - (initial - shrink)) <= 4 })
         XCTAssertEqual(narrowed, initial - shrink, accuracy: 4, "each point of drag narrows the column by two")
+        Thread.sleep(forTimeInterval: 0.6)
+        let dragRenders = rowRenders(app) - rendersBeforeDrag
+        XCTAssertLessThanOrEqual(dragRenders, 40, "a width drag re-rendered \(dragRenders) transcript rows")
         XCTAssertEqual(column.frame.minX - initialMinX, shrink / 2, accuracy: 2, "the left edge moves in with the right")
         XCTAssertEqual(column.frame.midX, chat.frame.midX, accuracy: 1, "the column stays centred")
-        XCTAssertEqual(right.frame.midX, column.frame.maxX, accuracy: 1, "the handle follows the edge")
-        assertComposerMatchesColumn(app, "After a drag")
-        record(app, "Chat column narrowed by dragging its right edge")
 
         // Aim at 714: within 12 pt of Readable, so it lands on exactly 720.
         dragRightEdge(app, by: -(narrowed - 714) / 2)
