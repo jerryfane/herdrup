@@ -9,7 +9,9 @@ struct ChatMarkdownView: View {
     let markdown: String
 
     @Environment(\.chatTextScale) private var textScale
-    private var blocks: [ChatMarkdownBlock] { ChatMarkdown.blocks(markdown) }
+    /// Parsed once per text (`ChatMarkdownCache`): a redraw of the same reply, or the same
+    /// reply drawn again after it scrolled out of the drawn window, does not parse it again.
+    private var blocks: [ChatMarkdownBlock] { ChatMarkdownCache.blocks(markdown) }
 
     var body: some View {
         VStack(alignment: .leading, spacing: 8) {
@@ -148,10 +150,53 @@ private struct ChatMarkdownTable: View {
     }
 }
 
+/// Parsed markdown kept by text, so a view drawn again for the same text does not parse it
+/// again: reply blocks (`ChatMarkdownView`) and inline styles (`ChatInline`, which a long
+/// chat calls hundreds of times per pass for the collapsed thoughts alone). Each cache is
+/// bounded and starts over when full, so a long session cannot grow it without end.
+@MainActor
+enum ChatMarkdownCache {
+    private static var blocksByText = BoundedCache<String, [ChatMarkdownBlock]>(limit: 400)
+
+    static func blocks(_ markdown: String) -> [ChatMarkdownBlock] {
+        blocksByText.value(for: markdown) { ChatMarkdown.blocks(markdown) }
+    }
+
+    struct BoundedCache<Key: Hashable, Value> {
+        let limit: Int
+        private var values: [Key: Value] = [:]
+
+        init(limit: Int) { self.limit = limit }
+
+        mutating func value(for key: Key, make: () -> Value) -> Value {
+            if let value = values[key] { return value }
+            let value = make()
+            if values.count >= limit { values.removeAll(keepingCapacity: true) }
+            values[key] = value
+            return value
+        }
+    }
+}
+
+@MainActor
 enum ChatInline {
+    private struct Key: Hashable {
+        let markdown: String
+        let size: CGFloat
+        let weight: Font.Weight
+    }
+    private static var cache = ChatMarkdownCache.BoundedCache<Key, AttributedString>(limit: 2000)
+
     /// Inline markdown (bold, italic, `code`, links, strikethrough) as one attributed string
-    /// in the app's fonts. Anything it cannot parse shows as the literal text.
+    /// in the app's fonts. Anything it cannot parse shows as the literal text. Kept per text,
+    /// size and weight (`ChatMarkdownCache`).
     static func styled(_ markdown: String, size: CGFloat, weight: Font.Weight = .regular) -> AttributedString {
+        cache.value(for: Key(markdown: markdown, size: size, weight: weight)) {
+            parse(markdown, size: size, weight: weight)
+        }
+    }
+
+    private static func parse(_ markdown: String, size: CGFloat, weight: Font.Weight) -> AttributedString {
         let options = AttributedString.MarkdownParsingOptions(
             interpretedSyntax: .inlineOnlyPreservingWhitespace,
             failurePolicy: .returnPartiallyParsedIfPossible)

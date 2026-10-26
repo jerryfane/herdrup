@@ -5507,6 +5507,9 @@ struct TerminalPaneContent: View {
                                      onOpenTerminal: { setShowsChat(false) },
                                      findRequest: findRequest,
                                      onFindResult: { index, total, capped in findMatches = (index, total, capped) })
+                            // A composer keystroke redraws this page; the chat skips it
+                            // (`ChatView ==`), so typing never re-evaluates the transcript.
+                            .equatable()
                         }
                     }
                 // THE COMPOSER FLOATS OVER THE TERMINAL. Only its resting row (plus the

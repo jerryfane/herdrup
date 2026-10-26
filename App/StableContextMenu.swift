@@ -88,24 +88,37 @@ private struct StableContextMenu: ViewModifier {
     /// view itself is hidden, as SwiftUI's `.contextMenu` does: nothing of it (a bubble's
     /// tail, a badge) shows beside the clipped preview.
     @State private var lifted = false
+    /// What the anchor offers, kept for the view's life: the anchor holds only this, so a
+    /// redraw of the view never updates the anchor's UIView. The items are built only when
+    /// the menu opens (or VoiceOver asks), never per redraw.
+    @State private var menu = StableMenuModel()
     /// A disabled view offers no menu, and so no menu actions to VoiceOver either.
     @Environment(\.isEnabled) private var isEnabled
+    /// The menu's entries are accessibility actions only while VoiceOver or Switch Control
+    /// runs: building them is the menu's whole cost, and on a long chat every message has one.
+    @Environment(\.accessibilityVoiceOverEnabled) private var voiceOver
+    @Environment(\.accessibilitySwitchControlEnabled) private var switchControl
 
     func body(content: Content) -> some View {
-        content
+        // Plain stores into the model the anchor reads when a menu opens; nothing observes
+        // them, so they draw nothing.
+        menu.items = items
+        menu.previewCornerRadius = previewCornerRadius
+        menu.isEnabled = isEnabled
+        menu.setLifted = { lifted = $0 }
+        return content
             .opacity(lifted ? 0 : 1)
-            .background(StableMenuAnchor(previewCornerRadius: previewCornerRadius, items: items,
-                                         setLifted: { lifted = $0 })
-                .accessibilityHidden(true))
+            .background(StableMenuAnchor(model: menu).accessibilityHidden(true))
             // The long press belongs to the host's interaction, which VoiceOver does not see
             // on this element, so the same entries are its Actions rotor. Submenu entries are
             // flattened as "Submenu, Entry"; titles and actions are the menu's own. SwiftUI
             // lists accessibility actions last-declared first, so they are declared in reverse
             // to read in the menu's order.
             .accessibilityActions {
-                ForEach(Array((isEnabled ? Self.flattened(items()) : []).reversed().enumerated()),
-                        id: \.offset) { _, entry in
-                    Button(entry.title, action: entry.action)
+                if isEnabled && (voiceOver || switchControl) {
+                    ForEach(Array(Self.flattened(items()).reversed().enumerated()), id: \.offset) { _, entry in
+                        Button(entry.title, action: entry.action)
+                    }
                 }
             }
     }
@@ -123,8 +136,8 @@ private struct StableContextMenu: ViewModifier {
     }
 }
 
-/// What an anchor offers: refreshed on every SwiftUI update, read when a menu opens and when
-/// one of its items is chosen.
+/// What an anchor offers: stored by its view's modifier on every SwiftUI update, read when a
+/// menu opens and when one of its items is chosen.
 @MainActor
 final class StableMenuModel {
     var items: () -> [StableMenuItem] = { [] }
@@ -150,33 +163,29 @@ final class StableMenuModel {
     }
 }
 
+/// Holds only the modifier's model, the same object for the view's life, so SwiftUI finds
+/// nothing changed and does not update the anchor when the view redraws.
 private struct StableMenuAnchor: UIViewRepresentable {
-    let previewCornerRadius: CGFloat?
-    let items: () -> [StableMenuItem]
-    let setLifted: (Bool) -> Void
+    let model: StableMenuModel
 
     func makeUIView(context: Context) -> StableMenuAnchorView {
-        let view = StableMenuAnchorView()
-        updateUIView(view, context: context)
-        return view
+        StableMenuAnchorView(model: model)
     }
 
     func updateUIView(_ view: StableMenuAnchorView, context: Context) {
-        view.model.items = items
-        view.model.previewCornerRadius = previewCornerRadius
-        view.model.isEnabled = context.environment.isEnabled
-        view.model.setLifted = setLifted
+        view.model = model
     }
 }
 
 /// Marks the frame of a view with a `stableContextMenu`. Draws nothing and takes no touch:
 /// the long press is seen by its host's interaction (`StableMenuHost`).
 final class StableMenuAnchorView: UIView {
-    let model = StableMenuModel()
+    fileprivate(set) var model: StableMenuModel
     private weak var host: StableMenuHost?
 
-    override init(frame: CGRect) {
-        super.init(frame: frame)
+    init(model: StableMenuModel) {
+        self.model = model
+        super.init(frame: .zero)
         isUserInteractionEnabled = false
         isAccessibilityElement = false
         accessibilityElementsHidden = true

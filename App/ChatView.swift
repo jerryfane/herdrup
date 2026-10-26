@@ -58,6 +58,10 @@ final class ChatModel: ObservableObject {
     /// The server cannot give this agent a transcript (not omp, no session file, an older
     /// server or peer): the page goes back to the terminal for good.
     @Published private(set) var unsupported = false
+    /// The chat's lines, flattened from `turns` and `outgoing` once per change of either
+    /// (not per draw), with each row's position by id.
+    fileprivate private(set) var rows: [ChatRow] = []
+    fileprivate private(set) var rowIndex: [String: Int] = [:]
 
     let store: TranscriptStore
 
@@ -86,14 +90,16 @@ final class ChatModel: ObservableObject {
         followSend()
     }
 
-    /// Until when a pending send keeps the poll at one second: the minute before an
-    /// unmatched send is demoted, plus the poll that demotes it.
+    /// The poll's interval while a send waits to show up in the transcript.
+    static let fastPollSeconds: UInt64 = 3
+    /// Until when a pending send keeps the poll fast: the minute before an unmatched send
+    /// is demoted, plus the poll that demotes it.
     private var fastPollUntil = Date.distantPast
     /// The poll's current sleep; a staged or updated send cancels it to poll sooner.
     private var pollWait: Task<Void, Never>?
 
     private func followSend() {
-        fastPollUntil = Date().addingTimeInterval(TranscriptOutbox.unseenAfter + 1)
+        fastPollUntil = Date().addingTimeInterval(TranscriptOutbox.unseenAfter + TimeInterval(Self.fastPollSeconds))
         pollWait?.cancel()
     }
 
@@ -156,9 +162,9 @@ final class ChatModel: ObservableObject {
     }
 
     /// Keeps the chat current while it is on screen: the agent's own events where the
-    /// server sends them (owner), a 1 s poll while a send waits to show up in the
-    /// transcript, a 3 s poll while omp works, and a slow poll otherwise as a backstop for a
-    /// missed event (and for guests, who have no event stream).
+    /// server sends them (owner), a 3 s poll while a send waits to show up in the
+    /// transcript or while omp works, and a slow poll otherwise as a backstop for a missed
+    /// event (and for guests, who have no event stream).
     func follow(client: HerdrClient, paneID: String?) async {
         await store.refresh(client: client)
         await withTaskGroup(of: Void.self) { group in
@@ -183,7 +189,7 @@ final class ChatModel: ObservableObject {
     private func waitForPoll() async -> Bool {
         let seconds: UInt64
         if hasPendingSend && Date() < fastPollUntil {
-            seconds = 1
+            seconds = Self.fastPollSeconds
         } else {
             seconds = store.isWorking ? 3 : 30
         }
@@ -216,64 +222,110 @@ final class ChatModel: ObservableObject {
         }
     }
 
+    /// Republishes the store. Each value is assigned only when it changed: an equal
+    /// assignment still sends `objectWillChange`, which redraws the whole chat.
     private func sync() {
-        turns = store.turns
-        working = store.working
-        outgoing = store.outbox.messages
-        sessionModel = store.model
-        currentPlan = store.currentPlan
-        recap = store.recap
-        hasOlder = store.hasOlder
-        loadingOlder = store.loadingOlder
-        loaded = store.loaded
+        let turnsChanged = store.turns != turns
+        let outgoingChanged = store.outbox.messages != outgoing
+        if turnsChanged { turns = store.turns }
+        if outgoingChanged { outgoing = store.outbox.messages }
+        if turnsChanged || outgoingChanged {
+            rows = ChatRow.rows(turns: turns, outgoing: outgoing)
+            rowIndex = Dictionary(rows.enumerated().map { ($1.id, $0) }, uniquingKeysWith: { first, _ in first })
+        }
+        assign(\.working, store.working)
+        assign(\.sessionModel, store.model)
+        assign(\.currentPlan, store.currentPlan)
+        assign(\.recap, store.recap)
+        assign(\.hasOlder, store.hasOlder)
+        assign(\.loadingOlder, store.loadingOlder)
+        assign(\.loaded, store.loaded)
         if let error = store.lastError as? AgentTranscriptError {
             switch error {
-            case .unsupported: unsupported = true
-            case .agentNotFound: failure = "This agent is gone."
-            case .unavailable: failure = "omp's session file can't be read right now."
-            case .cursorExpired: failure = nil
+            case .unsupported: assign(\.unsupported, true)
+            case .agentNotFound: assign(\.failure, "This agent is gone.")
+            case .unavailable: assign(\.failure, "omp's session file can't be read right now.")
+            case .cursorExpired: assign(\.failure, nil)
             }
         } else if let error = store.lastError {
             // A guest whose host refuses the method for guests: the Chat tab goes away.
             let code = (error as? APIError)?.code
             if code == "forbidden" || code == "guest_forbidden" {
-                unsupported = true
-                failure = nil
+                assign(\.unsupported, true)
+                assign(\.failure, nil)
             } else {
-                failure = "Couldn't load the chat."
+                assign(\.failure, "Couldn't load the chat.")
             }
         } else {
-            failure = nil
+            assign(\.failure, nil)
         }
+    }
+
+    private func assign<Value: Equatable>(_ keyPath: ReferenceWritableKeyPath<ChatModel, Value>, _ value: Value) {
+        if self[keyPath: keyPath] != value { self[keyPath: keyPath] = value }
     }
 }
 
+/// A turn's prompt as its row draws it: only what the bubble shows, so comparing rows
+/// does not compare the turn's whole work.
+private struct ChatPrompt: Equatable {
+    /// The turn's id.
+    let id: String
+    let text: String
+    let author: TranscriptAuthor?
+    let attachment: GramAttachmentPrompt.Parsed?
+}
+
 /// One line of the chat list, flattened from the turns so every row scrolls by id.
-private enum ChatRow: Identifiable {
+/// Built once per change of the transcript (`ChatModel.rows`); an unchanged entry gives an
+/// equal row with the same id, so its view is not redrawn.
+private enum ChatRow: Identifiable, Equatable {
     case day(id: String, ms: UInt64)
-    case prompt(TranscriptTurn)
+    case prompt(ChatPrompt)
     case item(TranscriptItem)
     case outgoing(TranscriptOutgoingMessage)
 
     var id: String {
         switch self {
         case .day(let id, _): return "day:" + id
-        case .prompt(let turn): return "prompt:" + turn.id
+        case .prompt(let prompt): return "prompt:" + prompt.id
         case .item(let item): return "item:" + item.id
         case .outgoing(let message): return "outgoing:" + message.id
         }
+    }
+
+    static func rows(turns: [TranscriptTurn], outgoing: [TranscriptOutgoingMessage]) -> [ChatRow] {
+        var rows: [ChatRow] = []
+        var previousMs: UInt64?
+        for turn in turns {
+            if turn.prompt != nil, turn.startMs > 0 {
+                if ChatDay.needsSeparator(previousMs: previousMs, ms: turn.startMs) {
+                    rows.append(.day(id: turn.id, ms: turn.startMs))
+                }
+                previousMs = turn.startMs
+                rows.append(.prompt(ChatPrompt(id: turn.id, text: turn.promptText ?? "", author: turn.promptAuthor,
+                                               attachment: turn.attachmentPrompt)))
+            }
+            for item in turn.items { rows.append(.item(item)) }
+        }
+        rows.append(contentsOf: outgoing.map(ChatRow.outgoing))
+        return rows
+    }
+
+    var askID: String? {
+        if case .item(.ask(let id, _, _)) = self { return id }
+        return nil
     }
 
     /// The row's searchable text before markdown is stripped (`plainSearchText`).
     var searchSource: String {
         switch self {
         case .day: return ""
-        case .prompt(let turn):
-            guard case .user(let prompt, _) = turn.prompt?.kind else { return "" }
-            if let bundle = GramAttachmentPrompt.parse(prompt) {
+        case .prompt(let prompt):
+            if let bundle = prompt.attachment {
                 return ([bundle.caption] + bundle.files.map(\.name)).joined(separator: "\n")
             }
-            return prompt
+            return prompt.text
         case .outgoing(let message):
             return ([message.text] + message.files.map(\.name)).joined(separator: "\n")
         case .item(let item):
@@ -326,6 +378,15 @@ private struct ChatSearchKey: Equatable {
     static let none = ChatSearchKey(query: "", turns: [], outgoing: [])
 }
 
+/// Which rows the chat draws (`ChatView.drawWindow`).
+private enum ChatWindow: Equatable {
+    /// The newest `ChatView.renderWindow` rows: until the chat lands, and after a reload
+    /// that dropped the window's top row.
+    case newest
+    /// From this row (never a day label) down to the tail.
+    case from(String)
+}
+
 /// The omp Chat view: the conversation read from omp's session file, newest at the bottom,
 /// older turns loading as the reader scrolls up (Gram's pattern). Owner and guest share it.
 struct ChatView: View {
@@ -350,7 +411,6 @@ struct ChatView: View {
     /// `(index, total, capped)`: `capped` when the matches stop at `TranscriptSearch.matchCap`.
     var onFindResult: (Int, Int, Bool) -> Void = { _, _, _ in }
 
-    @Environment(\.horizontalSizeClass) private var sizeClass
     @Environment(\.accessibilityReduceMotion) private var reduceMotion
     @AppStorage(ChatTextSize.storageKey) private var chatFontSize = ChatTextSize.defaultPoints
     private var textScale: CGFloat { CGFloat(chatFontSize / ChatTextSize.defaultPoints) }
@@ -373,6 +433,21 @@ struct ChatView: View {
     @State private var openQuestionID: String?
     /// The message whose Select Text sheet is open.
     @State private var selectingText: ChatSelectableText?
+
+    /// Which rows are drawn (`drawnStart`): the newest `renderWindow` until the chat lands,
+    /// then from a fixed row down, so rows arriving at the tail never push out the top of
+    /// what the reader sees. Reaching the top reveals another window before any fetch.
+    @State private var drawWindow = ChatWindow.newest
+
+    /// Rows drawn at first and revealed per arrival at the top: a few screens, cheap to lay
+    /// out. Every loaded row stays searchable; a hit above the window widens it.
+    static var renderWindow: Int {
+        #if DEBUG
+        if let override = ProcessInfo.processInfo.environment["HERDR_CHAT_RENDER_WINDOW"].flatMap(Int.init),
+           override > 0 { return override }
+        #endif
+        return 40
+    }
 
     /// How long typing must pause before the term is searched.
     private static let typingPause: Duration = .milliseconds(180)
@@ -409,7 +484,7 @@ struct ChatView: View {
             if key.query != searchKey.query { selectedSearchHit = nil }
             searchKey = key
             searchResult = key.query.isEmpty ? .empty
-                : TranscriptSearch.search(rows.lazy.map { searchTexts.row(for: $0) }, query: key.query)
+                : TranscriptSearch.search(model.rows.lazy.map { searchTexts.row(for: $0) }, query: key.query)
         }
         let hits = searchResult.hits
         guard !hits.isEmpty else {
@@ -430,14 +505,23 @@ struct ChatView: View {
         onFindResult(index + 1, hits.count, searchResult.capped)
         atBottom = false
         followingLatest = false
-        if let row = rows.first(where: { $0.id == hit.rowID }), case .item(.work(let work)) = row {
-            expanded.insert("t:" + work.id)
-            expanded.insert("s:" + work.id)
-            for item in work.steps { expanded.insert("d:" + item.id) }
+        var widened = false
+        if let position = model.rowIndex[hit.rowID] {
+            if position < drawnStart {
+                drawWindow = windowStarting(at: position)
+                widened = true
+            }
+            if case .item(.work(let work)) = model.rows[position] {
+                expanded.insert("t:" + work.id)
+                expanded.insert("s:" + work.id)
+                for item in work.steps { expanded.insert("d:" + item.id) }
+            }
         }
-        guard moved || step || reveal else { return }
+        guard moved || step || reveal || widened else { return }
         Task { @MainActor in
             await Task.yield()
+            // Rows just drawn above the window are laid out before the scroll can find them.
+            if widened { try? await Task.sleep(nanoseconds: 30_000_000) }
             guard selectedSearchHit == hit.id, findRequest != nil else { return }
             proxy.scrollTo("search:" + hit.id, anchor: .center)
         }
@@ -514,7 +598,7 @@ struct ChatView: View {
         .overlay {
             if !model.loaded {
                 ProgressView().tint(Palette.textDim).accessibilityIdentifier("chat-loading")
-            } else if rows.isEmpty, model.failure == nil {
+            } else if model.rows.isEmpty, model.failure == nil {
                 Text("No messages yet").font(Typography.app(14 * textScale)).foregroundStyle(Palette.textFaint)
             }
         }
@@ -526,6 +610,7 @@ struct ChatView: View {
                 if scrollPosition.isAtBottom { break }
             }
             landed = true
+            drawWindow = windowStarting(at: drawnStart)
         }
         // One search update per change: a new term (once typing pauses), a step (Next or
         // Previous), or a new transcript under the same term.
@@ -549,10 +634,13 @@ struct ChatView: View {
 
     private func transcriptColumn(_ proxy: ScrollViewProxy, hits: [TranscriptSearchHit]) -> some View {
         let hitsByRow = Dictionary(grouping: hits, by: \.rowID)
+        let actions = rowActions
         return VStack(alignment: .leading, spacing: 10) {
             topSentinel(proxy)
-            ForEach(rows) { row in
-                searchableRow(row, hits: hitsByRow[row.id] ?? [])
+            ForEach(model.rows[drawnStart...]) { row in
+                chatRow(row, hits: hitsByRow[row.id] ?? [], actions: actions)
+                    .equatable()
+                    .id(row.id)
             }
             sessionFooter
         }
@@ -663,12 +751,39 @@ struct ChatView: View {
         }
     }
 
-    private func searchableRow(_ row: ChatRow, hits: [TranscriptSearchHit]) -> some View {
-        VStack(alignment: .leading, spacing: 6) {
-            rowView(row)
-            ChatSearchResults(hits: hits, query: searchKey.query, selectedID: selectedSearchHit)
+    /// A row's inputs. Each is narrowed to the row (its own expanded keys, its own hits, the
+    /// answer state of its own question), so a change elsewhere leaves it equal and undrawn.
+    private func chatRow(_ row: ChatRow, hits: [TranscriptSearchHit], actions: ChatRowActions) -> ChatRowView {
+        var keys = Set<String>()
+        if !expanded.isEmpty, case .item(.work(let work)) = row {
+            for key in ["t:" + work.id, "s:" + work.id] where expanded.contains(key) { keys.insert(key) }
+            if keys.contains("s:" + work.id) {
+                for step in work.steps where expanded.contains("d:" + step.id) { keys.insert("d:" + step.id) }
+            }
         }
-        .id(row.id)
+        var recorded = false
+        if case .prompt(let prompt) = row { recorded = model.store.outbox.recordedPromptIDs.contains(prompt.id) }
+        let askID = row.askID
+        return ChatRowView(
+            row: row, viewer: viewer, client: client, expanded: keys, recorded: recorded,
+            answering: askID != nil && model.answeringAskID == askID,
+            problem: askID != nil && model.answerProblem?.askID == askID ? model.answerProblem : nil,
+            hits: hits, query: hits.isEmpty ? "" : searchKey.query,
+            selectedHitID: hits.isEmpty ? nil : selectedSearchHit,
+            actions: actions)
+    }
+
+    private var rowActions: ChatRowActions {
+        ChatRowActions(
+            toggle: { key in toggle(key) },
+            openNote: { note in openNote = note },
+            openQuestion: { id in openQuestionID = id },
+            answer: { id, option in Task { await model.answer(client: client, askID: id, option: option) } },
+            openTerminal: {
+                openQuestionID = nil
+                onOpenTerminal()
+            },
+            selectText: { text in selectingText = text })
     }
 
     private var questionSheet: some View {
@@ -692,37 +807,6 @@ struct ChatView: View {
 
     // MARK: - Rows
 
-    private var rows: [ChatRow] {
-        var rows: [ChatRow] = []
-        var previousMs: UInt64?
-        for turn in model.turns {
-            if turn.prompt != nil, turn.startMs > 0 {
-                if ChatDay.needsSeparator(previousMs: previousMs, ms: turn.startMs) {
-                    rows.append(.day(id: turn.id, ms: turn.startMs))
-                }
-                previousMs = turn.startMs
-                rows.append(.prompt(turn))
-            }
-            for item in turn.items { rows.append(.item(item)) }
-        }
-        rows.append(contentsOf: model.outgoing.map(ChatRow.outgoing))
-        return rows
-    }
-
-    @ViewBuilder
-    private func rowView(_ row: ChatRow) -> some View {
-        switch row {
-        case .day(_, let ms):
-            dayLabel(ms)
-        case .prompt(let turn):
-            promptBubble(turn)
-        case .item(let item):
-            itemView(item)
-        case .outgoing(let message):
-            outgoingBubble(message)
-        }
-    }
-
     private func questionCard(id: String, ask: TranscriptAsk, pending: TranscriptPendingAsk?) -> some View {
         ChatAskCard(id: id, ask: ask, pending: pending, viewer: viewer,
                     answering: model.answeringAskID == id,
@@ -734,48 +818,6 @@ struct ChatView: View {
                         openQuestionID = nil
                         onOpenTerminal()
                     })
-    }
-
-    @ViewBuilder
-    private func itemView(_ item: TranscriptItem) -> some View {
-        switch item {
-        case .work(let work):
-            workView(work)
-        case .reply(_, let text, _):
-            ChatMarkdownView(markdown: text)
-                .stableContextMenu { messageMenu(text, markdown: true, offersMarkdown: true) }
-                .accessibilityElement(children: .contain)
-                .accessibilityIdentifier("chat-reply")
-        case .note(_, let tsMs, let note):
-            noteCard(note, tsMs: tsMs)
-        case .plan:
-            EmptyView() // The current snapshot stays visible once at the conversation's end.
-        case .ask(let id, let ask, let pending):
-            VStack(alignment: .leading, spacing: 6) {
-                questionCard(id: id, ask: ask, pending: pending)
-                Button("Open question") { openQuestionID = id }
-                    .font(Typography.app(13 * textScale))
-                    .accessibilityIdentifier("chat-question-open")
-            }
-            .frame(maxWidth: sizeClass == .regular ? 520 : .infinity, alignment: .leading)
-        case .turnFailed(_, let status, let error):
-            HStack(alignment: .firstTextBaseline, spacing: 7) {
-                Image(systemName: status == .aborted ? "stop.circle" : "exclamationmark.circle")
-                    .font(.system(size: 12, weight: .semibold))
-                Text(status == .aborted ? "Stopped" : "Failed\(error.map { " · \($0)" } ?? "")")
-                    .font(Typography.app(14 * textScale)).lineLimit(3)
-            }
-            .foregroundStyle(status == .aborted ? Palette.textFaint : Palette.died)
-            .accessibilityIdentifier("chat-turn-failed")
-        case .summary(_, let text):
-            HStack(spacing: 10) {
-                Rectangle().fill(Palette.hairlineQuiet).frame(height: 1)
-                Text(text).font(Typography.app(13 * textScale)).foregroundStyle(Palette.textFaint).fixedSize()
-                Rectangle().fill(Palette.hairlineQuiet).frame(height: 1)
-            }
-            .padding(.vertical, 4)
-            .accessibilityIdentifier("chat-summary")
-        }
     }
 
     // MARK: - Top of the list
@@ -805,269 +847,92 @@ struct ChatView: View {
             proxyGeometry.frame(in: .named(Self.scrollSpace)).maxY > -40
         } action: { visible in
             topVisible = visible
-            if visible { loadOlder(proxy) }
+            if visible { showOlder(proxy) }
         }
         // `landed` flips after the first scroll; the sentinel may already be on screen.
-        .onChange(of: landed) { _, _ in if topVisible { loadOlder(proxy) } }
+        .onChange(of: landed) { _, _ in if topVisible { showOlder(proxy) } }
     }
 
-    /// Fetches the next older page and keeps the row that was on top where it was.
+    // MARK: - The drawn window
+
+    /// The first drawn row's index in `model.rows`: the window's top row, with the day label
+    /// over it.
+    private var drawnStart: Int {
+        let rows = model.rows
+        if case .from(let id) = drawWindow, let index = model.rowIndex[id] {
+            if index > 0, case .day = rows[index - 1] { return index - 1 }
+            return index
+        }
+        return max(0, rows.count - Self.renderWindow)
+    }
+
+    /// The window whose top is row `index` (clamped to the rows). Its top is never a day
+    /// label, which comes and goes as older turns merge above it: the prompt under the label
+    /// is the top, and draws its label with it. Older rows merged above a window stay
+    /// undrawn until a reveal, so a fetch never lays out a whole page at once.
+    private func windowStarting(at index: Int) -> ChatWindow {
+        let rows = model.rows
+        guard !rows.isEmpty else { return .newest }
+        var index = min(max(index, 0), rows.count - 1)
+        if case .day = rows[index], index + 1 < rows.count { index += 1 }
+        return .from(rows[index].id)
+    }
+
+    /// The row a reveal or a fetch keeps in place: the top drawn row, or the prompt under it
+    /// when that is a day label (which may go when older turns merge above it).
+    private var anchorRowID: String? {
+        let rows = model.rows
+        var index = drawnStart
+        guard index < rows.count else { return nil }
+        if case .day = rows[index], index + 1 < rows.count { index += 1 }
+        return rows[index].id
+    }
+
+    /// The reader reached the top: the next window of rows already loaded, else the next
+    /// older page. Either way the row that was on top stays where it was. `fetches` false: a
+    /// window only, as when a revealed window still does not reach the screen's top.
+    private func showOlder(_ proxy: ScrollViewProxy, fetches: Bool = true) {
+        guard landed, findRequest == nil else { return }
+        let start = drawnStart
+        guard start > 0 else {
+            if fetches { loadOlder(proxy) }
+            return
+        }
+        guard let anchor = anchorRowID else { return }
+        drawWindow = windowStarting(at: start - Self.renderWindow)
+        Task {
+            try? await Task.sleep(nanoseconds: 30_000_000)
+            proxy.scrollTo(anchor, anchor: .top)
+            // The sentinel's visibility is measured again after that scroll; still in view
+            // (short rows), it gets the next window, never a fetch.
+            try? await Task.sleep(nanoseconds: 150_000_000)
+            if topVisible, landed, findRequest == nil { showOlder(proxy, fetches: false) }
+        }
+    }
+
+    /// Fetches the next older page and draws its newest window above the row that was on
+    /// top, which stays where it was.
     private func loadOlder(_ proxy: ScrollViewProxy, retry: Bool = false) {
         guard landed, findRequest == nil, model.hasOlder, !model.loadingOlder, retry || !model.olderFailed else { return }
-        let anchor = rows.first?.id
+        let anchor = anchorRowID
         Task {
             await model.loadOlder(client: client)
-            guard let anchor else { return }
+            guard let anchor, let index = model.rowIndex[anchor] else { return }
+            drawWindow = windowStarting(at: index - Self.renderWindow)
             try? await Task.sleep(nanoseconds: 30_000_000)
             proxy.scrollTo(anchor, anchor: .top)
         }
     }
 
-    // MARK: - Pieces
-
-    private func dayLabel(_ ms: UInt64) -> some View {
-        let (day, time) = ChatDay.label(ms: ms, now: Date())
-        return (Text(day).font(Typography.app(13 * textScale, .semibold)) + Text(" " + time).font(Typography.app(13 * textScale)))
-            .foregroundStyle(Palette.textFaint)
-            .frame(maxWidth: .infinity)
-            .padding(.vertical, 4)
-            .accessibilityIdentifier("chat-day")
-    }
-
-    @ViewBuilder
-    private func promptBubble(_ turn: TranscriptTurn) -> some View {
-        let byline = byline(for: turn.promptAuthor)
-        VStack(alignment: .trailing, spacing: 4) {
-            if let byline {
-                Text(byline).font(Typography.app(12 * textScale, .medium)).foregroundStyle(Palette.textFaint)
-                    .padding(.trailing, 6)
-            }
-            if let attachment = turn.attachmentPrompt {
-                if !attachment.caption.isEmpty { promptText(attachment.caption) }
-                ChatAttachmentBundle(files: attachment.files, client: client)
-                    .frame(maxWidth: sizeClass == .regular ? 480 : 296)
-            } else {
-                promptText(turn.promptText ?? "")
-            }
-            if model.store.outbox.recordedPromptIDs.contains(turn.id) {
-                Text("In transcript").font(Typography.app(11 * textScale)).foregroundStyle(Palette.textFaint)
-                    .padding(.trailing, 6)
-            }
-        }
-        .frame(maxWidth: .infinity, alignment: .trailing)
-        .padding(.leading, 40)
-    }
-
-    private func promptText(_ text: String) -> some View {
-        Text(text)
-            .font(Typography.app(16 * textScale))
-            .foregroundStyle(Palette.text)
-            .lineSpacing(1)
-            .fixedSize(horizontal: false, vertical: true)
-            .padding(.horizontal, 14).padding(.top, 9).padding(.bottom, 10)
-            .background(UnevenRoundedRectangle(topLeadingRadius: 18, bottomLeadingRadius: 18,
-                                               bottomTrailingRadius: 6, topTrailingRadius: 18)
-                .fill(Palette.surfaceRaised))
-            .stableContextMenu(previewCornerRadius: 18) { messageMenu(text, markdown: false) }
-            .frame(maxWidth: sizeClass == .regular ? 480 : 296, alignment: .trailing)
-            .accessibilityIdentifier("chat-user-bubble")
-    }
-
-    /// A message's menu, on a long press (a right click on a Mac): Copy, Copy as Markdown on
-    /// a reply, and Select Text. A `stableContextMenu`, never `.contextMenu`: this view
-    /// redraws on every poll and stream event, which rebuilds an open SwiftUI menu (#437).
-    /// Its entries are also the message's VoiceOver actions, so Copy needs no long press.
-    /// `markdown`: the text is rendered markdown (a reply or a thought), so Copy and Select
-    /// Text give it as read, without the syntax. Nothing is parsed until an entry is chosen.
-    @MainActor @StableMenuBuilder
-    private func messageMenu(_ text: String, markdown: Bool, offersMarkdown: Bool = false) -> [StableMenuItem] {
-        StableMenuItem("Copy", systemImage: "doc.on.doc") {
-            ChatClipboard.write(markdown ? ChatMessageText.plain(text) : text)
-        }
-        if offersMarkdown {
-            StableMenuItem("Copy as Markdown", systemImage: "chevron.left.forwardslash.chevron.right") {
-                ChatClipboard.write(text)
-            }
-        }
-        StableMenuItem("Select Text", systemImage: "selection.pin.in.out") {
-            selectingText = ChatSelectableText(text: markdown ? ChatMessageText.readable(text) : AttributedString(text))
-        }
-    }
-
-    /// The UI tests' `chat-copy-probe` (`ChatCopyProbe`), in a mock run only.
+    /// The UI tests' `chat-copy-probe` (`ChatCopyProbe`) and `chat-row-renders`
+    /// (`ChatRowRenderProbe`), in a mock run only.
     @ViewBuilder private var copyProbe: some View {
         #if DEBUG
-        if ScreenshotMock.mode != nil { ChatCopyProbe() }
+        if ScreenshotMock.mode != nil {
+            ChatCopyProbe()
+            ChatRowRenderProbe()
+        }
         #endif
-    }
-
-    private func outgoingBubble(_ message: TranscriptOutgoingMessage) -> some View {
-        let receipt: String
-        switch message.state {
-        case .sending: receipt = "Sending…"
-        case .submitted: receipt = "Accepted by agent"
-        case .unconfirmed: receipt = "Confirmation pending"
-        case .notDelivered(let reason): receipt = "Not sent · \(reason)"
-        case .previousSession: receipt = "Previous session · confirmation unavailable"
-        case .notSeen: receipt = "Not seen in chat · check Terminal"
-        }
-        return VStack(alignment: .trailing, spacing: 4) {
-            if !message.text.isEmpty { promptText(message.text) }
-            if !message.files.isEmpty {
-                ChatAttachmentBundle(files: message.files, client: client)
-                    .frame(maxWidth: sizeClass == .regular ? 480 : 296)
-            }
-            Text(receipt).font(Typography.app(11 * textScale)).foregroundStyle(Palette.textFaint)
-                .padding(.trailing, 6)
-                .accessibilityIdentifier("chat-send-receipt")
-                .onChange(of: receipt) { _, receipt in
-                    UIAccessibility.post(notification: .announcement, argument: receipt)
-                }
-        }
-        .frame(maxWidth: .infinity, alignment: .trailing)
-        .padding(.leading, 40)
-        .accessibilityIdentifier("chat-outgoing-message")
-    }
-
-    /// Whose prompt this was, when it was not the reader's own.
-    private func byline(for author: TranscriptAuthor?) -> String? {
-        switch (viewer, author) {
-        case (.owner, .guest(let name)?):
-            return "\(name ?? "Guest") · guest"
-        case (.guest(_, let owner), .owner?):
-            return owner
-        case (.guest(let me, _), .guest(let name)?):
-            return name == me ? nil : "\(name ?? "Guest") · guest"
-        default:
-            return nil
-        }
-    }
-
-    @ViewBuilder
-    private func workView(_ work: TranscriptWork) -> some View {
-        let thoughtKey = "t:" + work.id
-        let stepsKey = "s:" + work.id
-        VStack(alignment: .leading, spacing: 10) {
-            if let thought = work.latestThought {
-                Button { toggle(thoughtKey) } label: {
-                    HStack(spacing: 6) {
-                        chevron(open: expanded.contains(thoughtKey), color: Palette.textFaint)
-                        Text("Thought").font(Typography.app(14 * textScale, .semibold)).foregroundStyle(Palette.textDim)
-                            .fixedSize()
-                        if !expanded.contains(thoughtKey) {
-                            Text(ChatInline.styled(ChatDay.firstSentence(thought), size: 14 * textScale))
-                                .foregroundStyle(Palette.textFaint).lineLimit(1).truncationMode(.tail)
-                        }
-                    }
-                    .frame(maxWidth: .infinity, alignment: .leading)
-                    .contentShape(Rectangle())
-                }
-                .buttonStyle(.plain)
-                .accessibilityLabel("Thought: \(ChatDay.firstSentence(thought))")
-                .accessibilityHint(expanded.contains(thoughtKey) ? "Collapses the thought" : "Shows the whole thought")
-                .accessibilityIdentifier("chat-thought")
-                if expanded.contains(thoughtKey) {
-                    ChatMarkdownView(markdown: work.thoughts.joined(separator: "\n\n"))
-                        .frame(maxWidth: .infinity, alignment: .leading)
-                        .stableContextMenu { messageMenu(work.thoughts.joined(separator: "\n\n"), markdown: true) }
-                        .padding(.vertical, 2).padding(.leading, 12)
-                        .overlay(alignment: .leading) { Rectangle().fill(Palette.hairlineQuiet).frame(width: 2) }
-                        .padding(.leading, 5)
-                        .accessibilityIdentifier("chat-thought-open")
-                }
-            }
-            if !work.steps.isEmpty {
-                Button { toggle(stepsKey) } label: {
-                    HStack(spacing: 7) {
-                        chevron(open: expanded.contains(stepsKey), color: Palette.textDim)
-                        stepsSummary(work)
-                    }
-                    .frame(maxWidth: .infinity, alignment: .leading)
-                    .contentShape(Rectangle())
-                }
-                .buttonStyle(.plain)
-                .accessibilityIdentifier("chat-steps")
-                if expanded.contains(stepsKey) {
-                    stepList(work)
-                }
-            }
-        }
-    }
-
-    private func stepsSummary(_ work: TranscriptWork) -> some View {
-        TimelineView(.periodic(from: .now, by: work.live ? 30 : 3600)) { context in
-            let endMs = work.live ? UInt64(max(context.date.timeIntervalSince1970 * 1000, 0)) : work.endMs
-            let duration = ChatDay.duration(ms: endMs > work.startMs ? endMs - work.startMs : 0)
-            let count = work.steps.count == 1 ? "1 step" : "\(work.steps.count) steps"
-            (Text("\(work.live ? "Working" : "Worked") for \(duration)").foregroundColor(Palette.textDim)
-                + Text(" · \(count)").foregroundColor(Palette.textFaint))
-                .font(Typography.app(14 * textScale))
-                .lineLimit(1)
-        }
-    }
-
-    private func stepList(_ work: TranscriptWork) -> some View {
-        VStack(alignment: .leading, spacing: 5) {
-            ForEach(work.steps) { step in
-                let running = step.status == .running && work.live
-                let detailKey = "d:" + step.id
-                VStack(alignment: .leading, spacing: 3) {
-                    HStack(alignment: .firstTextBaseline, spacing: 7) {
-                        Circle()
-                            .fill(step.status == .error ? Palette.died : running ? Palette.working : Palette.hairline)
-                            .frame(width: 5, height: 5)
-                            .alignmentGuide(.firstTextBaseline) { $0[.bottom] + 2.5 }
-                        Text(step.intent).font(Typography.app(13.5 * textScale))
-                            .foregroundStyle(running ? Palette.textDim : Palette.textFaint)
-                            .fixedSize(horizontal: false, vertical: true)
-                    }
-                    if expanded.contains(detailKey), let detail = step.detail, !detail.isEmpty {
-                        Text(detail).font(Typography.machine(11.5 * textScale)).foregroundStyle(Palette.textFaint)
-                            .fixedSize(horizontal: false, vertical: true)
-                            .textSelection(.enabled)
-                            .padding(.leading, 12)
-                    }
-                }
-                .contentShape(Rectangle())
-                .onTapGesture { if step.detail != nil { toggle(detailKey) } }
-                .accessibilityElement(children: .combine)
-                .accessibilityLabel(running ? "\(step.intent), running" : step.intent)
-                .accessibilityIdentifier(running ? "chat-step-running" : "chat-step")
-            }
-        }
-        .padding(.vertical, 1).padding(.leading, 12)
-        .overlay(alignment: .leading) { Rectangle().fill(Palette.hairlineQuiet).frame(width: 2) }
-        .padding(.leading, 5)
-        .accessibilityElement(children: .contain)
-        .accessibilityIdentifier("chat-steplist")
-    }
-
-    private func noteCard(_ note: TranscriptNote, tsMs: UInt64) -> some View {
-        Button { openNote = note } label: {
-            HStack(spacing: 10) {
-                Image(systemName: ChatNoteStyle.icon(note.source))
-                    .font(.system(size: 14, weight: .medium)).foregroundStyle(Palette.textDim)
-                    .frame(width: 30, height: 30)
-                    .background(RoundedRectangle(cornerRadius: 9).fill(Palette.surfaceRaised))
-                VStack(alignment: .leading, spacing: 1) {
-                    Text(ChatNoteStyle.kicker(note, tsMs: tsMs))
-                        .font(Typography.machine(10.5 * textScale, .semibold)).tracking(1.2)
-                        .foregroundStyle(Palette.textFaint).lineLimit(1)
-                    Text(ChatNoteStyle.title(note)).font(Typography.app(14.5 * textScale)).foregroundStyle(Palette.text).lineLimit(1)
-                }
-                .frame(maxWidth: .infinity, alignment: .leading)
-                Image(systemName: "chevron.right").font(.system(size: 12, weight: .semibold))
-                    .foregroundStyle(Palette.textFaint)
-            }
-            .padding(.horizontal, 12).padding(.vertical, 10)
-            .background(RoundedRectangle(cornerRadius: 14).fill(Palette.surface))
-            .overlay(RoundedRectangle(cornerRadius: 14).strokeBorder(Palette.hairline, lineWidth: 1))
-            .contentShape(RoundedRectangle(cornerRadius: 14))
-        }
-        .buttonStyle(.plain)
-        .accessibilityLabel("\(ChatNoteStyle.sourceName(note.source)) note: \(note.title)")
-        .accessibilityHint("Opens the full message")
-        .accessibilityIdentifier("chat-note")
     }
 
     /// Collapsed (the default for the session) the card shows the work at hand: at most three
@@ -1081,7 +946,7 @@ struct ChatView: View {
         return VStack(alignment: .leading, spacing: 8) {
             Button(action: togglePlan) {
                 HStack(spacing: 6) {
-                    chevron(open: open, color: Palette.textFaint)
+                    ChatRowView.chevron(open: open, color: Palette.textFaint)
                     Text("TODO · \(done) OF \(items.count)")
                         .font(Typography.machine(10.5 * textScale, .semibold)).tracking(1.2).foregroundStyle(Palette.textFaint)
                     Spacer(minLength: 8)
@@ -1149,14 +1014,6 @@ struct ChatView: View {
         .accessibilityIdentifier("chat-plan")
     }
 
-
-    private func chevron(open: Bool, color: Color) -> some View {
-        Image(systemName: open ? "chevron.down" : "chevron.right")
-            .font(.system(size: 10, weight: .bold))
-            .foregroundStyle(color)
-            .frame(width: 12, height: 12)
-    }
-
     private func toggle(_ key: String) {
         if expanded.contains(key) { expanded.remove(key) } else { expanded.insert(key) }
     }
@@ -1165,6 +1022,432 @@ struct ChatView: View {
         withAnimation(reduceMotion ? nil : .easeInOut(duration: 0.15)) { toggle("plan") }
     }
 }
+
+/// The page that hosts the chat redraws on every composer keystroke, and builds ChatView
+/// with closures that never compare equal; `.equatable()` with this comparison lets those
+/// passes skip the chat. The model's changes, the environment and ChatView's own state still
+/// redraw it. The closures are left out: they write the host's state, which they reach
+/// through its storage, so the first ones stay current.
+extension ChatView: Equatable {
+    nonisolated static func == (lhs: ChatView, rhs: ChatView) -> Bool {
+        MainActor.assumeIsolated {
+            lhs.client === rhs.client
+                && lhs.model === rhs.model
+                && lhs.viewer == rhs.viewer
+                && lhs.eventsPaneID == rhs.eventsPaneID
+                && lhs.isActive == rhs.isActive
+                && lhs.live == rhs.live
+                && lhs.agentStatus == rhs.agentStatus
+                && lhs.ground == rhs.ground
+                && lhs.findRequest == rhs.findRequest
+        }
+    }
+}
+
+/// What a row's controls do. They change the chat's state (ChatView's), which comes back to
+/// the row as its inputs; they never draw, so rows are compared without them.
+private struct ChatRowActions {
+    let toggle: (String) -> Void
+    let openNote: (TranscriptNote) -> Void
+    let openQuestion: (String) -> Void
+    let answer: (_ askID: String, _ option: String) -> Void
+    let openTerminal: () -> Void
+    let selectText: (ChatSelectableText) -> Void
+}
+
+/// One line of the chat list, drawn from its inputs alone. `Equatable` over everything it
+/// draws (`.equatable()` in ChatView), so a poll, a search keystroke or a toggle elsewhere
+/// that leaves a row's inputs alone skips its body. Before, every ChatView pass re-ran every
+/// row: hundreds of markdown parses and long-press menus on a long session.
+private struct ChatRowView: View, Equatable {
+    let row: ChatRow
+    let viewer: ChatViewer
+    let client: HerdrClient
+    /// This row's open thought, step list and step details (`t:`, `s:`, `d:` keys).
+    let expanded: Set<String>
+    /// The prompt is one this device sent ("In transcript").
+    let recorded: Bool
+    /// The question's answer is on its way, or was refused.
+    let answering: Bool
+    let problem: ChatAnswerProblem?
+    /// The search's excerpts under the row. Without a hit the query and selection are left
+    /// out too, so a search touches only the rows it finds.
+    let hits: [TranscriptSearchHit]
+    let query: String
+    let selectedHitID: String?
+    let actions: ChatRowActions
+
+    @Environment(\.horizontalSizeClass) private var sizeClass
+    @Environment(\.chatTextScale) private var textScale
+
+    /// Every drawing input; an input missing here is drawn stale. The actions only write
+    /// state, and the environment (text size, size class) updates the row on its own.
+    nonisolated static func == (lhs: ChatRowView, rhs: ChatRowView) -> Bool {
+        lhs.row == rhs.row
+            && lhs.viewer == rhs.viewer
+            && lhs.client === rhs.client
+            && lhs.expanded == rhs.expanded
+            && lhs.recorded == rhs.recorded
+            && lhs.answering == rhs.answering
+            && lhs.problem == rhs.problem
+            && lhs.hits == rhs.hits
+            && lhs.query == rhs.query
+            && lhs.selectedHitID == rhs.selectedHitID
+    }
+
+    var body: some View {
+        #if DEBUG
+        let _ = ChatRowRenders.record()
+        #endif
+        VStack(alignment: .leading, spacing: 6) {
+            rowView(row)
+            ChatSearchResults(hits: hits, query: query, selectedID: selectedHitID)
+        }
+    }
+
+    private func toggle(_ key: String) {
+        actions.toggle(key)
+    }
+
+    private func askCard(id: String, ask: TranscriptAsk, pending: TranscriptPendingAsk?) -> some View {
+        ChatAskCard(id: id, ask: ask, pending: pending, viewer: viewer, answering: answering, problem: problem,
+                    onAnswer: { option in actions.answer(id, option) },
+                    onOpenTerminal: actions.openTerminal)
+    }
+
+    @ViewBuilder
+    private func rowView(_ row: ChatRow) -> some View {
+        switch row {
+        case .day(_, let ms):
+            dayLabel(ms)
+        case .prompt(let prompt):
+            promptBubble(prompt)
+        case .item(let item):
+            itemView(item)
+        case .outgoing(let message):
+            outgoingBubble(message)
+        }
+    }
+
+    @ViewBuilder
+    private func itemView(_ item: TranscriptItem) -> some View {
+        switch item {
+        case .work(let work):
+            workView(work)
+        case .reply(_, let text, _):
+            ChatMarkdownView(markdown: text)
+                .stableContextMenu { messageMenu(text, markdown: true, offersMarkdown: true) }
+                .accessibilityElement(children: .contain)
+                .accessibilityIdentifier("chat-reply")
+        case .note(_, let tsMs, let note):
+            noteCard(note, tsMs: tsMs)
+        case .plan:
+            EmptyView() // The current snapshot stays visible once at the conversation's end.
+        case .ask(let id, let ask, let pending):
+            VStack(alignment: .leading, spacing: 6) {
+                askCard(id: id, ask: ask, pending: pending)
+                Button("Open question") { actions.openQuestion(id) }
+                    .font(Typography.app(13 * textScale))
+                    .accessibilityIdentifier("chat-question-open")
+            }
+            .frame(maxWidth: sizeClass == .regular ? 520 : .infinity, alignment: .leading)
+        case .turnFailed(_, let status, let error):
+            HStack(alignment: .firstTextBaseline, spacing: 7) {
+                Image(systemName: status == .aborted ? "stop.circle" : "exclamationmark.circle")
+                    .font(.system(size: 12, weight: .semibold))
+                Text(status == .aborted ? "Stopped" : "Failed\(error.map { " · \($0)" } ?? "")")
+                    .font(Typography.app(14 * textScale)).lineLimit(3)
+            }
+            .foregroundStyle(status == .aborted ? Palette.textFaint : Palette.died)
+            .accessibilityIdentifier("chat-turn-failed")
+        case .summary(_, let text):
+            HStack(spacing: 10) {
+                Rectangle().fill(Palette.hairlineQuiet).frame(height: 1)
+                Text(text).font(Typography.app(13 * textScale)).foregroundStyle(Palette.textFaint).fixedSize()
+                Rectangle().fill(Palette.hairlineQuiet).frame(height: 1)
+            }
+            .padding(.vertical, 4)
+            .accessibilityIdentifier("chat-summary")
+        }
+    }
+
+    // MARK: - Pieces
+
+    private func dayLabel(_ ms: UInt64) -> some View {
+        let (day, time) = ChatDay.label(ms: ms, now: Date())
+        return (Text(day).font(Typography.app(13 * textScale, .semibold)) + Text(" " + time).font(Typography.app(13 * textScale)))
+            .foregroundStyle(Palette.textFaint)
+            .frame(maxWidth: .infinity)
+            .padding(.vertical, 4)
+            .accessibilityIdentifier("chat-day")
+    }
+
+    @ViewBuilder
+    private func promptBubble(_ prompt: ChatPrompt) -> some View {
+        let byline = byline(for: prompt.author)
+        VStack(alignment: .trailing, spacing: 4) {
+            if let byline {
+                Text(byline).font(Typography.app(12 * textScale, .medium)).foregroundStyle(Palette.textFaint)
+                    .padding(.trailing, 6)
+            }
+            if let attachment = prompt.attachment {
+                if !attachment.caption.isEmpty { promptText(attachment.caption) }
+                ChatAttachmentBundle(files: attachment.files, client: client)
+                    .frame(maxWidth: sizeClass == .regular ? 480 : 296)
+            } else {
+                promptText(prompt.text)
+            }
+            if recorded {
+                Text("In transcript").font(Typography.app(11 * textScale)).foregroundStyle(Palette.textFaint)
+                    .padding(.trailing, 6)
+            }
+        }
+        .frame(maxWidth: .infinity, alignment: .trailing)
+        .padding(.leading, 40)
+    }
+
+    private func promptText(_ text: String) -> some View {
+        Text(text)
+            .font(Typography.app(16 * textScale))
+            .foregroundStyle(Palette.text)
+            .lineSpacing(1)
+            .fixedSize(horizontal: false, vertical: true)
+            .padding(.horizontal, 14).padding(.top, 9).padding(.bottom, 10)
+            .background(UnevenRoundedRectangle(topLeadingRadius: 18, bottomLeadingRadius: 18,
+                                               bottomTrailingRadius: 6, topTrailingRadius: 18)
+                .fill(Palette.surfaceRaised))
+            .stableContextMenu(previewCornerRadius: 18) { messageMenu(text, markdown: false) }
+            .frame(maxWidth: sizeClass == .regular ? 480 : 296, alignment: .trailing)
+            .accessibilityIdentifier("chat-user-bubble")
+    }
+
+    /// A message's menu, on a long press (a right click on a Mac): Copy, Copy as Markdown on
+    /// a reply, and Select Text. A `stableContextMenu`, never `.contextMenu`: this view
+    /// redraws on every poll and stream event, which rebuilds an open SwiftUI menu (#437).
+    /// Its entries are also the message's VoiceOver actions, so Copy needs no long press.
+    /// `markdown`: the text is rendered markdown (a reply or a thought), so Copy and Select
+    /// Text give it as read, without the syntax. Nothing is parsed until an entry is chosen.
+    @MainActor @StableMenuBuilder
+    private func messageMenu(_ text: String, markdown: Bool, offersMarkdown: Bool = false) -> [StableMenuItem] {
+        StableMenuItem("Copy", systemImage: "doc.on.doc") {
+            ChatClipboard.write(markdown ? ChatMessageText.plain(text) : text)
+        }
+        if offersMarkdown {
+            StableMenuItem("Copy as Markdown", systemImage: "chevron.left.forwardslash.chevron.right") {
+                ChatClipboard.write(text)
+            }
+        }
+        StableMenuItem("Select Text", systemImage: "selection.pin.in.out") {
+            actions.selectText(ChatSelectableText(text: markdown ? ChatMessageText.readable(text) : AttributedString(text)))
+        }
+    }
+
+    private func outgoingBubble(_ message: TranscriptOutgoingMessage) -> some View {
+        let receipt: String
+        switch message.state {
+        case .sending: receipt = "Sending…"
+        case .submitted: receipt = "Accepted by agent"
+        case .unconfirmed: receipt = "Confirmation pending"
+        case .notDelivered(let reason): receipt = "Not sent · \(reason)"
+        case .previousSession: receipt = "Previous session · confirmation unavailable"
+        case .notSeen: receipt = "Not seen in chat · check Terminal"
+        }
+        return VStack(alignment: .trailing, spacing: 4) {
+            if !message.text.isEmpty { promptText(message.text) }
+            if !message.files.isEmpty {
+                ChatAttachmentBundle(files: message.files, client: client)
+                    .frame(maxWidth: sizeClass == .regular ? 480 : 296)
+            }
+            Text(receipt).font(Typography.app(11 * textScale)).foregroundStyle(Palette.textFaint)
+                .padding(.trailing, 6)
+                .accessibilityIdentifier("chat-send-receipt")
+                .onChange(of: receipt) { _, receipt in
+                    UIAccessibility.post(notification: .announcement, argument: receipt)
+                }
+        }
+        .frame(maxWidth: .infinity, alignment: .trailing)
+        .padding(.leading, 40)
+        .accessibilityIdentifier("chat-outgoing-message")
+    }
+
+    /// Whose prompt this was, when it was not the reader's own.
+    private func byline(for author: TranscriptAuthor?) -> String? {
+        switch (viewer, author) {
+        case (.owner, .guest(let name)?):
+            return "\(name ?? "Guest") · guest"
+        case (.guest(_, let owner), .owner?):
+            return owner
+        case (.guest(let me, _), .guest(let name)?):
+            return name == me ? nil : "\(name ?? "Guest") · guest"
+        default:
+            return nil
+        }
+    }
+
+    @ViewBuilder
+    private func workView(_ work: TranscriptWork) -> some View {
+        let thoughtKey = "t:" + work.id
+        let stepsKey = "s:" + work.id
+        VStack(alignment: .leading, spacing: 10) {
+            if let thought = work.latestThought {
+                Button { toggle(thoughtKey) } label: {
+                    HStack(spacing: 6) {
+                        Self.chevron(open: expanded.contains(thoughtKey), color: Palette.textFaint)
+                        Text("Thought").font(Typography.app(14 * textScale, .semibold)).foregroundStyle(Palette.textDim)
+                            .fixedSize()
+                        if !expanded.contains(thoughtKey) {
+                            Text(ChatInline.styled(ChatDay.firstSentence(thought), size: 14 * textScale))
+                                .foregroundStyle(Palette.textFaint).lineLimit(1).truncationMode(.tail)
+                        }
+                    }
+                    .frame(maxWidth: .infinity, alignment: .leading)
+                    .contentShape(Rectangle())
+                }
+                .buttonStyle(.plain)
+                .accessibilityLabel("Thought: \(ChatDay.firstSentence(thought))")
+                .accessibilityHint(expanded.contains(thoughtKey) ? "Collapses the thought" : "Shows the whole thought")
+                .accessibilityIdentifier("chat-thought")
+                if expanded.contains(thoughtKey) {
+                    ChatMarkdownView(markdown: work.thoughts.joined(separator: "\n\n"))
+                        .frame(maxWidth: .infinity, alignment: .leading)
+                        .stableContextMenu { messageMenu(work.thoughts.joined(separator: "\n\n"), markdown: true) }
+                        .padding(.vertical, 2).padding(.leading, 12)
+                        .overlay(alignment: .leading) { Rectangle().fill(Palette.hairlineQuiet).frame(width: 2) }
+                        .padding(.leading, 5)
+                        .accessibilityIdentifier("chat-thought-open")
+                }
+            }
+            if !work.steps.isEmpty {
+                Button { toggle(stepsKey) } label: {
+                    HStack(spacing: 7) {
+                        Self.chevron(open: expanded.contains(stepsKey), color: Palette.textDim)
+                        stepsSummary(work)
+                    }
+                    .frame(maxWidth: .infinity, alignment: .leading)
+                    .contentShape(Rectangle())
+                }
+                .buttonStyle(.plain)
+                .accessibilityIdentifier("chat-steps")
+                if expanded.contains(stepsKey) {
+                    stepList(work)
+                }
+            }
+        }
+    }
+
+    private func stepsSummary(_ work: TranscriptWork) -> some View {
+        TimelineView(.periodic(from: .now, by: work.live ? 30 : 3600)) { context in
+            let endMs = work.live ? UInt64(max(context.date.timeIntervalSince1970 * 1000, 0)) : work.endMs
+            let duration = ChatDay.duration(ms: endMs > work.startMs ? endMs - work.startMs : 0)
+            let count = work.steps.count == 1 ? "1 step" : "\(work.steps.count) steps"
+            (Text("\(work.live ? "Working" : "Worked") for \(duration)").foregroundColor(Palette.textDim)
+                + Text(" · \(count)").foregroundColor(Palette.textFaint))
+                .font(Typography.app(14 * textScale))
+                .lineLimit(1)
+        }
+    }
+
+    private func stepList(_ work: TranscriptWork) -> some View {
+        VStack(alignment: .leading, spacing: 5) {
+            ForEach(work.steps) { step in
+                let running = step.status == .running && work.live
+                let detailKey = "d:" + step.id
+                VStack(alignment: .leading, spacing: 3) {
+                    HStack(alignment: .firstTextBaseline, spacing: 7) {
+                        Circle()
+                            .fill(step.status == .error ? Palette.died : running ? Palette.working : Palette.hairline)
+                            .frame(width: 5, height: 5)
+                            .alignmentGuide(.firstTextBaseline) { $0[.bottom] + 2.5 }
+                        Text(step.intent).font(Typography.app(13.5 * textScale))
+                            .foregroundStyle(running ? Palette.textDim : Palette.textFaint)
+                            .fixedSize(horizontal: false, vertical: true)
+                    }
+                    if expanded.contains(detailKey), let detail = step.detail, !detail.isEmpty {
+                        Text(detail).font(Typography.machine(11.5 * textScale)).foregroundStyle(Palette.textFaint)
+                            .fixedSize(horizontal: false, vertical: true)
+                            .textSelection(.enabled)
+                            .padding(.leading, 12)
+                    }
+                }
+                .contentShape(Rectangle())
+                .onTapGesture { if step.detail != nil { toggle(detailKey) } }
+                .accessibilityElement(children: .combine)
+                .accessibilityLabel(running ? "\(step.intent), running" : step.intent)
+                .accessibilityIdentifier(running ? "chat-step-running" : "chat-step")
+            }
+        }
+        .padding(.vertical, 1).padding(.leading, 12)
+        .overlay(alignment: .leading) { Rectangle().fill(Palette.hairlineQuiet).frame(width: 2) }
+        .padding(.leading, 5)
+        .accessibilityElement(children: .contain)
+        .accessibilityIdentifier("chat-steplist")
+    }
+
+    private func noteCard(_ note: TranscriptNote, tsMs: UInt64) -> some View {
+        Button { actions.openNote(note) } label: {
+            HStack(spacing: 10) {
+                Image(systemName: ChatNoteStyle.icon(note.source))
+                    .font(.system(size: 14, weight: .medium)).foregroundStyle(Palette.textDim)
+                    .frame(width: 30, height: 30)
+                    .background(RoundedRectangle(cornerRadius: 9).fill(Palette.surfaceRaised))
+                VStack(alignment: .leading, spacing: 1) {
+                    Text(ChatNoteStyle.kicker(note, tsMs: tsMs))
+                        .font(Typography.machine(10.5 * textScale, .semibold)).tracking(1.2)
+                        .foregroundStyle(Palette.textFaint).lineLimit(1)
+                    Text(ChatNoteStyle.title(note)).font(Typography.app(14.5 * textScale)).foregroundStyle(Palette.text).lineLimit(1)
+                }
+                .frame(maxWidth: .infinity, alignment: .leading)
+                Image(systemName: "chevron.right").font(.system(size: 12, weight: .semibold))
+                    .foregroundStyle(Palette.textFaint)
+            }
+            .padding(.horizontal, 12).padding(.vertical, 10)
+            .background(RoundedRectangle(cornerRadius: 14).fill(Palette.surface))
+            .overlay(RoundedRectangle(cornerRadius: 14).strokeBorder(Palette.hairline, lineWidth: 1))
+            .contentShape(RoundedRectangle(cornerRadius: 14))
+        }
+        .buttonStyle(.plain)
+        .accessibilityLabel("\(ChatNoteStyle.sourceName(note.source)) note: \(note.title)")
+        .accessibilityHint("Opens the full message")
+        .accessibilityIdentifier("chat-note")
+    }
+
+    static func chevron(open: Bool, color: Color) -> some View {
+        Image(systemName: open ? "chevron.down" : "chevron.right")
+            .font(.system(size: 10, weight: .bold))
+            .foregroundStyle(color)
+            .frame(width: 12, height: 12)
+    }
+}
+
+#if DEBUG
+/// For the UI tests: how many times a `ChatRowView` body has run, so a test can hold the
+/// chat to a render budget (`chat-row-renders`).
+@MainActor
+enum ChatRowRenders {
+    private(set) static var count = 0
+    static func record() { count += 1 }
+}
+
+/// The `chat-row-renders` probe: `ChatRowRenders.count` as its label, polled. Its own view and
+/// state, so the poll re-renders this probe alone, never the chat whose rows it counts.
+private struct ChatRowRenderProbe: View {
+    @State private var count = 0
+
+    var body: some View {
+        Color.clear
+            .frame(width: 1, height: 1)
+            .accessibilityElement()
+            .accessibilityIdentifier("chat-row-renders")
+            .accessibilityLabel("\(count)")
+            .task {
+                while !Task.isCancelled {
+                    if ChatRowRenders.count != count { count = ChatRowRenders.count }
+                    try? await Task.sleep(nanoseconds: 250_000_000)
+                }
+            }
+    }
+}
+#endif
 
 private struct IdentifiedNote: Identifiable {
     let note: TranscriptNote
