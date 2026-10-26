@@ -25,8 +25,13 @@ enum ChatUXSmoke {
               let response = try? JSONSerialization.jsonObject(with: Data(original.utf8)) as? [String: Any],
               var result = response["result"] as? [String: Any],
               var entries = result["entries"] as? [[String: Any]] else { return original }
-        if ProcessInfo.processInfo.environment["HERDR_CHAT_UX_LARGE"] == "1" {
+        let environment = ProcessInfo.processInfo.environment
+        if environment["HERDR_CHAT_UX_LARGE"] == "1" {
             entries += largeTurns(endingBefore: timestamp)
+        }
+        let longSession = environment["HERDR_CHAT_UX_LONG_SESSION"] == "1"
+        if longSession {
+            entries += longSessionTurns(endingBefore: timestamp)
         }
         entries.append(["id": "ux-user", "kind": "user", "author": "owner",
                         "text": "Check typography and wrapped tables.", "ts_ms": timestamp])
@@ -45,7 +50,8 @@ enum ChatUXSmoke {
             entries.append(["id": "ux-mermaid", "kind": "reply", "final": true,
                             "text": "Here is the flow:\n\n```mermaid\ngraph TD\n  A[Request] --> B{Cached?}\n  B -->|yes| C[Show image]\n  B -->|no| D[Render offscreen]\n  D --> C\n```\n\nThat is the whole pipeline.", "ts_ms": timestamp + 2])
         }
-        if responses > 1 {
+        // A long session's refreshes bring nothing new, as an idle agent's polls do.
+        if responses > 1, !longSession {
             entries.append(["id": "ux-incoming", "kind": "reply", "final": true,
                             "text": "Incoming café update after refresh.", "ts_ms": timestamp + 3])
             entries.append(["id": "ux-incoming-later", "kind": "reply", "final": true,
@@ -98,6 +104,61 @@ enum ChatUXSmoke {
             }
             add("large-\(turn)r", ["kind": "reply", "final": true, "text": reply])
             add("large-\(turn)e", ["kind": "turn_end", "status": "done"])
+        }
+        return entries
+    }
+
+    /// `HERDR_CHAT_UX_LONG_SESSION=1`: a page shaped like the long autonomous session whose
+    /// chat lagged in build 221 (`first-page-p9Z.json`: 1709 entries in 20 turns, 922 steps,
+    /// 364 thoughts, 252 replies, 109 notes). Twenty turns of thirteen rounds, each a thought
+    /// or two, three or four steps and a reply, a note every few rounds, a plan and an
+    /// answered question in some turns: about 1,670 entries and 650 chat rows, with the
+    /// payload's text lengths (replies ~280 characters with inline markdown, thoughts ~430,
+    /// step details ~210, notes ~320).
+    private static func longSessionTurns(endingBefore end: UInt64) -> [[String: Any]] {
+        let reply = "Checked the **release queue**: `herdr-app` is green on main, and the worker picked up the next job. "
+            + "Nothing else is pending, so I will *watch the run* and report when it finishes; the tail of the log "
+            + "is quiet and the cache entries are fresh."
+        let thought = String(repeating: "The run is still going, so the next step is to read its newest log lines and compare them with the last good build before deciding anything. ", count: 3)
+        let detail = "gh run view 40167206376 -R jerryfane/herdrup --log-failed | grep -n 'error' | head -40 && echo checked the native build diagnostics for the simulator job"
+        let noteBody = String(repeating: "Message from the fleet: the review of the change is in, read it with gitmoot message show. ", count: 3)
+        var entries: [[String: Any]] = []
+        var ts = end - 4_000_000
+        func add(_ id: String, _ fields: [String: Any]) {
+            var entry = fields
+            entry["id"] = id
+            entry["ts_ms"] = ts
+            ts += 1_000
+            entries.append(entry)
+        }
+        for turn in 0..<20 {
+            add("long-\(turn)u", ["kind": "user", "author": "owner",
+                                  "text": "Long session \(turn): keep the release moving and report back."])
+            for round in 0..<13 {
+                let id = "long-\(turn)-\(round)"
+                for t in 0..<(round % 3 == 0 ? 2 : 1) {
+                    add("\(id)t\(t)", ["kind": "thinking", "text": thought])
+                }
+                for step in 0..<(round % 2 == 0 ? 4 : 3) {
+                    add("\(id)s\(step)", ["kind": "step", "tool": "bash", "status": "ok",
+                                          "intent": "Reading native build failure diagnostics", "detail": detail])
+                }
+                add("\(id)r", ["kind": "reply", "final": round == 12, "text": "Round \(round) of turn \(turn). " + reply])
+                if round % 5 < 2 {
+                    add("\(id)n", ["kind": "note", "source": "gitmoot", "from": "herdr-kimi-review",
+                                   "title": "gitmoot reply event for job org-reply:herdr-app \(turn).\(round): new inbox activity",
+                                   "body": noteBody])
+                }
+            }
+            if turn % 4 == 0 {
+                add("long-\(turn)p", ["kind": "plan", "items": [["text": "Ship the release", "done": false]]])
+            }
+            if turn % 4 == 1 {
+                add("long-\(turn)a", ["kind": "ask", "questions": [[
+                    "question": "Merge the release branch?", "options": ["Yes", "Not yet"], "multi": false, "recommended": 0,
+                ]], "answer": ["Yes"]])
+            }
+            add("long-\(turn)e", ["kind": "turn_end", "status": "done"])
         }
         return entries
     }

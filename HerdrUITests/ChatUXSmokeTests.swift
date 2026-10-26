@@ -2,7 +2,8 @@ import XCTest
 
 final class ChatUXSmokeTests: XCTestCase {
     private func launch(failingRefresh: Bool = false, pendingQuestion: Bool = false, large: Bool = false,
-                        copyFixture: Bool = false, plan: String = "", mermaid: Bool = false) -> XCUIApplication {
+                        copyFixture: Bool = false, plan: String = "", mermaid: Bool = false,
+                        longSession: Bool = false) -> XCUIApplication {
         continueAfterFailure = false
         let app = XCUIApplication.launched(mock: "chatview", environment: [
             "HERDR_STEADY_CARET": "1", "HERDR_MOCK_STILL": "1", "HERDR_CHAT_UX_SMOKE": "1",
@@ -11,7 +12,8 @@ final class ChatUXSmokeTests: XCTestCase {
             "HERDR_CHAT_UX_LARGE": large ? "1" : "0",
             "HERDR_CHAT_UX_COPY": copyFixture ? "1" : "0",
             "HERDR_CHAT_UX_PLAN": plan,
-            "HERDR_CHAT_UX_MERMAID": mermaid ? "1" : "0"
+            "HERDR_CHAT_UX_MERMAID": mermaid ? "1" : "0",
+            "HERDR_CHAT_UX_LONG_SESSION": longSession ? "1" : "0"
         ])
         let agent = app.staticTexts["herdr-app"].firstMatch
         if !agent.exists {
@@ -305,6 +307,8 @@ final class ChatUXSmokeTests: XCTestCase {
         XCTAssertFalse(app.staticTexts["chat-search-result"].exists)
     }
 
+    /// The newest page is five turns (three synthetic prompts and the mockup's two); each
+    /// Load older adds a twenty-turn page, the second reaching the start of the session.
     func testSearchPagingPreservesSelectedMatchAndLoadedScope() {
         let app = launch()
         app.buttons["terminal-find"].tap()
@@ -313,20 +317,52 @@ final class ChatUXSmokeTests: XCTestCase {
         field.tap()
         field.typeText("Synthetic question")
         let count = app.staticTexts["terminal-find-count"]
-        expectation(for: NSPredicate(format: "label == %@", "1/18"), evaluatedWith: count)
+        expectation(for: NSPredicate(format: "label == %@", "1/3"), evaluatedWith: count)
         waitForExpectations(timeout: 5)
         XCTAssertTrue(app.staticTexts["Searching loaded history"].isHittable)
         app.buttons["Load older"].tap()
-        expectation(for: NSPredicate(format: "label == %@", "21/38"), evaluatedWith: count)
+        expectation(for: NSPredicate(format: "label == %@", "21/23"), evaluatedWith: count)
         waitForExpectations(timeout: 10)
         app.buttons["Load older"].tap()
-        expectation(for: NSPredicate(format: "label == %@", "23/40"), evaluatedWith: count)
+        expectation(for: NSPredicate(format: "label == %@", "38/40"), evaluatedWith: count)
         waitForExpectations(timeout: 10)
         XCTAssertFalse(app.buttons["Load older"].exists)
         app.buttons["terminal-refresh"].tap()
         XCTAssertTrue(app.staticTexts["Up to date"].waitForExistence(timeout: 15))
-        XCTAssertEqual(count.label, "23/40", "Refresh must retain paged history and the same selected prompt")
+        XCTAssertEqual(count.label, "38/40", "Refresh must retain paged history and the same selected prompt")
         record(app, "Loaded-history search expands to all forty prompts and preserves selection across refresh")
+    }
+
+    /// The DEBUG `chat-row-renders` probe: how many chat row bodies have run (its label;
+    /// polled every 250 ms, so read it after a pause).
+    private func rowRenders(_ app: XCUIApplication) -> Int {
+        let probe = app.descendants(matching: .any)["chat-row-renders"].firstMatch
+        XCTAssertTrue(probe.waitForExistence(timeout: 5), "the row render probe should be on screen")
+        return Int(probe.label) ?? -1
+    }
+
+    /// TestFlight build 221 lagged on every keystroke in a long agent session: the page
+    /// that holds the composer redrew the chat with each character, and the chat redrew
+    /// every one of its ~650 rows. On a page shaped like that session (`HERDR_CHAT_UX_LONG_SESSION`)
+    /// typing must draw no transcript row at all.
+    func testTypingInTheComposerDoesNotReRenderTheTranscript() {
+        let app = launch(longSession: true)
+        XCTAssertTrue(app.staticTexts["A complete fixture response."].waitForExistence(timeout: 12), app.debugDescription)
+        let field = app.textViews["terminal-reply-input"]
+        XCTAssertTrue(field.waitForExistence(timeout: 5))
+        field.tap()
+        XCTAssertTrue(app.keyboards.firstMatch.waitForExistence(timeout: 5))
+        // The keyboard is up and the chat has settled over it.
+        Thread.sleep(forTimeInterval: 2)
+        let before = rowRenders(app)
+        XCTAssertGreaterThan(before, 0, "the chat's rows were drawn")
+        let typed = "typing thirty chars into chat."
+        XCTAssertEqual(typed.count, 30)
+        field.typeText(typed)
+        Thread.sleep(forTimeInterval: 1.5)
+        let spent = rowRenders(app) - before
+        XCTAssertEqual(spent, 0, "typing 30 characters re-rendered \(spent) transcript rows")
+        XCTAssertEqual(app.state, .runningForeground)
     }
 
     /// herdrup#523 item 8: a one-letter search on a long chat froze the app until it was
