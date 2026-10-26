@@ -22,9 +22,10 @@ import WebKit
 ///     and the diagram falls back to its code;
 ///   * navigation locked after the first load, and a non-persistent data store.
 ///
-/// Renders run one at a time (one page, one `#out`). Results are cached in memory and on
-/// disk under `MermaidDiagram.cacheKey`, so scrolling back or reopening a chat never runs
-/// mermaid again.
+/// Renders run one at a time (one page, one `#out`), each within a time limit: a diagram
+/// that runs out of time falls back to its code, and the page is replaced so the stuck script
+/// cannot hold up the next one. Results are cached in memory and on disk under
+/// `MermaidDiagram.cacheKey`, so scrolling back or reopening a chat never runs mermaid again.
 @MainActor
 final class MermaidRenderer: NSObject {
     static let shared = MermaidRenderer()
@@ -41,6 +42,29 @@ final class MermaidRenderer: NSObject {
             self.image = image
             self.svg = svg
         }
+
+        #if DEBUG
+        /// UI tests only: whether the raster has a drawing in it rather than one flat colour
+        /// (a blank snapshot), sampled at 32×32.
+        lazy var looksDrawn: Bool = {
+            guard let cgImage = image.cgImage else { return false }
+            let side = 32
+            var pixels = [UInt8](repeating: 0, count: side * side * 4)
+            let drew = pixels.withUnsafeMutableBytes { buffer -> Bool in
+                guard let context = CGContext(
+                    data: buffer.baseAddress, width: side, height: side, bitsPerComponent: 8,
+                    bytesPerRow: side * 4, space: CGColorSpaceCreateDeviceRGB(),
+                    bitmapInfo: CGImageAlphaInfo.premultipliedLast.rawValue) else { return false }
+                context.interpolationQuality = .medium
+                context.draw(cgImage, in: CGRect(x: 0, y: 0, width: side, height: side))
+                return true
+            }
+            guard drew else { return false }
+            return stride(from: 0, to: pixels.count, by: 4).contains { offset in
+                (0..<3).contains { abs(Int(pixels[offset + $0]) - Int(pixels[$0])) > 24 }
+            }
+        }()
+        #endif
     }
 
     /// What to draw: the source, the column width it must fit, the chat text size (scales
@@ -71,11 +95,21 @@ final class MermaidRenderer: NSObject {
         return cache
     }()
     private var webView: WKWebView?
-    /// The tail of the one-at-a-time render queue.
-    private var queue: Task<Void, Never>?
+    /// Renders one at a time, each with a time limit (`renderTimeout`).
+    private let queue = SerialDeadlineQueue()
+    /// Diagrams that failed this session (mermaid rejected them, or they ran out of time):
+    /// shown as code at once instead of retrying on every scroll. Not stored on disk, so the
+    /// next launch tries again.
+    private var failed = Set<String>()
     private var renders = 0
     private var didStartInitialLoad = false
     private var loaded: CheckedContinuation<Void, Error>?
+
+    /// How long one diagram may take to draw. A diagram whose layout never ends (it is
+    /// agent-written) must not leave every later diagram on its placeholder.
+    private static let renderTimeout: TimeInterval = 8
+    /// The first render also loads the 3.6 MB library into a new page, so it gets longer.
+    private static let firstRenderTimeout: TimeInterval = 30
 
     /// A render already in memory, for drawing it in the same frame a row appears (no
     /// placeholder flash, so the row's height is right from the start).
@@ -86,21 +120,33 @@ final class MermaidRenderer: NSObject {
     func render(_ request: Request) async throws -> Rendered {
         let key = request.key
         if let hit = memory.object(forKey: key as NSString) { return hit }
-        let previous = queue
-        let job = Task { () async throws -> Rendered in
-            await previous?.value
-            if let hit = memory.object(forKey: key as NSString) { return hit }
+        if failed.contains(key) { throw Failure.invalid }
+        let timeout = webView == nil ? Self.firstRenderTimeout : Self.renderTimeout
+        return try await queue.run(timeout: timeout, { @MainActor () async throws -> Rendered in
+            if let hit = self.memory.object(forKey: key as NSString) { return hit }
+            if self.failed.contains(key) { throw Failure.invalid }
             if let stored = await Self.loadFromDisk(key: key, scale: request.displayScale) {
-                remember(stored)
+                self.remember(stored)
                 return stored
             }
-            let rendered = try await draw(request, key: key)
-            remember(rendered)
-            Self.saveToDisk(rendered)
-            return rendered
-        }
-        queue = Task { _ = try? await job.value }
-        return try await job.value
+            do {
+                let rendered = try await self.draw(request, key: key)
+                self.remember(rendered)
+                Self.saveToDisk(rendered)
+                return rendered
+            } catch Failure.unavailable {
+                // The page, not the diagram: the next attempt may well work.
+                throw Failure.unavailable
+            } catch {
+                self.failed.insert(key)
+                throw error
+            }
+        }, onTimeout: { @MainActor () async in
+            // The stuck script may still be running in the page: replace the page before
+            // the next diagram, and show this one as code for the rest of the session.
+            self.failed.insert(key)
+            self.recyclePage()
+        })
     }
 
     private func remember(_ rendered: Rendered) {
@@ -108,16 +154,29 @@ final class MermaidRenderer: NSObject {
         memory.setObject(rendered, forKey: rendered.key as NSString, cost: Int(pixels) * 4)
     }
 
+    /// Drops the page (a render ran out of time in it). Nothing here keeps the old web view
+    /// alive while a call into it is pending (`javaScript`, `snapshot`), so releasing it
+    /// closes the page and its WebContent process; the next render builds a fresh page.
+    private func recyclePage() {
+        if let old = webView {
+            old.navigationDelegate = nil
+            old.stopLoading()
+        }
+        webView = nil
+        loaded?.resume(throwing: Failure.unavailable)
+        loaded = nil
+    }
+
     // MARK: - Drawing
 
     private func draw(_ request: Request, key: String) async throws -> Rendered {
-        let web = try await page()
+        let page = ObjectIdentifier(try await self.page())
         renders += 1
-        let result = try await web.callAsyncJavaScript(
+        let result = try await javaScript(
             Self.renderFunction,
             arguments: ["id": "herdr-mermaid-\(renders)", "source": request.source,
                         "textScale": Double(request.textScale)],
-            contentWorld: .page)
+            on: page)
         guard let drawn = result as? [String: Any],
               let svg = drawn["svg"] as? String,
               let natural = (drawn["width"] as? NSNumber)?.doubleValue,
@@ -128,14 +187,47 @@ final class MermaidRenderer: NSObject {
                                         maxWidth: Double(request.widthBucket))
         guard fit.width >= 1, fit.height >= 1 else { throw Failure.invalid }
         let size = CGSize(width: ceil(fit.width), height: ceil(fit.height))
-        _ = try await web.callAsyncJavaScript(
+        _ = try await javaScript(
             "const el = document.querySelector('#out svg'); el.style.width = width + 'px'; el.style.height = height + 'px'; return true;",
             arguments: ["width": Double(size.width), "height": Double(size.height)],
-            contentWorld: .page)
-        // The page must cover the drawing for the snapshot to include all of it.
-        if web.frame.width < size.width || web.frame.height < size.height {
-            web.frame = CGRect(x: 0, y: 0, width: max(web.frame.width, size.width),
-                               height: max(web.frame.height, size.height))
+            on: page)
+        let cgImage = try await snapshot(size, on: page)
+        // The scale is the page's device scale (the screen's); the disk copy is reloaded at
+        // the request's, which is the same screen.
+        let image = UIImage(cgImage: cgImage, scale: CGFloat(cgImage.width) / size.width, orientation: .up)
+        return Rendered(key: key, image: image, svg: svg)
+    }
+
+    /// The current page if it is still `page` (not replaced after a timeout).
+    private func current(_ page: ObjectIdentifier) throws -> WKWebView {
+        guard let webView, ObjectIdentifier(webView) == page else { throw Failure.unavailable }
+        return webView
+    }
+
+    /// Runs `body` in the page. Completion-handler based on purpose: while the call is
+    /// pending, nothing here holds the web view, so a timed-out page can be released.
+    private func javaScript(_ body: String, arguments: [String: Any], on page: ObjectIdentifier) async throws -> Any {
+        try await withCheckedThrowingContinuation { continuation in
+            do {
+                try current(page).callAsyncJavaScript(body, arguments: arguments, in: nil, in: .page) { result in
+                    continuation.resume(with: result)
+                }
+            } catch {
+                continuation.resume(throwing: error)
+            }
+        }
+    }
+
+    /// The top-left `size` of the page as an image at the screen's scale.
+    private func snapshot(_ size: CGSize, on page: ObjectIdentifier) async throws -> CGImage {
+        do {
+            // Scoped so the page is not held while the snapshot is pending.
+            let web = try current(page)
+            // The page must cover the drawing for the snapshot to include all of it.
+            if web.frame.width < size.width || web.frame.height < size.height {
+                web.frame = CGRect(x: 0, y: 0, width: max(web.frame.width, size.width),
+                                   height: max(web.frame.height, size.height))
+            }
         }
         let config = WKSnapshotConfiguration()
         config.rect = CGRect(origin: .zero, size: size)
@@ -143,12 +235,19 @@ final class MermaidRenderer: NSObject {
         // The page is never in a window, so there are no screen updates to wait for:
         // WebKit paints the page straight into the snapshot (its software path).
         config.afterScreenUpdates = false
-        let snapshot = try await web.takeSnapshot(configuration: config)
-        guard let cgImage = snapshot.cgImage, cgImage.width > 0 else { throw Failure.invalid }
-        // The scale is the page's device scale (the screen's); the disk copy is reloaded at
-        // the request's, which is the same screen.
-        let image = UIImage(cgImage: cgImage, scale: CGFloat(cgImage.width) / size.width, orientation: .up)
-        return Rendered(key: key, image: image, svg: svg)
+        return try await withCheckedThrowingContinuation { continuation in
+            do {
+                try current(page).takeSnapshot(with: config) { image, error in
+                    if let cgImage = image?.cgImage, cgImage.width > 0 {
+                        continuation.resume(returning: cgImage)
+                    } else {
+                        continuation.resume(throwing: error ?? Failure.invalid)
+                    }
+                }
+            } catch {
+                continuation.resume(throwing: error)
+            }
+        }
     }
 
     /// The shared page, set up on first use: bundled html, network block, mermaid, theme.

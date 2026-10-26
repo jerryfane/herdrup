@@ -122,6 +122,7 @@ struct ChatMermaidView: View {
             }
             .buttonStyle(.plain)
             .accessibilityLabel(MermaidDiagram.accessibilityLabel(source))
+            .accessibilityValue(Self.drawnProbe(shown))
             .accessibilityHint("Opens the diagram full screen")
             .accessibilityIdentifier("chat-mermaid-image")
         } else {
@@ -140,6 +141,15 @@ struct ChatMermaidView: View {
         let fit = MermaidDiagram.fitted(width: natural.width, height: natural.height,
                                         maxWidth: max(1, width - 2 * Self.inset))
         return CGSize(width: fit.width, height: fit.height)
+    }
+
+    /// UI tests read this to tell a drawn diagram from a blank raster; empty in release.
+    private static func drawnProbe(_ rendered: MermaidRenderer.Rendered) -> String {
+        #if DEBUG
+        return rendered.looksDrawn ? "drawn" : "blank"
+        #else
+        return ""
+        #endif
     }
 
     private var code: some View {

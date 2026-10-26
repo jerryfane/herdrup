@@ -163,6 +163,7 @@ final class ChatUXSmokeTests: XCTestCase {
         XCTAssertGreaterThan(image.frame.width, 40, "\(image.frame)")
         XCTAssertGreaterThan(image.frame.height, 40, "\(image.frame)")
         XCTAssertTrue(image.label.hasPrefix("Mermaid diagram, graph TD"), image.label)
+        XCTAssertEqual(image.value as? String, "drawn", "The raster must hold a drawing, not one flat colour")
         let code = app.staticTexts.matching(NSPredicate(format: "label CONTAINS %@", "D[Render offscreen]")).firstMatch
         XCTAssertFalse(code.exists, "The diagram source must not be drawn as code")
         record(app, "Mermaid reply drawn as a diagram")
