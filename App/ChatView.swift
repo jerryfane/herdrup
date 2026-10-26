@@ -615,6 +615,7 @@ struct ChatView: View {
                 ChatColumnResizer(available: chatWidth, stored: $storedColumnWidth)
             }
         }
+        .background { probe("chat-area", "Chat area") }
         .onGeometryChange(for: CGFloat.self) { $0.size.width } action: { chatWidth = $0 }
         .task(id: model.loaded) {
             guard model.loaded, !landed, findRequest == nil else { return }
@@ -952,14 +953,17 @@ struct ChatView: View {
         #endif
     }
 
-    /// UI tests measure the column the transcript is laid out in.
-    @ViewBuilder private var columnProbe: some View {
+    /// UI tests measure the column the transcript is laid out in (`chat-column`) and the
+    /// chat's whole width (`chat-area`: `chat-view`'s own frame spans its scrolled-away content).
+    @ViewBuilder private var columnProbe: some View { probe("chat-column", "Chat column") }
+
+    @ViewBuilder private func probe(_ identifier: String, _ label: String) -> some View {
         #if DEBUG
         if ScreenshotMock.mode != nil {
             Color.clear
                 .accessibilityElement()
-                .accessibilityIdentifier("chat-column")
-                .accessibilityLabel("Chat column")
+                .accessibilityIdentifier(identifier)
+                .accessibilityLabel(label)
                 .allowsHitTesting(false)
         }
         #endif

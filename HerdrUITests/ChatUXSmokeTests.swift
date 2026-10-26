@@ -577,7 +577,7 @@ final class ChatUXSmokeTests: XCTestCase {
     /// mid-height, then drag `dx` points sideways.
     private func dragRightEdge(_ app: XCUIApplication, by dx: CGFloat) {
         let column = element(app, "chat-column").frame
-        let chat = element(app, "chat-view").frame
+        let chat = element(app, "chat-area").frame
         let origin = app.frame.origin
         let start = app.coordinate(withNormalizedOffset: .zero)
             .withOffset(CGVector(dx: column.maxX - 6 - origin.x, dy: chat.midY - origin.y))
@@ -598,7 +598,7 @@ final class ChatUXSmokeTests: XCTestCase {
     /// both handles, named for VoiceOver.
     func testChatWidthHandlesOnlyOnRegularWidth() {
         let app = launch()
-        let chat = element(app, "chat-view")
+        let chat = element(app, "chat-area")
         let column = element(app, "chat-column")
         XCTAssertTrue(column.waitForExistence(timeout: 10), app.debugDescription)
         let left = element(app, "chat-width-handle-left")
@@ -613,6 +613,11 @@ final class ChatUXSmokeTests: XCTestCase {
             if column.frame.width <= chat.frame.width - 44 {
                 XCTAssertEqual(left.frame.midX, column.frame.minX, accuracy: 1, "the left handle sits on the column's edge")
                 XCTAssertEqual(right.frame.midX, column.frame.maxX, accuracy: 1, "the right handle sits on the column's edge")
+            } else {
+                // Full (a portrait iPad's chat is narrower than Readable): the bands stay
+                // inside the chat, clear of the sidebar and the window edge.
+                XCTAssertGreaterThanOrEqual(left.frame.minX, chat.frame.minX - 0.5, "the left handle stays inside the chat")
+                XCTAssertLessThanOrEqual(right.frame.maxX, chat.frame.maxX + 0.5, "the right handle stays inside the chat")
             }
             assertComposerMatchesColumn(app, "iPad Chat")
             record(app, "iPad chat column with its edge handles")
@@ -636,7 +641,7 @@ final class ChatUXSmokeTests: XCTestCase {
         rotated = true
         let hold = ["HERDR_CHAT_WIDTH_READOUT_HOLD": "8"]
         let app = launch(environment: hold)
-        let chat = element(app, "chat-view")
+        let chat = element(app, "chat-area")
         let column = element(app, "chat-column")
         let right = element(app, "chat-width-handle-right")
         XCTAssertTrue(right.waitForExistence(timeout: 10), app.debugDescription)
@@ -690,7 +695,7 @@ final class ChatUXSmokeTests: XCTestCase {
         Thread.sleep(forTimeInterval: 1)
         app.terminate()
         let again = launch(environment: hold.merging(["HERDR_MOCK_CHAT_WIDTH": "keep"]) { _, new in new })
-        let againChat = element(again, "chat-view")
+        let againChat = element(again, "chat-area")
         let againColumn = element(again, "chat-column")
         let againRight = element(again, "chat-width-handle-right")
         XCTAssertTrue(againRight.waitForExistence(timeout: 10), again.debugDescription)
