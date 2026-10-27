@@ -1,8 +1,10 @@
 import HerdrKit
 import SwiftUI
 
-/// A chat attachment opens through the same authenticated Gram API and viewer as Gram.
-/// Parsed command text supplies only an ID; the server still decides file access.
+/// A chat attachment opens through the same authenticated Gram API, download cache and
+/// viewer as Gram. Parsed command text supplies only an ID; the server still decides file
+/// access. A file this device sent, or one already opened, opens from the cache with no
+/// request (`GramFileCache.open`).
 struct ChatAttachmentBundle: View {
     let files: [TranscriptAttachment]
     let client: HerdrClient
@@ -87,11 +89,28 @@ struct ChatAttachmentBundle: View {
         openTask = Task { @MainActor in
             defer { downloadingID = nil; progress = nil }
             do {
-                let (name, mime, data) = try await client.gramGetFileChunked(id: messageID) { received, total in
-                    Task { @MainActor in progress = (received, total) }
-                }
+                let epoch = GramView.Downloads.currentEpoch
+                let opened = try await GramFileCache.open(
+                    id: messageID, in: GramView.Downloads.root,
+                    download: {
+                        try await client.gramGetFileChunked(id: messageID) { received, total in
+                            Task { @MainActor in progress = (received, total) }
+                        }
+                    },
+                    store: { data, name, mime in
+                        GramView.Downloads.store(data, id: messageID, name: name, mime: mime, epoch: epoch)
+                    })
                 try Task.checkCancellation()
-                preview = try GramPreviewRouter.preview(data: data, name: name, mime: mime, cachedAt: nil)
+                switch opened {
+                case .cached(let hit):
+                    // QuickLook takes the cached file by URL; only a markdown or web
+                    // document is rendered from its bytes.
+                    let data = GramPreviewRouter.needsBytes(name: hit.name, mime: hit.mime)
+                        ? try Data(contentsOf: hit.url, options: .mappedIfSafe) : nil
+                    preview = try GramPreviewRouter.preview(data: data, name: hit.name, mime: hit.mime, cachedAt: hit.url)
+                case .downloaded(let name, let mime, let data, let cached):
+                    preview = try GramPreviewRouter.preview(data: data, name: name, mime: mime, cachedAt: cached?.url)
+                }
             } catch is CancellationError {
             } catch {
                 if GuestError.classify(error) == .forbidden {

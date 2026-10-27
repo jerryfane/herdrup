@@ -2440,6 +2440,19 @@ struct GramView: View {
             return stored
         }
 
+        /// Keep a file this device just posted, under its message id, by moving its staged
+        /// copy in: an open from Chat's attachment list or Gram is then a cache hit and
+        /// never downloads the bytes this device uploaded. Off the main actor, with the
+        /// same epoch rule as `store`.
+        static func keep(_ file: ComposerAttachment) async {
+            let epoch = currentEpoch
+            await Task.detached(priority: .utility) {
+                guard currentEpoch == epoch, let id = file.messageID else { return }
+                GramFileCache.keep(file, in: root)
+                if currentEpoch != epoch { GramFileCache.remove(id: id, in: root) }
+            }.value
+        }
+
         static func remove(id: String) {
             GramFileCache.remove(id: id, in: root)
             GramThumbnails.remove(id: id)

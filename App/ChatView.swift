@@ -1544,7 +1544,7 @@ private struct ChatRowView: View, Equatable {
                 .accessibilityHint(expanded.contains(thoughtKey) ? "Collapses the thought" : "Shows the whole thought")
                 .accessibilityIdentifier("chat-thought")
                 if expanded.contains(thoughtKey) {
-                    ChatMarkdownView(markdown: work.thoughts.joined(separator: "\n\n"))
+                    ChatMarkdownView(markdown: work.thoughts.joined(separator: "\n\n"), tone: .thought)
                         .frame(maxWidth: .infinity, alignment: .leading)
                         .stableContextMenu { messageMenu(work.thoughts.joined(separator: "\n\n"), markdown: true) }
                         .padding(.vertical, 2).padding(.leading, 12)

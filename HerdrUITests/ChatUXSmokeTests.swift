@@ -1,8 +1,9 @@
+import UIKit
 import XCTest
 
 final class ChatUXSmokeTests: XCTestCase {
     private func launch(failingRefresh: Bool = false, pendingQuestion: Bool = false, large: Bool = false,
-                        copyFixture: Bool = false, plan: String = "", mermaid: Bool = false,
+                        copyFixture: Bool = false, plan: String = "", mermaid: Bool = false, svg: Bool = false,
                         longSession: Bool = false, subagents: Bool = false,
                         environment: [String: String] = [:]) -> XCUIApplication {
         continueAfterFailure = false
@@ -14,6 +15,7 @@ final class ChatUXSmokeTests: XCTestCase {
             "HERDR_CHAT_UX_COPY": copyFixture ? "1" : "0",
             "HERDR_CHAT_UX_PLAN": plan,
             "HERDR_CHAT_UX_MERMAID": mermaid ? "1" : "0",
+            "HERDR_CHAT_UX_SVG": svg ? "1" : "0",
             "HERDR_CHAT_UX_LONG_SESSION": longSession ? "1" : "0",
             "HERDR_CHAT_UX_SUBAGENTS": subagents ? "1" : "0"
         ].merging(environment) { _, new in new })
@@ -267,6 +269,135 @@ final class ChatUXSmokeTests: XCTestCase {
         XCTAssertEqual(cachedImage.frame.width, shownSize.width, accuracy: 0.5)
         XCTAssertEqual(cachedImage.frame.height, shownSize.height, accuracy: 0.5)
         record(relaunched, "Mermaid diagram from the disk cache after relaunch")
+    }
+
+    /// The owner's ```svg block (round 4) is drawn as an image in the app's colours, opens full
+    /// screen, and shows its code on request; a broken SVG stays a code block.
+    func testSVGReplyRendersAnImageAndABrokenOneStaysCode() {
+        let app = launch(svg: true)
+        let image = app.buttons["chat-svg-image"].firstMatch
+        XCTAssertTrue(image.waitForExistence(timeout: 30),
+                      "The SVG must finish rendering offscreen: \(app.debugDescription)")
+        XCTAssertGreaterThan(image.frame.width, 100, "\(image.frame)")
+        // 900 × 360 drawn to the column: the aspect is the SVG's own.
+        XCTAssertEqual(image.frame.width / image.frame.height, 2.5, accuracy: 0.05, "\(image.frame)")
+        XCTAssertTrue((image.value as? String ?? "").hasPrefix("drawn "), String(describing: image.value))
+        XCTAssertEqual(app.buttons.matching(identifier: "chat-svg-image").count, 1,
+                       "Only the well-formed SVG is drawn")
+        let source = app.staticTexts.matching(NSPredicate(format: "label CONTAINS %@", "Clinic system (cloud)")).firstMatch
+        XCTAssertFalse(source.exists, "The SVG's source must not be drawn as code")
+
+        let broken = app.staticTexts["chat-svg-error"]
+        XCTAssertTrue(broken.waitForExistence(timeout: 10), app.debugDescription)
+        XCTAssertTrue(app.staticTexts.matching(NSPredicate(format: "label CONTAINS %@", "<rect width=\"4\">")).firstMatch.exists,
+                      "A malformed SVG falls back to its code")
+
+        let chat = app.descendants(matching: .any)["chat-view"].firstMatch
+        for _ in 0..<4 where !image.isHittable {
+            chat.swipeDown(velocity: .slow)
+        }
+        record(app, "SVG reply drawn as an image")
+        image.tap()
+        let viewer = app.descendants(matching: .any)["chat-svg-viewer"].firstMatch
+        XCTAssertTrue(viewer.waitForExistence(timeout: 10), app.debugDescription)
+        record(app, "SVG viewer full screen")
+        app.buttons["chat-svg-viewer-done"].tap()
+        XCTAssertTrue(viewer.waitForNonExistence(timeout: 10))
+
+        let toggle = app.buttons["chat-svg-toggle"].firstMatch
+        for _ in 0..<4 where !toggle.isHittable {
+            chat.swipeDown(velocity: .slow)
+        }
+        toggle.tap()
+        XCTAssertTrue(source.waitForExistence(timeout: 5), "Show code reveals the SVG's source")
+        XCTAssertFalse(app.buttons["chat-svg-image"].exists)
+    }
+
+    /// An expanded thought reads as an aside (round 4): its text, list items and inline code in
+    /// the secondary ink, a step smaller than the reply. Measured on the screen's pixels: the
+    /// brightest pixel of a thought line is the secondary ink, a reply line's is the primary.
+    func testExpandedThoughtIsDimmerAndSmallerThanTheReply() {
+        let app = launch()
+        let header = app.buttons.matching(NSPredicate(format: "identifier == %@ AND label CONTAINS %@",
+                                                      "chat-thought", "Check the table")).firstMatch
+        XCTAssertTrue(header.waitForExistence(timeout: 10), app.debugDescription)
+        let chat = app.descendants(matching: .any)["chat-view"].firstMatch
+        // The reply line, measured while the chat sits at its tail (it is on screen there),
+        // before the thought opens above it and pushes it down under the composer.
+        let reply = app.staticTexts["A complete fixture response."].firstMatch
+        XCTAssertTrue(reply.waitForExistence(timeout: 5), app.debugDescription)
+        for _ in 0..<4 where !reply.isHittable {
+            chat.swipeUp(velocity: .slow)
+        }
+        XCTAssertTrue(reply.isHittable, "\(reply.frame)")
+        let replyInk = Self.brightest(reply.frame, in: XCUIScreen.main.screenshot().image, app: app)
+        let replyHeight = reply.frame.height
+        XCTAssertGreaterThan(replyInk, 0.85, "A reply line is drawn in the primary ink")
+
+        for _ in 0..<4 where !header.isHittable {
+            chat.swipeDown(velocity: .slow)
+        }
+        header.tap()
+        let open = app.descendants(matching: .any)["chat-thought-open"].firstMatch
+        XCTAssertTrue(open.waitForExistence(timeout: 5), app.debugDescription)
+
+        let lead = app.staticTexts["Check the table"].firstMatch
+        let paragraph = app.staticTexts["Use wrapped cells and literal code."].firstMatch
+        let item = app.staticTexts["Preserve Unicode: café"].firstMatch
+        let code = app.staticTexts.matching(NSPredicate(format: "label BEGINSWITH %@", "Find literal")).firstMatch
+        for element in [lead, paragraph, item, code] {
+            XCTAssertTrue(element.waitForExistence(timeout: 5), app.debugDescription)
+        }
+        // The chat's top edge fades content out under the bar (26 pt), so bring the thought's
+        // first line well clear of it with one exact drag (no fling). The top is the chat's
+        // own, or the Chat/Terminal switch's bottom if lower.
+        let mode = app.buttons["Terminal"].firstMatch
+        let top = max(chat.frame.minY, mode.exists ? mode.frame.maxY : 0)
+        let clear = top + 70
+        if lead.frame.minY < clear {
+            let start = chat.coordinate(withNormalizedOffset: CGVector(dx: 0.5, dy: 0.45))
+            start.press(forDuration: 0.2, thenDragTo: start.withOffset(CGVector(dx: 0, dy: clear - lead.frame.minY + 10)))
+        }
+        for element in [lead, paragraph, item, code] {
+            XCTAssertTrue(element.isHittable && element.frame.minY >= top + 40,
+                          "\(element.label) must be on screen, clear of the top fade: \(element.frame) below \(top)")
+        }
+        record(app, "Expanded thought box")
+
+        let shot = XCUIScreen.main.screenshot().image
+        for (name, element) in [("bold lead", lead), ("text", paragraph), ("list item", item), ("inline code", code)] {
+            let value = Self.brightest(element.frame, in: shot, app: app)
+            XCTAssertLessThan(value, 0.75, "A thought's \(name) must be in the secondary ink, not white (\(value))")
+            XCTAssertGreaterThan(value, 0.5, "A thought's \(name) must stay readable (\(value))")
+        }
+        XCTAssertLessThan(item.frame.height, replyHeight,
+                          "A thought line is a type step smaller than a reply line")
+    }
+
+    /// The brightest pixel inside `frame` (points), as the mean of its RGB in 0…1.
+    private static func brightest(_ frame: CGRect, in shot: UIImage, app: XCUIApplication) -> Double {
+        guard let image = shot.cgImage else { return 0 }
+        let scale = CGFloat(image.width) / max(app.frame.width, 1)
+        let rect = CGRect(x: frame.minX * scale, y: frame.minY * scale,
+                          width: frame.width * scale, height: frame.height * scale)
+            .integral.intersection(CGRect(x: 0, y: 0, width: image.width, height: image.height))
+        guard !rect.isEmpty, let crop = image.cropping(to: rect) else { return 0 }
+        let width = crop.width, height = crop.height
+        var pixels = [UInt8](repeating: 0, count: width * height * 4)
+        let drew = pixels.withUnsafeMutableBytes { buffer -> Bool in
+            guard let context = CGContext(
+                data: buffer.baseAddress, width: width, height: height, bitsPerComponent: 8,
+                bytesPerRow: width * 4, space: CGColorSpaceCreateDeviceRGB(),
+                bitmapInfo: CGImageAlphaInfo.premultipliedLast.rawValue) else { return false }
+            context.draw(crop, in: CGRect(x: 0, y: 0, width: width, height: height))
+            return true
+        }
+        guard drew else { return 0 }
+        var best = 0
+        for offset in stride(from: 0, to: pixels.count, by: 4) {
+            best = max(best, Int(pixels[offset]) + Int(pixels[offset + 1]) + Int(pixels[offset + 2]))
+        }
+        return Double(best) / (3 * 255)
     }
 
     /// Pixels per point of this device's screen, from a screenshot of it.

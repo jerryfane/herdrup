@@ -80,15 +80,25 @@ final class MermaidRenderer: NSObject {
     /// What to draw: the source, the column width it must fit, the chat text size (scales
     /// the drawing like the text around it) and the screen scale of the raster.
     struct Request: Equatable {
+        /// A mermaid diagram, or an ```svg block already cleaned (`SVGDiagram.sanitize`),
+        /// which the page draws as an `<img>`: an SVG image runs no script and loads nothing.
+        enum Drawing: Equatable {
+            case mermaid
+            case svg(SVGDiagram.Sanitized)
+        }
+
+        var drawing: Drawing = .mermaid
+        /// The block's source as written: the cache key, so an image is found by content.
         let source: String
         let widthBucket: Int
         let textScale: CGFloat
         let displayScale: CGFloat
 
         @MainActor var key: String {
-            MermaidDiagram.cacheKey(source: source,
-                                    theme: "\(MermaidRenderer.theme)@\(textScale)x\(displayScale)",
-                                    widthBucket: widthBucket)
+            let theme = drawing == .mermaid ? MermaidRenderer.theme : MermaidRenderer.svgTheme
+            return MermaidDiagram.cacheKey(source: source,
+                                           theme: "\(theme)@\(textScale)x\(displayScale)",
+                                           widthBucket: widthBucket)
         }
     }
 
@@ -217,12 +227,21 @@ final class MermaidRenderer: NSObject {
         if job == self.job { phase = .drawing }
         renders += 1
         let result: Any
+        let function: String
+        var arguments: [String: Any] = ["textScale": Double(request.textScale)]
+        switch request.drawing {
+        case .mermaid:
+            function = Self.renderFunction
+            arguments["id"] = "herdr-mermaid-\(renders)"
+            arguments["source"] = request.source
+        case .svg(let svg):
+            function = Self.imageFunction
+            arguments["data"] = Data(svg.svg.utf8).base64EncodedString()
+            arguments["width"] = svg.width
+            arguments["height"] = svg.height
+        }
         do {
-            result = try await javaScript(
-                Self.renderFunction,
-                arguments: ["id": "herdr-mermaid-\(renders)", "source": request.source,
-                            "textScale": Double(request.textScale)],
-                on: page)
+            result = try await javaScript(function, arguments: arguments, on: page)
         } catch let error as NSError where error.domain == WKError.errorDomain
                     && error.code == WKError.Code.javaScriptExceptionOccurred.rawValue {
             // mermaid.render threw: the source does not parse or lay out.
@@ -230,8 +249,10 @@ final class MermaidRenderer: NSObject {
         } catch {
             throw Failure.unavailable
         }
+        let source: String?
+        if case .svg(let svg) = request.drawing { source = svg.svg } else { source = nil }
         guard let drawn = result as? [String: Any],
-              let svg = drawn["svg"] as? String,
+              let svg = source ?? drawn["svg"] as? String,
               let natural = (drawn["width"] as? NSNumber)?.doubleValue,
               let naturalHeight = (drawn["height"] as? NSNumber)?.doubleValue else { throw Failure.invalid }
         // Rasterise at the size the chat shows it (a tall diagram capped), not its full
@@ -242,7 +263,7 @@ final class MermaidRenderer: NSObject {
         let size = CGSize(width: ceil(fit.width), height: ceil(fit.height))
         do {
             _ = try await javaScript(
-                "const el = document.querySelector('#out svg'); el.style.width = width + 'px'; el.style.height = height + 'px'; return true;",
+                "const el = document.getElementById('out').firstElementChild; el.style.width = width + 'px'; el.style.height = height + 'px'; return true;",
                 arguments: ["width": Double(size.width), "height": Double(size.height)],
                 on: page)
         } catch {
@@ -430,6 +451,22 @@ final class MermaidRenderer: NSObject {
     }
     """
 
+    /// Draws a cleaned SVG (`SVGDiagram.sanitize`) into `#out` as an `<img>`, not inline: an
+    /// SVG loaded as an image runs no script and fetches nothing, whatever it contains. Its
+    /// size comes from the sanitizer (the root's width/height or viewBox) times the chat text
+    /// scale. Null when WebKit cannot decode it, which shows the block as code.
+    private static let imageFunction = """
+    const out = document.getElementById('out');
+    out.replaceChildren();
+    const img = new Image();
+    img.style.display = 'block';
+    img.src = 'data:image/svg+xml;base64,' + data;
+    try { await img.decode(); } catch (e) { return null; }
+    if (!(img.naturalWidth > 0 && img.naturalHeight > 0)) return null;
+    out.appendChild(img);
+    return { width: width * textScale, height: height * textScale };
+    """
+
     /// Mermaid's dark `base` theme in the app's palette (`Palette`), labels as SVG text
     /// (`htmlLabels: false`, no foreignObject) and nothing that runs on load.
     private static var configuration: [String: Any] {
@@ -496,6 +533,31 @@ final class MermaidRenderer: NSObject {
     private static let theme: String = {
         let values = themeVariables.sorted { $0.key < $1.key }.map { "\($0.key)=\($0.value)" }
         return "mermaid-\(libraryVersion);base;" + values.joined(separator: ";")
+    }()
+
+    /// The CSS variables an ```svg block may use for colour (`var(--fg)`, `var(--muted)`,
+    /// `var(--border)`…), as the page an agent drew it for would define them: the app's
+    /// palette, so a block reads on the chat's ground. `--bg` is the card the image sits on.
+    static let svgVariables: [String: String] = {
+        let text = hex(Palette.text), dim = hex(Palette.textDim), faint = hex(Palette.textFaint)
+        return [
+            "fg": text, "text": text, "foreground": text,
+            "muted": dim, "dim": dim, "secondary": dim,
+            "faint": faint, "subtle": faint, "border": faint, "line": faint,
+            "bg": hex(Palette.surface), "background": hex(Palette.surface),
+            "surface": hex(Palette.surfaceRaised), "panel": hex(Palette.surfaceRaised),
+            "accent": hex(Palette.brand),
+            "ok": hex(Palette.done), "green": hex(Palette.done),
+            "warn": hex(Palette.waiting), "amber": hex(Palette.waiting),
+            "error": hex(Palette.died), "red": hex(Palette.died),
+            "info": hex(Palette.working), "blue": hex(Palette.working),
+        ]
+    }()
+
+    /// Part of every SVG cache key: a palette change, or a change to how SVGs are cleaned
+    /// (`svg-N`), draws them afresh.
+    static let svgTheme: String = {
+        "svg-1;" + svgVariables.sorted { $0.key < $1.key }.map { "\($0.key)=\($0.value)" }.joined(separator: ";")
     }()
 
     static func hex(_ color: Color) -> String {
