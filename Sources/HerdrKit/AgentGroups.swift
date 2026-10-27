@@ -61,12 +61,11 @@ public struct AgentGroupsDocument: Codable, Equatable, Sendable {
 
     // MARK: edits (pure, so a conflict can replay them onto the server's current document)
 
-    public mutating func toggleStar(_ name: String) {
-        if let index = stars.firstIndex(of: name) {
-            stars.remove(at: index)
-        } else {
-            stars.append(name)
-        }
+    /// Stars or unstars `name`. Idempotent (not a toggle), so replaying it onto a document
+    /// another device changed meanwhile keeps what this device asked for.
+    public mutating func setStar(_ name: String, _ starred: Bool) {
+        stars.removeAll { $0 == name }
+        if starred { stars.append(name) }
     }
 
     /// Puts `name` in the folder `folderID`, taking it out of any other. A missing folder
@@ -117,6 +116,58 @@ public struct AgentGroupsDocument: Codable, Equatable, Sendable {
     /// A short random folder id.
     public static func newFolderID() -> String {
         String(UUID().uuidString.replacingOccurrences(of: "-", with: "").prefix(12)).lowercased()
+    }
+}
+
+/// One change the owner makes on this device. Applied to the document the list shows at once,
+/// then sent; on `groups_conflict` it is applied again to the server's current document.
+public enum AgentGroupsEdit: Equatable, Sendable {
+    case setStar(String, Bool)
+    case move(String, toFolder: String)
+    case removeFromFolder(String)
+    case addFolder(id: String, name: String, member: String?)
+    case renameFolder(String, to: String)
+    case deleteFolder(String)
+    case moveFolder(String, by: Int)
+
+    public func apply(to document: inout AgentGroupsDocument) {
+        switch self {
+        case let .setStar(name, starred): document.setStar(name, starred)
+        case let .move(name, folderID): document.move(name, toFolder: folderID)
+        case let .removeFromFolder(name): document.removeFromFolders(name)
+        case let .addFolder(id, name, member): document.addFolder(id: id, name: name, member: member)
+        case let .renameFolder(id, name): document.renameFolder(id, to: name)
+        case let .deleteFolder(id): document.deleteFolder(id)
+        case let .moveFolder(id, delta): document.moveFolder(id, by: delta)
+        }
+    }
+
+    public func applied(to document: AgentGroupsDocument) -> AgentGroupsDocument {
+        var next = document
+        apply(to: &next)
+        return next
+    }
+}
+
+extension AgentGroupsDocument {
+    /// Saves `edit` made on `base` through `set` (`agent.groups.set`) and returns the server's
+    /// new document. When another device saved first (`groups_conflict`), the edit is applied
+    /// once more to the server's current document and sent again; a second conflict is thrown
+    /// with the newest document. An edit that changes nothing is not sent.
+    public static func commit(
+        _ edit: AgentGroupsEdit,
+        onto base: AgentGroupsDocument,
+        set: (AgentGroupsDocument) async throws -> AgentGroupsDocument
+    ) async throws -> AgentGroupsDocument {
+        let next = edit.applied(to: base)
+        guard next != base else { return base }
+        do {
+            return try await set(next)
+        } catch AgentGroupsError.conflict(let current) {
+            let replayed = edit.applied(to: current)
+            guard replayed != current else { return current }
+            return try await set(replayed)
+        }
     }
 }
 

@@ -139,15 +139,116 @@ final class AgentGroupsTests: XCTestCase {
         XCTAssertEqual(doc.orderedFolders.map(\.id), ["f-new", "f-enyo"])
         XCTAssertEqual(doc.orderedFolders.map(\.order), [0, 1])
 
-        doc.toggleStar("jarvis")
-        XCTAssertTrue(doc.isStarred("jarvis"))
-        doc.toggleStar("jarvis")
+        doc.setStar("jarvis", true)
+        doc.setStar("jarvis", true)
+        XCTAssertEqual(doc.stars, ["jarvis"], "starring twice stars once")
+        doc.setStar("jarvis", false)
         XCTAssertFalse(doc.isStarred("jarvis"))
 
         doc.deleteFolder("f-enyo")
         XCTAssertNil(doc.folder(containing: "enyo"), "a deleted folder's agents go back to the list")
         XCTAssertEqual(AgentGroupsDocument.folderName("  "), nil)
         XCTAssertEqual(AgentGroupsDocument.folderName(String(repeating: "x", count: 80))?.count, 64)
+    }
+
+    // MARK: saving an edit
+
+    /// A stand-in for `agent.groups.set`: refuses a stale revision with the current document,
+    /// otherwise stores the document under the next revision.
+    private actor FakeGroupsServer {
+        var current: AgentGroupsDocument
+        private(set) var sets: [AgentGroupsDocument] = []
+        /// Every set is refused as stale (another device always saved first).
+        private var alwaysConflict = false
+
+        init(_ current: AgentGroupsDocument) { self.current = current }
+
+        func setAlwaysConflict() { alwaysConflict = true }
+
+        func set(_ document: AgentGroupsDocument) throws -> AgentGroupsDocument {
+            sets.append(document)
+            if alwaysConflict {
+                current.revision += 1
+                throw AgentGroupsError.conflict(current: current)
+            }
+            guard document.revision == current.revision else {
+                throw AgentGroupsError.conflict(current: current)
+            }
+            current = document
+            current.revision += 1
+            return current
+        }
+    }
+
+    func testEditIsSavedOnTheDocumentItWasMadeOn() async throws {
+        let base = AgentGroupsDocument(revision: 4, folders: [enyo])
+        let server = FakeGroupsServer(base)
+        let saved = try await AgentGroupsDocument.commit(.setStar("jarvis", true), onto: base) {
+            try await server.set($0)
+        }
+        XCTAssertEqual(saved.revision, 5)
+        XCTAssertEqual(saved.stars, ["jarvis"])
+        let sets = await server.sets
+        XCTAssertEqual(sets.count, 1)
+    }
+
+    func testConflictReappliesTheEditOntoTheCurrentDocumentOnce() async throws {
+        // This device saw revision 4; another device has since starred herdr-app and renamed
+        // the folder (revision 5). This device takes enyo-scout out of the folder.
+        let seen = AgentGroupsDocument(revision: 4, folders: [enyo], stars: ["vetrina"])
+        var theirs = seen
+        theirs.revision = 5
+        theirs.setStar("herdr-app", true)
+        theirs.renameFolder("f-enyo", to: "Enyo team")
+        let server = FakeGroupsServer(theirs)
+
+        let saved = try await AgentGroupsDocument.commit(.removeFromFolder("enyo-scout"), onto: seen) {
+            try await server.set($0)
+        }
+        let sets = await server.sets
+        XCTAssertEqual(sets.map(\.revision), [4, 5], "the stale set, then one replay on the current revision")
+        XCTAssertEqual(saved.revision, 6)
+        XCTAssertEqual(saved.folders.map(\.members), [["enyo-review", "enyo-efm", "enyo"]], "this device's edit")
+        XCTAssertEqual(saved.folders.map(\.name), ["Enyo team"], "the other device's rename is kept")
+        XCTAssertEqual(saved.stars, ["vetrina", "herdr-app"], "and so is its star")
+    }
+
+    func testConflictReplayKeepsAStarIdempotent() async throws {
+        // Both devices starred jarvis: replaying the star must not unstar it.
+        let seen = AgentGroupsDocument(revision: 1)
+        let server = FakeGroupsServer(AgentGroupsDocument(revision: 2, stars: ["jarvis"]))
+        let saved = try await AgentGroupsDocument.commit(.setStar("jarvis", true), onto: seen) {
+            try await server.set($0)
+        }
+        XCTAssertEqual(saved.stars, ["jarvis"])
+        XCTAssertEqual(saved.revision, 2, "nothing left to change: the current document is the answer")
+        let sets = await server.sets
+        XCTAssertEqual(sets.count, 1, "no second set for an edit the current document already has")
+    }
+
+    func testSecondConflictIsThrownWithTheNewestDocument() async throws {
+        let seen = AgentGroupsDocument(revision: 1)
+        let server = FakeGroupsServer(AgentGroupsDocument(revision: 1))
+        await server.setAlwaysConflict()
+        do {
+            _ = try await AgentGroupsDocument.commit(.addFolder(id: "f", name: "F", member: nil), onto: seen) {
+                try await server.set($0)
+            }
+            XCTFail("expected the second conflict to be thrown")
+        } catch AgentGroupsError.conflict(let current) {
+            XCTAssertEqual(current.revision, 3)
+        }
+        let sets = await server.sets
+        XCTAssertEqual(sets.count, 2, "re-applied once, not retried forever")
+    }
+
+    func testEditToAFolderDeletedElsewhereChangesNothing() async throws {
+        let seen = AgentGroupsDocument(revision: 1, folders: [enyo])
+        let server = FakeGroupsServer(AgentGroupsDocument(revision: 2))
+        let saved = try await AgentGroupsDocument.commit(.renameFolder("f-enyo", to: "Enyo 2"), onto: seen) {
+            try await server.set($0)
+        }
+        XCTAssertEqual(saved, AgentGroupsDocument(revision: 2), "the folder is gone; the server's document stands")
     }
 
     // MARK: client

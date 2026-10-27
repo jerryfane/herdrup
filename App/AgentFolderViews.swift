@@ -127,59 +127,60 @@ private struct LeadingSwipeActions: ViewModifier {
             content
         } else {
             let offset = min(max(0, (revealed ? revealWidth : 0) + drag), revealWidth + 24)
-            ZStack(alignment: .leading) {
-                if offset > 0 || revealed {
-                    HStack(spacing: 0) {
-                        ForEach(actions) { action in
-                            Button {
-                                withAnimation(.spring(response: 0.3, dampingFraction: 0.86)) { revealed = false }
-                                action.action()
-                            } label: {
-                                VStack(spacing: 4) {
-                                    Image(systemName: action.systemImage)
-                                        .font(.system(size: 17, weight: .semibold))
-                                    Text(action.title)
-                                        .font(Typography.app(12, .semibold))
+            // The actions sit behind the row, as tall as it, and show as it slides right.
+            content
+                .offset(x: offset)
+                .background(alignment: .leading) {
+                    if offset > 0 || revealed {
+                        HStack(spacing: 0) {
+                            ForEach(actions) { action in
+                                Button {
+                                    withAnimation(.spring(response: 0.3, dampingFraction: 0.86)) { revealed = false }
+                                    action.action()
+                                } label: {
+                                    VStack(spacing: 4) {
+                                        Image(systemName: action.systemImage)
+                                            .font(.system(size: 17, weight: .semibold))
+                                        Text(action.title)
+                                            .font(Typography.app(12, .semibold))
+                                    }
+                                    .foregroundStyle(Palette.ground)
+                                    .frame(width: Self.actionWidth)
+                                    .frame(maxHeight: .infinity)
+                                    .background(action.tint)
                                 }
-                                .foregroundStyle(Palette.ground)
-                                .frame(width: Self.actionWidth)
-                                .frame(maxHeight: .infinity)
-                                .background(action.tint)
+                                .buttonStyle(.plain)
+                                .accessibilityIdentifier(action.identifier)
                             }
-                            .buttonStyle(.plain)
-                            .accessibilityIdentifier(action.identifier)
                         }
                     }
                 }
-                content
-                    .offset(x: offset)
-                    .overlay {
-                        // While open, a tap on the row closes the actions instead of opening it.
-                        if revealed {
-                            Color.clear
-                                .contentShape(Rectangle())
-                                .offset(x: offset)
-                                .onTapGesture {
-                                    withAnimation(.spring(response: 0.3, dampingFraction: 0.86)) { revealed = false }
-                                }
+                .overlay {
+                    // While open, a tap on the row closes the actions instead of opening it.
+                    if revealed {
+                        Color.clear
+                            .contentShape(Rectangle())
+                            .offset(x: offset)
+                            .onTapGesture {
+                                withAnimation(.spring(response: 0.3, dampingFraction: 0.86)) { revealed = false }
+                            }
+                    }
+                }
+                .clipped()
+                .simultaneousGesture(
+                    DragGesture(minimumDistance: 16)
+                        .updating($drag) { value, state, _ in
+                            guard Self.isHorizontal(value) else { return }
+                            state = value.translation.width
                         }
-                    }
-            }
-            .clipped()
-            .simultaneousGesture(
-                DragGesture(minimumDistance: 16)
-                    .updating($drag) { value, state, _ in
-                        guard Self.isHorizontal(value) else { return }
-                        state = value.translation.width
-                    }
-                    .onEnded { value in
-                        guard Self.isHorizontal(value) else { return }
-                        let end = (revealed ? revealWidth : 0) + value.predictedEndTranslation.width
-                        withAnimation(.spring(response: 0.3, dampingFraction: 0.86)) {
-                            revealed = end > revealWidth / 2
+                        .onEnded { value in
+                            guard Self.isHorizontal(value) else { return }
+                            let end = (revealed ? revealWidth : 0) + value.predictedEndTranslation.width
+                            withAnimation(.spring(response: 0.3, dampingFraction: 0.86)) {
+                                revealed = end > revealWidth / 2
+                            }
                         }
-                    }
-            )
+                )
         }
     }
 
