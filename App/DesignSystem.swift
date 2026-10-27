@@ -261,7 +261,7 @@ enum AgentAvatarBadge: Equatable {
 }
 
 /// The round avatar of a Messages-style agent row: the agent's picture (`AgentAvatarView`:
-/// its photo or mascot, Herdy by default, herdrup#538), with the status as a 22 pt badge on
+/// its photo or mascot, its initial tile by default, herdrup#538), with the status as a 22 pt badge on
 /// its lower-right edge, ringed with the ground colour. The owner's roster and a guest's
 /// shared-agent list draw the same avatar.
 struct AgentAvatar: View {

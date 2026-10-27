@@ -5,13 +5,11 @@ import Crypto
 
 /// The bundled agent mascots (the approved "Pebbles" set, herdrup#538), in picker order.
 /// The raw value is the wire id (`AgentInfo.avatar.mascot`) and names the app's image set
-/// `Mascot-<id>`. Herdy, derived from the app icon, is what an agent with no choice wears.
+/// `Mascot-<id>`. An agent with no choice wears none of them: it shows its initial tile
+/// (`AgentAvatarAppearance.initial`).
 /// Keep in sync with `MASCOTS` in Tools/mascots/generate-mascots.py.
 public enum AgentMascot: String, CaseIterable, Sendable, Identifiable {
     case herdy, bot, blip, tri, squib, zag, cub, dome, pip, prism, nib, drop
-
-    /// What an agent without a chosen avatar shows.
-    public static let `default`: AgentMascot = .herdy
 
     public var id: String { rawValue }
 
@@ -28,8 +26,8 @@ public enum AgentMascot: String, CaseIterable, Sendable, Identifiable {
 /// content address never changes meaning.
 ///
 /// Decoded leniently and NEVER throws: an unknown `style` (a newer server) or a malformed
-/// value reads as `.unrecognised`, which renders as the default mascot, rather than failing
-/// the whole `agent.list`.
+/// value reads as `.unrecognised`, which renders as the default initial tile, rather than
+/// failing the whole `agent.list`.
 public struct AgentAvatarDescriptor: Decodable, Equatable, Sendable {
     public enum Style: String, Sendable {
         case mascot, image, unrecognised
@@ -76,35 +74,38 @@ public struct AgentAvatarDescriptor: Decodable, Equatable, Sendable {
     public var appearance: AgentAvatarAppearance {
         switch style {
         case .mascot:
-            guard let mascot, !mascot.isEmpty else { return .mascot(.default) }
+            guard let mascot, !mascot.isEmpty else { return .initial }
             if let known = AgentMascot(rawValue: mascot) { return .mascot(known) }
-            // A mascot a newer build ships: the owner chose something specific, so it
-            // shows as the agent's generated circle rather than passing for the default.
+            // A mascot a newer build ships: drawn as the initial tile, but kept apart from
+            // "no choice" so the picker still offers the way back to the default.
             return .unknownMascot(mascot)
         case .image:
-            guard let sha256, AgentAvatarImage.isValidSHA256(sha256) else { return .mascot(.default) }
+            guard let sha256, AgentAvatarImage.isValidSHA256(sha256) else { return .initial }
             return .image(sha256: sha256)
         case .unrecognised:
-            return .mascot(.default)
+            return .initial
         }
     }
 }
 
-/// The resolved rendering of an agent's avatar. `nil` descriptors resolve to the default
-/// mascot (`AgentAvatarAppearance.resolve`).
+/// The resolved rendering of an agent's avatar. `nil` descriptors resolve to the initial
+/// tile (`AgentAvatarAppearance.resolve`).
 public enum AgentAvatarAppearance: Equatable, Sendable {
+    /// No choice: the agent's initial on its name's gradient, as before mascots existed.
+    case initial
     case mascot(AgentMascot)
     case image(sha256: String)
-    /// A mascot id this build does not ship: drawn as the name's generated circle.
+    /// A mascot id this build does not ship: drawn as the initial tile.
     case unknownMascot(String)
 
     public static func resolve(_ avatar: AgentAvatarDescriptor?) -> AgentAvatarAppearance {
-        avatar?.appearance ?? .mascot(.default)
+        avatar?.appearance ?? .initial
     }
 
-    /// The stable accessibility identifier suffix: `herdy`, `bot`, `image`, `unknown`.
+    /// The stable accessibility identifier suffix: `initial`, `herdy`, `bot`, `image`, `unknown`.
     public var identifierSuffix: String {
         switch self {
+        case .initial: return "initial"
         case .mascot(let m): return m.rawValue
         case .image: return "image"
         case .unknownMascot: return "unknown"
@@ -135,7 +136,7 @@ extension AgentInfo {
 /// the roster entry that name denotes. A local sender is the local agent of that name; a
 /// federated `<machine>/…/<name>` is the agent of that bare name on the machine whose id
 /// or label the prefix carries. No match (a renamed or forgotten agent, a guest who only
-/// knows its granted agent) means the default mascot.
+/// knows its granted agent) means the default initial tile.
 public enum AgentAvatarLookup {
     public static func agent(forGramSender from: String, in roster: [AgentInfo]) -> AgentInfo? {
         if let exact = roster.first(where: { $0.name == from }) { return exact }
@@ -152,7 +153,7 @@ public enum AgentAvatarLookup {
 }
 
 /// What `agent.avatar.set` sends as `avatar`: a mascot, or a photo whose bytes travel
-/// alongside as `image_base64`. A nil choice clears the agent back to the default.
+/// alongside as `image_base64`. A nil choice clears the agent back to its initial tile.
 public enum AgentAvatarChoice: Equatable, Sendable {
     case mascot(String)
     case image(data: Data, mime: String)

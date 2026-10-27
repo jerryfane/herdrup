@@ -360,7 +360,7 @@ public struct AgentInfo: Decodable, Equatable, Sendable, Identifiable {
     /// program. False means guest access is paused. Absent for owners.
     public let guestRunning: Bool?
     /// The owner's chosen picture for this agent (herdrup#538), shared with every owner
-    /// device and every guest of the agent. Absent means the default mascot. Decoded
+    /// device and every guest of the agent. Absent means the agent's initial tile. Decoded
     /// leniently (`AgentAvatarDescriptor` never throws), so an odd value cannot fail the list.
     public let avatar: AgentAvatarDescriptor?
 
@@ -1155,7 +1155,7 @@ public struct ServerCapabilities: Decodable, Equatable, Sendable {
     /// `agent.answer` answers omp's pending `ask` question from the app (herdr#308).
     public let agentAnswer: Bool
     /// `agent.avatar.set` / `agent.avatar.get` exist and `AgentInfo.avatar` is reported
-    /// (herdrup#538). False hides the avatar editing UI; agents still show Herdy.
+    /// (herdrup#538). False hides the avatar editing UI; agents still show their initial tile.
     public let agentAvatar: Bool
 
     enum CodingKeys: String, CodingKey {

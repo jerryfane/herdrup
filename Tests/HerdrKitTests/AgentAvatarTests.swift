@@ -29,21 +29,24 @@ final class AgentAvatarTests: XCTestCase {
         XCTAssertEqual(AgentAvatarAppearance.resolve(info.avatar), .image(sha256: sha))
     }
 
-    func testAbsentOrNullAvatarIsHerdy() throws {
+    func testAbsentOrNullAvatarIsTheInitialTile() throws {
         XCTAssertNil(try agent(nil).avatar)
         XCTAssertNil(try agent(NSNull()).avatar)
-        XCTAssertEqual(AgentAvatarAppearance.resolve(nil), .mascot(.herdy))
-        XCTAssertEqual(AgentMascot.default, .herdy)
+        XCTAssertEqual(AgentAvatarAppearance.resolve(nil), .initial,
+                       "no choice draws the agent's initial tile, not a mascot")
+        XCTAssertEqual(AgentAvatarAppearance.resolve(nil).identifierSuffix, "initial")
+        XCTAssertEqual(AgentAvatarAppearance.resolve(try agent(["style": "mascot", "mascot": "herdy"]).avatar),
+                       .mascot(.herdy), "Herdy is still a mascot one can pick")
     }
 
     func testUnknownStyleAndMalformedValuesFallBackToTheDefault() throws {
-        XCTAssertEqual(AgentAvatarAppearance.resolve(try agent(["style": "hologram", "mascot": "bot"]).avatar), .mascot(.herdy))
+        XCTAssertEqual(AgentAvatarAppearance.resolve(try agent(["style": "hologram", "mascot": "bot"]).avatar), .initial)
         XCTAssertEqual(try agent("bot").avatar?.style, .unrecognised, "a non-object never fails the list")
-        XCTAssertEqual(AgentAvatarAppearance.resolve(try agent([1, 2]).avatar), .mascot(.herdy))
-        XCTAssertEqual(AgentAvatarAppearance.resolve(try agent(["style": "image", "sha256": "../etc"]).avatar), .mascot(.herdy),
+        XCTAssertEqual(AgentAvatarAppearance.resolve(try agent([1, 2]).avatar), .initial)
+        XCTAssertEqual(AgentAvatarAppearance.resolve(try agent(["style": "image", "sha256": "../etc"]).avatar), .initial,
                        "an image without a valid content address cannot be fetched")
-        XCTAssertEqual(AgentAvatarAppearance.resolve(try agent(["style": "mascot"]).avatar), .mascot(.herdy))
-        XCTAssertEqual(AgentAvatarAppearance.resolve(try agent(["style": 7]).avatar), .mascot(.herdy))
+        XCTAssertEqual(AgentAvatarAppearance.resolve(try agent(["style": "mascot"]).avatar), .initial)
+        XCTAssertEqual(AgentAvatarAppearance.resolve(try agent(["style": 7]).avatar), .initial)
     }
 
     func testAMascotThisBuildDoesNotShipStaysDistinctFromTheDefault() throws {
@@ -260,7 +263,7 @@ final class AgentAvatarTests: XCTestCase {
         XCTAssertNil(AgentAvatarLookup.agent(forGramSender: "other/clientloop", in: agents))
         XCTAssertNil(AgentAvatarLookup.agent(forGramSender: "forgotten", in: agents))
         XCTAssertEqual(AgentAvatarAppearance.resolve(AgentAvatarLookup.agent(forGramSender: "forgotten", in: agents)?.avatar),
-                       .mascot(.herdy), "an unknown sender wears the default")
+                       .initial, "an unknown sender wears the default")
     }
 
     // MARK: pending changes

@@ -89,8 +89,8 @@ final class MockWireFixtureTests: XCTestCase {
         XCTAssertEqual(AgentAvatarAppearance.resolve(byName["clientloop"]?.avatar), .mascot(.tri))
         XCTAssertEqual(AgentAvatarAppearance.resolve(byName["discovery"]?.avatar),
                        .image(sha256: MockWireFixtures.avatarImageSHA256))
-        XCTAssertEqual(AgentAvatarAppearance.resolve(byName["jarvis"]?.avatar), .mascot(.herdy),
-                       "an agent without a choice wears the default")
+        XCTAssertEqual(AgentAvatarAppearance.resolve(byName["jarvis"]?.avatar), .initial,
+                       "an agent without a choice shows its initial tile")
 
         let image = try await HerdrClient(transport: RecordingTransport(reply: MockWireFixtures.avatarImage))
             .agentAvatarGet(target: "t-discovery", sha256: MockWireFixtures.avatarImageSHA256)
