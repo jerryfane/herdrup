@@ -1,55 +1,69 @@
 import SwiftUI
+import UIKit
 import HerdrKit
 
 /// Whether the agents list's waiting rows are out of sight (herdrup#551).
 ///
-/// A reference the home view holds in `@State` WITHOUT observing it: the waiting section's
-/// probe writes here, and only `NeedsYouPill` observes it. Crossing the line therefore
-/// redraws the pill alone, never the list's rows (the #536 render-cost rule).
+/// A reference the home view holds in `@State` WITHOUT observing it; only `NeedsYouPill`
+/// observes it, so crossing the line redraws the pill alone, never the list's rows (the #536
+/// render-cost rule).
 ///
-/// "Out of sight" is either of two things. The section is laid out but scrolled fully above
-/// the list's top edge; or it is not laid out at all. The phone's list is a `LazyVStack`, and
-/// a waiting section that arrives while the owner is scrolled far down is inserted above the
-/// screen without ever being built, so it never reports a frame. The waiting rows always
-/// sort first, so a section that is not on screen is above it.
+/// NOTHING HERE PUBLISHES FROM INSIDE A SWIFTUI UPDATE. The first version flipped this from
+/// the waiting section's `onAppear` / `onDisappear` / scroll-space `onGeometryChange` actions,
+/// which run inside SwiftUI's graph update. A session switch (which tears the home down and
+/// mounts a new one) then hung the main thread for good: the screen froze, and every UI test
+/// query timed out. Now the section only records where its bottom is in the list's content
+/// (a plain stored value: writing it invalidates nothing), and the roster's display-link
+/// sample of the real `UIScrollView` (`ScrollActivityObserver.onSample`, outside any
+/// SwiftUI transaction) compares that with the scroll offset and publishes a flip.
+@MainActor
 final class NeedsYouSight: ObservableObject {
-    @Published private(set) var waitingRowsOutOfSight = true
-    private var laidOut = false
-    private var scrolledAbove = false
+    @Published private(set) var waitingRowsOutOfSight = false
+    /// The waiting section's bottom edge in the list's content coordinates; nil until it has
+    /// been laid out. The waiting rows sort first, so a section the lazy list has not built
+    /// keeps its last bottom, which is where it still is.
+    ///
+    /// Nil while the list is scrolled down means the section was inserted above the screen
+    /// and the lazy list never built it (an agent started waiting while the owner was further
+    /// down): it is out of sight, the case herdrup#551 exists for.
+    var waitingRowsBottom: CGFloat?
+    private weak var scrollView: UIScrollView?
 
-    func update(laidOut: Bool) {
-        self.laidOut = laidOut
-        publish()
-    }
-
-    func update(scrolledAbove: Bool) {
-        self.scrolledAbove = scrolledAbove
-        publish()
-    }
-
-    private func publish() {
-        let outOfSight = !laidOut || scrolledAbove
+    /// Called from the roster's display-link sample, once per frame while the list is visible.
+    func sample(_ scrollView: UIScrollView) {
+        self.scrollView = scrollView
+        let outOfSight: Bool
+        let scrolledDown = scrollView.contentOffset.y + scrollView.adjustedContentInset.top
+        if let bottom = waitingRowsBottom {
+            outOfSight = scrolledDown >= bottom
+        } else {
+            outOfSight = scrolledDown > 1
+        }
         guard outOfSight != waitingRowsOutOfSight else { return }
         waitingRowsOutOfSight = outOfSight
     }
+
+    /// Scrolls the list back to its top, where the waiting rows are.
+    func scrollToTop() {
+        guard let scrollView else { return }
+        scrollView.setContentOffset(CGPoint(x: scrollView.contentOffset.x, y: -scrollView.adjustedContentInset.top),
+                                    animated: true)
+    }
 }
 
-/// The agents list's scroll view, as a coordinate space: a row's frame in it is measured from
-/// the top of the visible list, just under the top bar.
-let agentRosterScrollSpace = "agent-roster-scroll-space"
+/// The agents list's scroll CONTENT, as a coordinate space: a frame in it does not move when
+/// the list scrolls, so measuring in it costs nothing per scroll frame.
+let agentRosterContentSpace = "agent-roster-content-space"
 
 extension View {
-    /// Reports to `sight` whether this view (the waiting section) is laid out and whether it
-    /// has scrolled fully above the list's top. The geometry transform runs per scroll frame;
-    /// its action only when the answer flips.
-    func reportsWaitingRowsSight(to sight: NeedsYouSight) -> some View {
-        onGeometryChange(for: Bool.self) { proxy in
-            proxy.frame(in: .named(agentRosterScrollSpace)).maxY <= 0
-        } action: { scrolledAbove in
-            sight.update(scrolledAbove: scrolledAbove)
+    /// Records this view's (the waiting section's) bottom edge in the list's content in
+    /// `sight`. The write is to a plain property, so it cannot invalidate any view.
+    func reportsWaitingRowsBottom(to sight: NeedsYouSight) -> some View {
+        onGeometryChange(for: CGFloat.self) { proxy in
+            proxy.frame(in: .named(agentRosterContentSpace)).maxY
+        } action: { bottom in
+            sight.waitingRowsBottom = bottom
         }
-        .onAppear { sight.update(laidOut: true) }
-        .onDisappear { sight.update(laidOut: false) }
     }
 }
 

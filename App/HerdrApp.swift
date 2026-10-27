@@ -3684,49 +3684,42 @@ struct TerminalHomeView: View {
     }
 
     private var agentRosterScrollContent: some View {
-        ScrollViewReader { proxy in
-            ZStack(alignment: .top) {
-                ScrollView {
-                    agentRosterStack
-                        .background {
-                            ScrollActivityObserver(
-                                isEnabled: agentRosterIsVisible,
-                                onChange: setAgentListScrolling
-                            )
-                        }
+        ScrollView {
+            agentRosterStack
+                .coordinateSpace(name: agentRosterContentSpace)
+                .background {
+                    ScrollActivityObserver(
+                        isEnabled: agentRosterIsVisible,
+                        onChange: setAgentListScrolling,
+                        onSample: needsYouSight.sample
+                    )
                 }
-                .coordinateSpace(name: agentRosterScrollSpace)
-                .accessibilityIdentifier("agent-roster-scroll")
-                // Keep the complete displayed population available to VoiceOver and UI
-                // receipts. Unlike counting row Buttons, this includes collapsed sections.
-                .accessibilityValue("\(fullList.rows.count) agents")
-                .onChange(of: displayedRoster) { _, _ in
-                    onAgentListDisplayedRosterChange?(rosterScroll.isScrolling)
+        }
+        .accessibilityIdentifier("agent-roster-scroll")
+        // Keep the complete displayed population available to VoiceOver and UI
+        // receipts. Unlike counting row Buttons, this includes collapsed sections.
+        .accessibilityValue("\(fullList.rows.count) agents")
+        .onChange(of: displayedRoster) { _, _ in
+            onAgentListDisplayedRosterChange?(rosterScroll.isScrolling)
+        }
+        // A covered or hidden roster keeps its rows built; their working rings must not
+        // keep turning behind the pane or another tab.
+        .environment(\.statusMotion, agentRosterIsVisible)
+        // Pinned under the top bar (the sidebar's top on iPad and Mac). An overlay, so it
+        // never takes part in the list's layout. Hidden while searching: the filtered list
+        // may not show the waiting rows at all.
+        .overlay(alignment: .top) {
+            NeedsYouPill(
+                sight: needsYouSight,
+                waiting: search.isEmpty ? fullList.rows.filter { $0.group == .needsYou } : [],
+                onScrollToTop: { needsYouSight.scrollToTop() },
+                onOpen: { row in
+                    open(PaneSlot(paneID: row.info.paneID, title: row.title, agent: row.info,
+                                  initialReply: "", siblings: orderedSiblings))
                 }
-                // A covered or hidden roster keeps its rows built; their working rings must not
-                // keep turning behind the pane or another tab.
-                .environment(\.statusMotion, agentRosterIsVisible)
-                // Pinned under the top bar (the sidebar's top on iPad and Mac). Hidden while
-                // searching: the filtered list may not show the waiting rows at all.
-                NeedsYouPill(
-                    sight: needsYouSight,
-                    waiting: search.isEmpty ? fullList.rows.filter { $0.group == .needsYou } : [],
-                    onScrollToTop: {
-                        withAnimation(.easeInOut(duration: 0.3)) {
-                            proxy.scrollTo(Self.agentRosterTopID, anchor: .top)
-                        }
-                    },
-                    onOpen: { row in
-                        open(PaneSlot(paneID: row.info.paneID, title: row.title, agent: row.info,
-                                      initialReply: "", siblings: orderedSiblings))
-                    }
-                )
-            }
+            )
         }
     }
-
-    /// The roster's first item, where the needs-you pill scrolls back to.
-    private static let agentRosterTopID = "agent-roster-top"
 
     /// Compact layouts cover the roster when a terminal is fronted. Regular-width
     /// Mac/iPad layouts keep it visible in the split-view sidebar, unless that column
@@ -3744,13 +3737,13 @@ struct TerminalHomeView: View {
     private var agentRosterStack: some View {
         if ProcessInfo.processInfo.isiOSAppOnMac || forceEagerAgentRosterStack {
             VStack(alignment: .leading, spacing: 0) {
-                rosterTitleBlock.id(Self.agentRosterTopID)
+                rosterTitleBlock
                 agentRosterRows
             }
             .onAppear { onEagerAgentRosterStackAppear?() }
         } else {
             LazyVStack(alignment: .leading, spacing: 0) {
-                rosterTitleBlock.id(Self.agentRosterTopID)
+                rosterTitleBlock
                 agentRosterRows
             }
         }
@@ -3773,7 +3766,7 @@ struct TerminalHomeView: View {
                 // still says whether anything waiting is on screen.
                 if section.group == .needsYou && search.isEmpty {
                     sectionView(section, aboveOpen: aboveOpen)
-                        .reportsWaitingRowsSight(to: needsYouSight)
+                        .reportsWaitingRowsBottom(to: needsYouSight)
                 } else {
                     sectionView(section, aboveOpen: aboveOpen)
                 }

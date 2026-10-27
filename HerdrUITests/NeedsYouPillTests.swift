@@ -55,6 +55,31 @@ final class NeedsYouPillTests: XCTestCase {
         XCTAssertFalse(app.terminalSurface.exists, "with three waiting, tap opens no agent")
     }
 
+    /// The case #551 exists for: agents start asking while the owner is already scrolled
+    /// down, so their section is inserted above the screen and the lazy list never builds it.
+    /// iPhone only: the iPad sidebar without the asking agents is barely taller than itself.
+    func testAgentsThatStartWaitingWhileScrolledDownShowThePill() throws {
+        guard UIDevice.current.userInterfaceIdiom != .pad else {
+            throw XCTSkip("needs a list several screens tall; the iPhone roster")
+        }
+        let app = XCUIApplication.launched(mock: "needsyou", environment: [
+            "HERDR_MOCK_WAITING": "3", "HERDR_MOCK_WAITING_AFTER": "20",
+        ])
+        waitForTopOfList(app, firstRow: "w2:p1")
+        let pill = needsYouPill(app)
+        scrollDown(app)
+        XCTAssertFalse(onScreen(row(app, "w2:p1")), "the list is scrolled down")
+        XCTAssertFalse(pill.exists, "nobody waits yet, so no pill")
+
+        XCTAssertTrue(pill.waitForExistence(timeout: 30), "the pill appears when agents start waiting off screen")
+        XCTAssertEqual(pill.label, "3 agents need you")
+        XCTAssertFalse(onScreen(row(app, "w1:p1")), "the waiting rows are still out of sight")
+
+        pill.tap()
+        XCTAssertTrue(row(app, "w1:p1").waitForHittable(timeout: 5), "tap scrolls back to the waiting rows")
+        XCTAssertTrue(poll(3, every: 0.1) { !pill.exists }, "the pill leaves once the waiting rows are visible")
+    }
+
     func testOneWaitingTapOpensThatAgent() {
         let app = launch(waiting: 1)
         waitForTopOfList(app, firstRow: "w1:p1")
