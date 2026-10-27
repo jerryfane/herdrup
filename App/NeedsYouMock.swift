@@ -5,7 +5,8 @@ import HerdrKit
 /// The needs-you pill's mock daemon (`HERDR_SCREENSHOT_MOCK=needsyou`, herdrup#551): a roster
 /// long enough to scroll the waiting rows out of sight, on an iPad's sidebar too.
 /// `HERDR_MOCK_WAITING` says how many agents are asking (default 3, may be 0); sixteen
-/// working agents follow them.
+/// working agents follow them. `HERDR_MOCK_WAITING_AFTER=<seconds>` lists the asking agents
+/// only from that long after launch: they start waiting while the owner is scrolled down.
 struct NeedsYouMockTransport: HerdrTransport {
     private let base = MockTransport()
 
@@ -21,8 +22,14 @@ struct NeedsYouMockTransport: HerdrTransport {
         return min(max(raw ?? 3, 0), waitingNames.count)
     }
 
+    /// When the asking agents join the list, counted from the first `agent.list`.
+    private static let waitingAfter: TimeInterval =
+        ProcessInfo.processInfo.environment["HERDR_MOCK_WAITING_AFTER"].flatMap(TimeInterval.init) ?? 0
+    private static let firstList = Date()
+
     static var agentList: String {
-        let waiting = waitingNames.prefix(waitingCount).enumerated().map { index, name in
+        let asking = Date().timeIntervalSince(firstList) >= waitingAfter ? waitingCount : 0
+        let waiting = waitingNames.prefix(asking).enumerated().map { index, name in
             #"{"pane_id":"w1:p\#(index + 1)","name":"\#(name)","agent":"claude","agent_status":"blocked","cwd":"/root/\#(name)","terminal_title_stripped":"asking to run tests"}"#
         }
         let working = workingNames.enumerated().map { index, name in
