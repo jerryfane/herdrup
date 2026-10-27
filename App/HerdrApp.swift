@@ -338,11 +338,8 @@ struct RootView: View {
                              onTrustHostKey: { _ in false })
         case .folders:
             let _ = AgentFoldersMockTransport.prepared
-            // TEMPORARY probe switches (folders hang, #552): HERDR_PROBE_EAGER=1 draws the roster
-            // in the eager stack the Mac uses.
             TerminalHomeView(client: HerdrClient(transport: AgentFoldersMockTransport()), onDisconnect: {},
-                             onTrustHostKey: { _ in false }, livePaneIDs: AgentFoldersMockTransport.livePaneIDs,
-                             forceEagerAgentRosterStack: ProcessInfo.processInfo.environment["HERDR_PROBE_EAGER"] == "1")
+                             onTrustHostKey: { _ in false }, livePaneIDs: AgentFoldersMockTransport.livePaneIDs)
         case .sessions:
             SessionsMockHome()
         case .liveEvents, .liveEventsLegacy:
@@ -4333,10 +4330,6 @@ struct TerminalHomeView: View {
     /// server without folders, and none for an agent with no name to file it under.
     private func folderSwipeActions(_ row: AgentRow, starred: Bool) -> [RowSwipeAction] {
         guard groups.document != nil, let name = row.info.name else { return [] }
-        #if DEBUG
-        // TEMPORARY probe switch (folders hang, #552): rows without swipe actions.
-        if ProcessInfo.processInfo.environment["HERDR_PROBE_NO_SWIPE"] == "1" { return [] }
-        #endif
         return [
             RowSwipeAction(title: starred ? "Unstar" : "Star",
                            systemImage: starred ? "star.slash.fill" : "star.fill",
