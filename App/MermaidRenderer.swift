@@ -142,6 +142,12 @@ final class MermaidRenderer: NSObject {
     /// How long one diagram may take to draw on a ready page. A diagram whose layout never
     /// ends (it is agent-written) must not leave every later diagram on its placeholder.
     private static let renderTimeout: TimeInterval = 8
+    /// The FIRST draw on a fresh page gets longer: it pays mermaid's cold start (its layout
+    /// code compiling, fonts loading), which on a busy device ran past `renderTimeout` and
+    /// booked a valid diagram as broken for the whole session.
+    private static let firstRenderTimeout: TimeInterval = 20
+    /// Whether the current page has finished a draw; reset with the page (`recyclePage`).
+    private var pageHasDrawn = false
 
     /// A render already in memory, for drawing it in the same frame a row appears (no
     /// placeholder flash, so the row's height is right from the start).
@@ -164,7 +170,8 @@ final class MermaidRenderer: NSObject {
                 self.recyclePage()
             })
         }
-        return try await queue.run(timeout: Self.renderTimeout, { @MainActor () async throws -> Rendered in
+        let timeout = pageHasDrawn ? Self.renderTimeout : Self.firstRenderTimeout
+        return try await queue.run(timeout: timeout, { @MainActor () async throws -> Rendered in
             if let hit = self.memory.object(forKey: key as NSString) { return hit }
             if self.failed.contains(key) { throw Failure.invalid }
             self.job += 1
@@ -172,6 +179,7 @@ final class MermaidRenderer: NSObject {
             self.phase = .settingUp
             do {
                 let rendered = try await self.draw(request, key: key, job: job)
+                self.pageHasDrawn = true
                 self.remember(rendered)
                 Self.saveToDisk(rendered)
                 return rendered
@@ -204,6 +212,7 @@ final class MermaidRenderer: NSObject {
     /// Nothing here holds a web view across a pending call into it (calls look the page up
     /// by identity, `live`), so dropping it closes the page and its WebContent process.
     private func recyclePage() {
+        pageHasDrawn = false
         for web in [slot.recycle(), building].compactMap({ $0 }) {
             web.navigationDelegate = nil
             web.stopLoading()
