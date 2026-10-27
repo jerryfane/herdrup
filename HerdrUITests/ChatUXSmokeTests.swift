@@ -801,7 +801,8 @@ final class ChatUXSmokeTests: XCTestCase {
         XCTAssertTrue(gramTab.waitForExistence(timeout: 5), app.debugDescription)
         gramTab.tap()
         let gramColumn = element(app, "gram-column")
-        let gramFeed = app.scrollViews["gram-feed"]
+        // Gram's own width (its feed's scroll view runs on under the floating sidebar).
+        let gramFeed = element(app, "gram-width-area")
         XCTAssertTrue(gramColumn.waitForExistence(timeout: 10), app.debugDescription)
         XCTAssertTrue(gramFeed.waitForExistence(timeout: 5), app.debugDescription)
         let expected = min(chosen, gramFeed.frame.width)

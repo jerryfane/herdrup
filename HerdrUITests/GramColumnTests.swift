@@ -83,22 +83,25 @@ final class GramColumnTests: XCTestCase {
         if UIDevice.current.userInterfaceIdiom == .pad {
             XCTAssertTrue(right.waitForExistence(timeout: 5), app.debugDescription)
             XCTAssertTrue(left.exists, app.debugDescription)
+            // Gram's own width (the feed's scroll view runs on under the floating sidebar).
+            let area = element(app, "gram-width-area")
+            XCTAssertTrue(area.waitForExistence(timeout: 5), app.debugDescription)
             XCTAssertEqual(right.label, "Gram width")
             XCTAssertTrue((right.value as? String)?.hasSuffix("points") == true
                           || (right.value as? String)?.contains("points,") == true,
                           "the handle reads its width: \(String(describing: right.value))")
             // Wide (1000), or the whole feed when that is narrower (Full).
-            let wide = min(1000, feed.frame.width)
+            let wide = min(1000, area.frame.width)
             let width = settle({ column.frame.width }, until: { abs($0 - wide) < 0.5 })
             XCTAssertEqual(width, wide, accuracy: 0.5, "Gram's column starts at the shared default, Wide")
-            XCTAssertEqual(column.frame.midX, feed.frame.midX, accuracy: 1, "the column is centred")
-            if column.frame.width <= feed.frame.width - 44 {
+            XCTAssertEqual(column.frame.midX, area.frame.midX, accuracy: 1, "the column is centred")
+            if column.frame.width <= area.frame.width - 44 {
                 XCTAssertEqual(left.frame.midX, column.frame.minX, accuracy: 1, "the left handle sits on the column's edge")
                 XCTAssertEqual(right.frame.midX, column.frame.maxX, accuracy: 1, "the right handle sits on the column's edge")
             } else {
                 // Full: the bands stay inside the feed, clear of the sidebar and the window edge.
-                XCTAssertGreaterThanOrEqual(left.frame.minX, feed.frame.minX - 0.5, "the left handle stays inside Gram")
-                XCTAssertLessThanOrEqual(right.frame.maxX, feed.frame.maxX + 0.5, "the right handle stays inside Gram")
+                XCTAssertGreaterThanOrEqual(left.frame.minX, area.frame.minX - 0.5, "the left handle stays inside Gram")
+                XCTAssertLessThanOrEqual(right.frame.maxX, area.frame.maxX + 0.5, "the right handle stays inside Gram")
             }
             assertComposerMatchesColumn(app, "iPad Gram")
             record(app, "iPad Gram column with its edge handles")
@@ -128,7 +131,10 @@ final class GramColumnTests: XCTestCase {
         let right = element(app, "gram-width-handle-right")
         XCTAssertTrue(right.waitForExistence(timeout: 10), app.debugDescription)
         XCTAssertTrue(feed.waitForExistence(timeout: 5), app.debugDescription)
-        var available = settle(within: 8, { feed.frame.width }, until: { $0 > 1000 })
+        // Gram's own width (the feed's scroll view runs on under the floating sidebar).
+        let area = element(app, "gram-width-area")
+        XCTAssertTrue(area.waitForExistence(timeout: 5), app.debugDescription)
+        var available = settle(within: 8, { area.frame.width }, until: { $0 > 1000 })
         // An earlier class may leave the app in a smaller window (iPadOS restores its size):
         // minimising the sidebar gives Gram the window's width.
         if available < 780 {
@@ -136,13 +142,13 @@ final class GramColumnTests: XCTestCase {
             XCTAssertTrue(minimise.waitForExistence(timeout: 5), "Gram only \(available) pt wide: \(app.debugDescription)")
             minimise.tap()
             minimisedSidebar = true
-            available = settle(within: 8, { feed.frame.width }, until: { $0 >= 780 })
+            available = settle(within: 8, { area.frame.width }, until: { $0 >= 780 })
         }
         XCTAssertGreaterThanOrEqual(available, 780, "Gram needs room to drag down to Readable: \(app.debugDescription)")
         let wide = min(1000, available)
         let initial = settle({ column.frame.width }, until: { abs($0 - wide) < 0.5 })
         XCTAssertEqual(initial, wide, accuracy: 0.5, "the column starts Wide (or Full when narrower)")
-        XCTAssertEqual(column.frame.midX, feed.frame.midX, accuracy: 1, "the column is centred")
+        XCTAssertEqual(column.frame.midX, area.frame.midX, accuracy: 1, "the column is centred")
         if initial <= available - 44 {
             XCTAssertEqual(right.frame.midX, column.frame.maxX, accuracy: 1, "the handle sits on the column's edge")
         }
@@ -168,7 +174,7 @@ final class GramColumnTests: XCTestCase {
         let dragRenders = rowRenders(app) - rendersBeforeDrag
         XCTAssertLessThanOrEqual(dragRenders, drawnRows, "a width drag re-rendered \(dragRenders) Gram rows (\(drawnRows) drawn)")
         XCTAssertEqual(column.frame.minX - initialMinX, shrink / 2, accuracy: 2, "the left edge moves in with the right")
-        XCTAssertEqual(column.frame.midX, feed.frame.midX, accuracy: 1, "the column stays centred")
+        XCTAssertEqual(column.frame.midX, area.frame.midX, accuracy: 1, "the column stays centred")
         assertComposerMatchesColumn(app, "Narrowed")
 
         // Aim at 714: within 12 pt of Readable, so it lands on exactly 720.
@@ -179,7 +185,7 @@ final class GramColumnTests: XCTestCase {
         XCTAssertTrue(readout.waitForExistence(timeout: 3), app.debugDescription)
         XCTAssertEqual(readout.label, "720 pt · Readable")
         XCTAssertEqual(right.value as? String, "720 points, Readable")
-        XCTAssertEqual(column.frame.midX, feed.frame.midX, accuracy: 1)
+        XCTAssertEqual(column.frame.midX, area.frame.midX, accuracy: 1)
         assertComposerMatchesColumn(app, "Readable")
         record(app, "Gram column snapped to Readable with its readout")
 
@@ -187,7 +193,7 @@ final class GramColumnTests: XCTestCase {
         Thread.sleep(forTimeInterval: 1)
         app.terminate()
         let again = launchGram(environment: hold.merging(["HERDR_MOCK_COLUMN_WIDTH": "keep"]) { _, new in new })
-        let againFeed = again.scrollViews["gram-feed"]
+        let againFeed = element(again, "gram-width-area")
         let againColumn = element(again, "gram-column")
         let againRight = element(again, "gram-width-handle-right")
         XCTAssertTrue(againRight.waitForExistence(timeout: 10), again.debugDescription)

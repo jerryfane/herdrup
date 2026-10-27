@@ -72,22 +72,26 @@ private struct ConversationColumnFrame: ViewModifier {
                    ? ConversationColumnLayout.width(stored: stored, available: available,
                                                     regular: sizeClass == .regular, compact: cap)
                    : cap)
-            .background { probeView }
+            .background(alignment: .top) { widthProbe(probe) }
             .frame(maxWidth: .infinity)
             .onGeometryChange(for: CGFloat.self) { $0.size.width } action: { available = $0 }
     }
+}
 
-    @ViewBuilder private var probeView: some View {
-        #if DEBUG
-        if let probe, ScreenshotMock.mode != nil {
-            Color.clear
-                .accessibilityElement()
-                .accessibilityIdentifier(probe)
-                .accessibilityLabel(probe)
-                .allowsHitTesting(false)
-        }
-        #endif
+/// A UI-test probe (mock runs only) naming a width: a 1 pt strip along the top of what it
+/// backs, so its frame gives the width and edges without an accessibility element over the
+/// rows (which would stand between a test's press and a bubble).
+@ViewBuilder private func widthProbe(_ identifier: String?) -> some View {
+    #if DEBUG
+    if let identifier, ScreenshotMock.mode != nil {
+        Color.clear
+            .frame(height: 1)
+            .accessibilityElement()
+            .accessibilityIdentifier(identifier)
+            .accessibilityLabel(identifier)
+            .allowsHitTesting(false)
     }
+    #endif
 }
 
 private struct ConversationColumnResizing: ViewModifier {
@@ -99,6 +103,8 @@ private struct ConversationColumnResizing: ViewModifier {
 
     func body(content: Content) -> some View {
         content
+            // The width the column can take, for the UI tests (`gram-width-area`).
+            .background(alignment: .top) { widthProbe("\(surface.rawValue)-width-area") }
             .overlay {
                 if sizeClass == .regular, available > 0 {
                     ConversationColumnResizer(surface: surface, available: available, readoutTop: readoutTop)
