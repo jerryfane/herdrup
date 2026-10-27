@@ -3739,9 +3739,17 @@ struct TerminalHomeView: View {
         return frontID == nil
     }
 
+    /// Eager on the Mac (see `agentRosterScroll`), and wherever the list shows folders (#552).
+    /// With folders, the lazy stack's first vertical scroll never settled: the main thread
+    /// spun in SwiftUI's lazy placement (LazySubviewPlacements / LazyStack.place) for good and
+    /// the app never went idle (CI runs 40538770025 and 40545816526, sampled). Run 40550430715
+    /// narrowed it: the folders list hung lazy with or without swipe actions, and answered in
+    /// 4 s eager. The stack's children are whole sections (each an eager VStack of its rows),
+    /// so being lazy only ever skipped building an off-screen section; RosterStress scrolls an
+    /// 80-agent roster eagerly.
     @ViewBuilder
     private var agentRosterStack: some View {
-        if ProcessInfo.processInfo.isiOSAppOnMac || forceEagerAgentRosterStack {
+        if ProcessInfo.processInfo.isiOSAppOnMac || forceEagerAgentRosterStack || groups.document != nil {
             VStack(alignment: .leading, spacing: 0) {
                 rosterTitleBlock
                 agentRosterRows

@@ -72,12 +72,7 @@ struct AgentFolderRow: View {
 }
 
 /// The folder picture: up to four of its agents' initials in a round tile, two to a line.
-///
-/// EAGER STACKS, NEVER A LAZY GRID. This sits in a row of the Agents list's LazyVStack, and a
-/// lazy container nested in a lazy, scrolling one re-decides its visible cells on every scroll
-/// frame: with a LazyVGrid here the list's first vertical scroll with a folder row on screen
-/// left the main thread busy for good (the app never went idle, every UI query timed out;
-/// CI runs 40477652920, 40510969880, 40523767393), whichever row gesture was in use.
+/// Plain stacks: no lazy container inside a row of the lazy roster.
 struct AgentFolderPicture: View {
     let names: [String]
     let diameter: CGFloat
@@ -183,11 +178,8 @@ private struct LeadingSwipeActions: ViewModifier {
                 }
                 .clipped()
                 // A UIKit marker over the row's frame, for the list's pan to find it under the
-                // finger (like `stableContextMenu`'s anchor). NO GEOMETRY READER: a per-row
-                // `onGeometryChange` in the list's content space kept the lazy list's update
-                // transaction from ever settling once it scrolled (run 40538770025's samples:
-                // 647 of 647 main-thread samples in GraphHost.flushTransactions, with this
-                // reader's closure inside).
+                // finger (like `stableContextMenu`'s anchor). No per-row geometry reader in the
+                // roster: the marker costs nothing while the list scrolls.
                 .background(RowSwipeMarker(id: id, revealWidth: width, swipes: swipes))
         }
     }
@@ -197,13 +189,10 @@ private struct LeadingSwipeActions: ViewModifier {
 /// `UIPanGestureRecognizer` on the list's `UIScrollView`, like a table view's swipe, rather
 /// than a gesture on every row.
 ///
-/// A gesture on each row hung the app. With a `UIGestureRecognizerRepresentable` pan on every
-/// agent row, the first vertical scroll of the folders list froze the main thread for good the
-/// moment the finger lifted (CI run 40510969880: the screen recording stops at the synthesized
-/// swipe's end, and every later UI query timed out). A SwiftUI `DragGesture` on the rows
-/// instead never saw a swipe inside the ScrollView (run 40477652920). This pan is UIKit's
-/// alone: SwiftUI's gesture graph never sees it, the scroll view's own pan runs beside it
-/// untouched, and it begins only for a sideways swipe that starts on a row with actions.
+/// A gesture on each row does not work in the roster: a SwiftUI `DragGesture` on the rows
+/// never saw a swipe inside the ScrollView (CI run 40477652920). This pan is UIKit's alone:
+/// SwiftUI's gesture graph never sees it, the scroll view's own pan runs beside it untouched,
+/// and it begins only for a sideways swipe that starts on a row with actions.
 ///
 /// Not observable itself: each row observes its own `Box`, so a swipe redraws one row.
 @MainActor
