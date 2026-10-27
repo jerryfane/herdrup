@@ -69,8 +69,9 @@ final class NeedsYouPillTests: XCTestCase {
 
         pill.tap()
         XCTAssertTrue(app.terminalSurface.waitForExistence(timeout: 10), "tap opens the waiting agent")
-        let title = app.staticTexts.matching(NSPredicate(format: "label == %@", "jarvis"))
-        XCTAssertTrue(poll(5, every: 0.2) { title.allElementsBoundByIndex.contains(where: \.isHittable) },
+        // The pane heading is "name · kind · folder": the mock's jarvis is "jarvis · claude".
+        let heading = app.staticTexts.matching(NSPredicate(format: "label == %@", "jarvis · claude"))
+        XCTAssertTrue(poll(5, every: 0.2) { heading.allElementsBoundByIndex.contains(where: \.isHittable) },
                       "the opened pane is jarvis")
     }
 
