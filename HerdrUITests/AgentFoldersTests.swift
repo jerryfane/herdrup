@@ -190,9 +190,9 @@ final class AgentFoldersTests: XCTestCase {
         XCTAssertTrue(review.isHittable, "enyo-review is a plain row")
         XCTAssertFalse(row(app, "w1:p2").label.contains("starred"), "and no stars")
 
+        // A row with no swipe actions is a plain button (a swipe there is a tap), so the
+        // long-press menu is where the folder actions would show.
         let jarvis = row(app, "w1:p1")
-        jarvis.swipeRight()
-        XCTAssertFalse(element(app, "agent-swipe-star").waitForExistence(timeout: 2), "no swipe actions")
         jarvis.press(forDuration: 1.0)
         XCTAssertTrue(app.buttons["Rename"].waitForExistence(timeout: 5))
         XCTAssertFalse(app.buttons["Star"].exists, "no Star in the long-press menu")

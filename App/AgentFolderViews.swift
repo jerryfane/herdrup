@@ -1,4 +1,5 @@
 import SwiftUI
+import UIKit
 import HerdrKit
 
 // Agent folders and stars in the Agents list (herdrup#552, proposal B): the folder row, its
@@ -116,10 +117,11 @@ extension View {
 private struct LeadingSwipeActions: ViewModifier {
     let actions: [RowSwipeAction]
     @State private var revealed = false
-    @GestureState(resetTransaction: Transaction(animation: .spring(response: 0.3, dampingFraction: 0.86)))
-    private var drag: CGFloat = 0
+    /// The finger's horizontal travel while a swipe is under way.
+    @State private var drag: CGFloat = 0
 
     private static let actionWidth: CGFloat = 76
+    private static let spring = Animation.spring(response: 0.3, dampingFraction: 0.86)
     private var revealWidth: CGFloat { CGFloat(actions.count) * Self.actionWidth }
 
     func body(content: Content) -> some View {
@@ -128,63 +130,125 @@ private struct LeadingSwipeActions: ViewModifier {
         } else {
             let offset = min(max(0, (revealed ? revealWidth : 0) + drag), revealWidth + 24)
             // The actions sit behind the row, as tall as it, and show as it slides right.
-            content
-                .offset(x: offset)
-                .background(alignment: .leading) {
-                    if offset > 0 || revealed {
-                        HStack(spacing: 0) {
-                            ForEach(actions) { action in
-                                Button {
-                                    withAnimation(.spring(response: 0.3, dampingFraction: 0.86)) { revealed = false }
-                                    action.action()
-                                } label: {
-                                    VStack(spacing: 4) {
-                                        Image(systemName: action.systemImage)
-                                            .font(.system(size: 17, weight: .semibold))
-                                        Text(action.title)
-                                            .font(Typography.app(12, .semibold))
+            swipeGesture(
+                content
+                    .offset(x: offset)
+                    .background(alignment: .leading) {
+                        if offset > 0 || revealed {
+                            HStack(spacing: 0) {
+                                ForEach(actions) { action in
+                                    Button {
+                                        withAnimation(Self.spring) { revealed = false }
+                                        action.action()
+                                    } label: {
+                                        VStack(spacing: 4) {
+                                            Image(systemName: action.systemImage)
+                                                .font(.system(size: 17, weight: .semibold))
+                                            Text(action.title)
+                                                .font(Typography.app(12, .semibold))
+                                        }
+                                        .foregroundStyle(Palette.ground)
+                                        .frame(width: Self.actionWidth)
+                                        .frame(maxHeight: .infinity)
+                                        .background(action.tint)
                                     }
-                                    .foregroundStyle(Palette.ground)
-                                    .frame(width: Self.actionWidth)
-                                    .frame(maxHeight: .infinity)
-                                    .background(action.tint)
+                                    .buttonStyle(.plain)
+                                    .accessibilityIdentifier(action.identifier)
                                 }
-                                .buttonStyle(.plain)
-                                .accessibilityIdentifier(action.identifier)
                             }
                         }
                     }
-                }
-                .overlay {
-                    // While open, a tap on the row closes the actions instead of opening it.
-                    if revealed {
-                        Color.clear
-                            .contentShape(Rectangle())
-                            .offset(x: offset)
-                            .onTapGesture {
-                                withAnimation(.spring(response: 0.3, dampingFraction: 0.86)) { revealed = false }
-                            }
+                    .overlay {
+                        // While open, a tap on the row closes the actions instead of opening it.
+                        if revealed {
+                            Color.clear
+                                .contentShape(Rectangle())
+                                .offset(x: offset)
+                                .onTapGesture {
+                                    withAnimation(Self.spring) { revealed = false }
+                                }
+                        }
                     }
-                }
-                .clipped()
-                .simultaneousGesture(
-                    DragGesture(minimumDistance: 16)
-                        .updating($drag) { value, state, _ in
-                            guard Self.isHorizontal(value) else { return }
-                            state = value.translation.width
-                        }
-                        .onEnded { value in
-                            guard Self.isHorizontal(value) else { return }
-                            let end = (revealed ? revealWidth : 0) + value.predictedEndTranslation.width
-                            withAnimation(.spring(response: 0.3, dampingFraction: 0.86)) {
-                                revealed = end > revealWidth / 2
-                            }
-                        }
-                )
+                    .clipped()
+            )
+        }
+    }
+
+    /// iOS 18 and later: a UIKit pan that only begins for a sideways swipe, so a vertical drag
+    /// stays the list's scroll. A SwiftUI DragGesture on the rows took the drag from the
+    /// ScrollView there and the list stopped scrolling. iOS 17 keeps the DragGesture, which
+    /// that release resolves alongside the scroll.
+    @ViewBuilder
+    private func swipeGesture<V: View>(_ view: V) -> some View {
+        if #available(iOS 18.0, *) {
+            view.gesture(HorizontalPanGesture(onChanged: { drag = $0 }, onEnded: settle))
+        } else {
+            view.simultaneousGesture(
+                DragGesture(minimumDistance: 16)
+                    .onChanged { value in
+                        guard Self.isHorizontal(value) else { return }
+                        drag = value.translation.width
+                    }
+                    .onEnded { value in
+                        guard Self.isHorizontal(value) else { return settle(nil) }
+                        settle(value.predictedEndTranslation.width)
+                    }
+            )
+        }
+    }
+
+    /// The swipe ended `predicted` points from where it began (nil: it was abandoned). It
+    /// opens when it would come to rest past half the actions.
+    private func settle(_ predicted: CGFloat?) {
+        withAnimation(Self.spring) {
+            if let predicted {
+                revealed = (revealed ? revealWidth : 0) + predicted > revealWidth / 2
+            }
+            drag = 0
         }
     }
 
     private static func isHorizontal(_ value: DragGesture.Value) -> Bool {
         abs(value.translation.width) > abs(value.translation.height) * 1.5
+    }
+}
+
+/// A pan that begins only when the finger moves sideways; a vertical drag fails it at once
+/// and stays with the enclosing scroll view.
+@available(iOS 18.0, *)
+private struct HorizontalPanGesture: UIGestureRecognizerRepresentable {
+    let onChanged: (CGFloat) -> Void
+    /// The predicted resting translation, or nil when the pan was cancelled.
+    let onEnded: (CGFloat?) -> Void
+
+    func makeCoordinator(converter: CoordinateSpaceConverter) -> Coordinator { Coordinator() }
+
+    func makeUIGestureRecognizer(context: Context) -> UIPanGestureRecognizer {
+        let pan = UIPanGestureRecognizer()
+        pan.delegate = context.coordinator
+        return pan
+    }
+
+    func handleUIGestureRecognizerAction(_ recognizer: UIPanGestureRecognizer, context: Context) {
+        let translation = recognizer.translation(in: recognizer.view).x
+        switch recognizer.state {
+        case .began, .changed:
+            onChanged(translation)
+        case .ended:
+            // Where a flick would carry the row, as SwiftUI's predictedEndTranslation does.
+            onEnded(translation + recognizer.velocity(in: recognizer.view).x * 0.2)
+        case .cancelled, .failed:
+            onEnded(nil)
+        default:
+            break
+        }
+    }
+
+    final class Coordinator: NSObject, UIGestureRecognizerDelegate {
+        func gestureRecognizerShouldBegin(_ gestureRecognizer: UIGestureRecognizer) -> Bool {
+            guard let pan = gestureRecognizer as? UIPanGestureRecognizer else { return false }
+            let velocity = pan.velocity(in: pan.view)
+            return abs(velocity.x) > abs(velocity.y) * 1.5
+        }
     }
 }
