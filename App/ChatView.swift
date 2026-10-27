@@ -1594,6 +1594,14 @@ private struct ChatRowView: View, Equatable {
                             .fill(step.status == .error ? Palette.died : running ? Palette.working : Palette.hairline)
                             .frame(width: 5, height: 5)
                             .alignmentGuide(.firstTextBaseline) { $0[.bottom] + 2.5 }
+                        // The tool omp ran, in the theme's accent, as omp's terminal titles it.
+                        if !step.tool.isEmpty {
+                            Text(step.tool).font(Typography.machine(11.5 * textScale, .semibold))
+                                .foregroundStyle(Color(hex: ChatPalette.current.toolTitle))
+                                .lineLimit(1)
+                                .fixedSize()
+                                .frame(minWidth: 46 * textScale, alignment: .leading)
+                        }
                         Text(step.intent).font(Typography.app(13.5 * textScale))
                             .foregroundStyle(running ? Palette.textDim : Palette.textFaint)
                             .fixedSize(horizontal: false, vertical: true)
@@ -1608,7 +1616,7 @@ private struct ChatRowView: View, Equatable {
                 .contentShape(Rectangle())
                 .onTapGesture { if step.detail != nil { toggle(detailKey) } }
                 .accessibilityElement(children: .combine)
-                .accessibilityLabel(running ? "\(step.intent), running" : step.intent)
+                .accessibilityLabel(Self.stepLabel(step, running: running))
                 .accessibilityIdentifier(running ? "chat-step-running" : "chat-step")
             }
         }
@@ -1617,6 +1625,12 @@ private struct ChatRowView: View, Equatable {
         .padding(.leading, 5)
         .accessibilityElement(children: .contain)
         .accessibilityIdentifier("chat-steplist")
+    }
+
+    /// A step for VoiceOver: its tool, then what it did.
+    static func stepLabel(_ step: TranscriptStepRow, running: Bool) -> String {
+        let label = step.tool.isEmpty ? step.intent : "\(step.tool), \(step.intent)"
+        return running ? "\(label), running" : label
     }
 
     private func noteCard(_ note: TranscriptNote, tsMs: UInt64) -> some View {

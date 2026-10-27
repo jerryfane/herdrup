@@ -9,6 +9,8 @@ import Foundation
 /// One step line inside a work group.
 public struct TranscriptStepRow: Identifiable, Sendable, Equatable {
     public let id: String
+    /// omp's tool name (`read`, `search`, `edit`, `bash`), drawn before the intent.
+    public let tool: String
     public let intent: String
     public let status: TranscriptStepStatus
     public let detail: String?
@@ -129,7 +131,7 @@ public enum TranscriptGrouping {
                     let trimmed = text.trimmingCharacters(in: .whitespacesAndNewlines)
                     if !trimmed.isEmpty { work.thoughts.append(trimmed) }
                 } else if case .step(let step) = entry.kind {
-                    work.steps.append(TranscriptStepRow(id: entry.id, intent: step.intent,
+                    work.steps.append(TranscriptStepRow(id: entry.id, tool: step.tool, intent: step.intent,
                                                         status: step.status, detail: step.detail))
                 }
                 openWork = work
