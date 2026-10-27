@@ -66,6 +66,9 @@ public struct GramAttachmentSender {
     public typealias PreUploaded = @MainActor (ComposerAttachment) async throws -> String?
     /// Posts one uploaded file as a gram; returns the posted message's id.
     public typealias Post = @MainActor (ComposerAttachment, HerdrClient.GramFileAttachment) async throws -> String
+    /// A posted file, still holding its staged bytes under `staged.url`: the caller may
+    /// move them somewhere lasting (`GramFileCache.keep`) before the staging is removed.
+    public typealias Keep = @MainActor (ComposerAttachment) async -> Void
 
     /// Why a batch stopped: the file that failed, how many of the batch had landed by
     /// then, and the underlying error.
@@ -89,17 +92,20 @@ public struct GramAttachmentSender {
     private let upload: Upload
     private let preUploaded: PreUploaded
     private let post: Post
+    private let keep: Keep
     private let retryDelayNanoseconds: UInt64
 
     public init(
         upload: @escaping Upload,
         preUploaded: @escaping PreUploaded = { _ in nil },
         post: @escaping Post,
+        keep: @escaping Keep = { _ in },
         retryDelayNanoseconds: UInt64 = 1_000_000_000
     ) {
         self.upload = upload
         self.preUploaded = preUploaded
         self.post = post
+        self.keep = keep
         self.retryDelayNanoseconds = retryDelayNanoseconds
     }
 
@@ -108,8 +114,8 @@ public struct GramAttachmentSender {
     /// stopped it. Files already on the host (a finished pre-upload, or a resumed send's)
     /// post first, so a finished upload never waits behind one still running; the rest
     /// follow in order. `sending` names each file as its upload/post starts; `update`
-    /// receives every change to a file's `uploadID` / `messageID`. A posted file's staged
-    /// bytes are removed at once: nothing reads them again.
+    /// receives every change to a file's `uploadID` / `messageID`. A posted file is handed
+    /// to `keep`, then its staged bytes are removed: the sender reads them no more.
     public func send(
         _ batch: [ComposerAttachment],
         sending: (ComposerAttachment) -> Void = { _ in },
@@ -160,6 +166,7 @@ public struct GramAttachmentSender {
         }
         file.messageID = messageID
         update(file)
+        await keep(file)
         try? FileManager.default.removeItem(at: file.staged.dir)
     }
 

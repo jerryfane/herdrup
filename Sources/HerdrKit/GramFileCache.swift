@@ -118,9 +118,78 @@ public enum GramFileCache {
         maxBytes: Int = defaultMaxBytes
     ) -> CachedGramFile? {
         guard !data.isEmpty else { return nil }
+        return place(id: id, name: name, mime: mime, size: data.count, in: root, maxBytes: maxBytes) { url in
+            try data.write(to: url, options: [.atomic])
+        }
+    }
+
+    /// Store the file at `source` for `id` by MOVING it into the cache: the bytes are
+    /// already on disk (a composer's staged upload), so they are never read into memory
+    /// or copied. `source` is gone afterwards on success; on failure it may remain.
+    @discardableResult
+    public static func store(
+        movingFile source: URL,
+        id: String,
+        name: String,
+        mime: String = "",
+        in root: URL,
+        maxBytes: Int = defaultMaxBytes
+    ) -> CachedGramFile? {
+        guard let size = try? source.resourceValues(forKeys: [.fileSizeKey]).fileSize, size > 0
+        else { return nil }
+        return place(id: id, name: name, mime: mime, size: size, in: root, maxBytes: maxBytes) { url in
+            try FileManager.default.moveItem(at: source, to: url)
+        }
+    }
+
+    /// Keep a file this device just posted as a gram under its message id, so opening
+    /// it from Chat's attachment list (or Gram) reads it from here instead of
+    /// downloading the bytes the device itself uploaded. Moves the composer's staged
+    /// copy; nil when the file has not posted or cannot be kept.
+    ///
+    /// WHY: posting deleted the staged copy (`GramAttachmentSender`), and the list only
+    /// knows a message id, so every open of a file sent from this device fetched it
+    /// back over the network.
+    @discardableResult
+    public static func keep(_ file: ComposerAttachment, in root: URL, maxBytes: Int = defaultMaxBytes) -> CachedGramFile? {
+        guard let id = file.messageID, !id.isEmpty else { return nil }
+        return store(movingFile: file.staged.url, id: id, name: file.name, mime: file.mime,
+                     in: root, maxBytes: maxBytes)
+    }
+
+    /// What an open got: the cached entry (no request was made), or freshly downloaded
+    /// bytes together with the entry they were stored under (nil when not cached).
+    public enum Opened: Sendable {
+        case cached(CachedGramFile)
+        case downloaded(name: String, mime: String, data: Data, cached: CachedGramFile?)
+    }
+
+    /// Open the file of gram message `id`: from the cache when this device holds it,
+    /// with no request at all; otherwise downloaded ONCE and stored, so the next open
+    /// is a hit. `store` replaces the plain write (the app checks its session epoch
+    /// around it); a failed store never fails the open.
+    public static func open(
+        id: String,
+        in root: URL,
+        download: () async throws -> (name: String, mime: String, data: Data),
+        store: ((_ data: Data, _ name: String, _ mime: String) -> CachedGramFile?)? = nil
+    ) async throws -> Opened {
+        if let hit = cached(id: id, in: root) { return .cached(hit) }
+        let (name, mime, data) = try await download()
+        try Task.checkCancellation()
+        let stored = store.map { $0(data, name, mime) }
+            ?? Self.store(data, id: id, name: name, mime: mime, in: root)
+        return .downloaded(name: name, mime: mime, data: data, cached: stored)
+    }
+
+    /// Write one entry: the payload through `write`, then its metadata.
+    private static func place(
+        id: String, name: String, mime: String, size: Int, in root: URL, maxBytes: Int,
+        write: (URL) throws -> Void
+    ) -> CachedGramFile? {
         // A single file larger than the whole budget is not cached: storing it would
         // immediately evict everything else and then itself.
-        guard data.count <= maxBytes else { return nil }
+        guard size <= maxBytes else { return nil }
 
         let dir = directory(for: id, in: root)
         try? FileManager.default.removeItem(at: dir)
@@ -131,13 +200,13 @@ public enum GramFileCache {
             let url = payload.appendingPathComponent(safeName)
             // Payload first, metadata last: the order is what makes an interrupted write
             // read as a miss instead of a permanently truncated hit.
-            try data.write(to: url, options: [.atomic])
+            try write(url)
             protect(url)
-            let meta = Meta(id: id, name: safeName, mime: mime, size: data.count)
+            let meta = Meta(id: id, name: safeName, mime: mime, size: size)
             try JSONEncoder().encode(meta).write(to: dir.appendingPathComponent(metaName),
                                                  options: [.atomic])
             evict(in: root, maxBytes: maxBytes)
-            return CachedGramFile(url: url, name: safeName, mime: mime, size: data.count)
+            return CachedGramFile(url: url, name: safeName, mime: mime, size: size)
         } catch {
             try? FileManager.default.removeItem(at: dir)
             return nil

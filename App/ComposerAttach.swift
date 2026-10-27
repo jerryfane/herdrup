@@ -124,7 +124,9 @@ extension ComposerUploader {
     }
 
     /// Send's sender: a file still uploading is awaited, a finished one posts at once, and
-    /// one with no upload (failed, paused, or lost by the host) uploads in this line.
+    /// one with no upload (failed, paused, or lost by the host) uploads in this line. A
+    /// posted file's bytes move into the download cache, so opening it later (Chat's
+    /// attachment list, Gram) never downloads what this device uploaded.
     func sender(
         client: HerdrClient, into list: Binding<[ComposerAttachment]>,
         post: @escaping GramAttachmentSender.Post
@@ -135,7 +137,8 @@ extension ComposerUploader {
                                  discard: Self.discard(on: client))
             },
             preUploaded: { [self] file in try await waitForUpload(file.id) },
-            post: post)
+            post: post,
+            keep: { file in await GramView.Downloads.keep(file) })
     }
 
     /// The Send button's ring while it waits on uploads still running among `files`.
