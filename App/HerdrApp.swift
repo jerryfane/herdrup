@@ -1751,6 +1751,9 @@ struct TerminalHomeView: View {
     /// Whether the waiting rows are scrolled out of sight. Held, not observed: only the
     /// needs-you pill redraws when it flips (#551).
     @State private var needsYouSight = NeedsYouSight()
+    /// The agent rows' swipe-right actions (#552): one pan on the list's scroll view. Held,
+    /// never observed; each row observes only its own swipe.
+    @State private var rowSwipes = RowSwipeController()
     @State private var liveEvents = AgentRosterLiveEventsBuffer()
     /// The daemon advertises `events_v2` (from `agent.list` `origin_capabilities`, or
     /// `ping` on a daemon without that field). Observable because it keys the stream
@@ -3691,7 +3694,10 @@ struct TerminalHomeView: View {
                     ScrollActivityObserver(
                         isEnabled: agentRosterIsVisible,
                         onChange: setAgentListScrolling,
-                        onSample: needsYouSight.sample
+                        onSample: { scrollView in
+                            needsYouSight.sample(scrollView)
+                            rowSwipes.attach(scrollView)
+                        }
                     )
                 }
         }
@@ -4254,7 +4260,7 @@ struct TerminalHomeView: View {
         }
         // Swipe right: Star / Unstar and Move to folder, on a server with folders.
         // Outermost, so the row's identifier and value stay on the row itself.
-        .leadingSwipeActions(folderSwipeActions(row, starred: starred))
+        .leadingSwipeActions(folderSwipeActions(row, starred: starred), id: row.id, in: rowSwipes)
     }
 
     // MARK: folders and stars (#552)

@@ -107,148 +107,210 @@ struct RowSwipeAction: Identifiable {
 
 extension View {
     /// Swipe right to reveal `actions` at the row's leading edge (Mail's leading swipe). No
-    /// actions, no gesture. The drag state lives in the row's own view, so a swipe redraws
-    /// that row only.
-    func leadingSwipeActions(_ actions: [RowSwipeAction]) -> some View {
-        modifier(LeadingSwipeActions(actions: actions))
+    /// actions, no swipe. The swipe itself is `swipes`' one pan on the list's scroll view; this
+    /// row observes only its own `RowSwipeController.Box`, so a swipe redraws that row only.
+    func leadingSwipeActions(_ actions: [RowSwipeAction], id: String,
+                             in swipes: RowSwipeController) -> some View {
+        modifier(LeadingSwipeActions(actions: actions, id: id, swipes: swipes))
     }
 }
 
 private struct LeadingSwipeActions: ViewModifier {
     let actions: [RowSwipeAction]
-    @State private var revealed = false
-    /// The finger's horizontal travel while a swipe is under way.
-    @State private var drag: CGFloat = 0
+    let id: String
+    let swipes: RowSwipeController
 
     private static let actionWidth: CGFloat = 76
-    private static let spring = Animation.spring(response: 0.3, dampingFraction: 0.86)
     private var revealWidth: CGFloat { CGFloat(actions.count) * Self.actionWidth }
 
     func body(content: Content) -> some View {
         if actions.isEmpty {
             content
         } else {
-            let offset = min(max(0, (revealed ? revealWidth : 0) + drag), revealWidth + 24)
+            let box = swipes.box(id)
+            let width = revealWidth
+            let offset = min(max(0, (box.revealed ? width : 0) + box.drag), width + 24)
             // The actions sit behind the row, as tall as it, and show as it slides right.
-            swipeGesture(
-                content
-                    .offset(x: offset)
-                    .background(alignment: .leading) {
-                        if offset > 0 || revealed {
-                            HStack(spacing: 0) {
-                                ForEach(actions) { action in
-                                    Button {
-                                        withAnimation(Self.spring) { revealed = false }
-                                        action.action()
-                                    } label: {
-                                        VStack(spacing: 4) {
-                                            Image(systemName: action.systemImage)
-                                                .font(.system(size: 17, weight: .semibold))
-                                            Text(action.title)
-                                                .font(Typography.app(12, .semibold))
-                                        }
-                                        .foregroundStyle(Palette.ground)
-                                        .frame(width: Self.actionWidth)
-                                        .frame(maxHeight: .infinity)
-                                        .background(action.tint)
+            content
+                .offset(x: offset)
+                .background(alignment: .leading) {
+                    if offset > 0 || box.revealed {
+                        HStack(spacing: 0) {
+                            ForEach(actions) { action in
+                                Button {
+                                    swipes.close(id)
+                                    action.action()
+                                } label: {
+                                    VStack(spacing: 4) {
+                                        Image(systemName: action.systemImage)
+                                            .font(.system(size: 17, weight: .semibold))
+                                        Text(action.title)
+                                            .font(Typography.app(12, .semibold))
                                     }
-                                    .buttonStyle(.plain)
-                                    .accessibilityIdentifier(action.identifier)
+                                    .foregroundStyle(Palette.ground)
+                                    .frame(width: Self.actionWidth)
+                                    .frame(maxHeight: .infinity)
+                                    .background(action.tint)
                                 }
+                                .buttonStyle(.plain)
+                                .accessibilityIdentifier(action.identifier)
                             }
                         }
                     }
-                    .overlay {
-                        // While open, a tap on the row closes the actions instead of opening it.
-                        if revealed {
-                            Color.clear
-                                .contentShape(Rectangle())
-                                .offset(x: offset)
-                                .onTapGesture {
-                                    withAnimation(Self.spring) { revealed = false }
-                                }
-                        }
+                }
+                .overlay {
+                    // While open, a tap on the row closes the actions instead of opening it.
+                    if box.revealed {
+                        Color.clear
+                            .contentShape(Rectangle())
+                            .offset(x: offset)
+                            .onTapGesture { swipes.close(id) }
                     }
-                    .clipped()
-            )
+                }
+                .clipped()
+                // Where the row is in the list's content, for the list's pan to find it. A
+                // frame in content coordinates does not move while the list scrolls, so this
+                // costs nothing per scroll frame, and the write invalidates no view.
+                .onGeometryChange(for: CGRect.self) { proxy in
+                    proxy.frame(in: .named(agentRosterContentSpace))
+                } action: { frame in
+                    swipes.place(id, frame: frame, revealWidth: width)
+                }
+                .onDisappear { swipes.remove(id) }
         }
-    }
-
-    /// iOS 18 and later: a UIKit pan that only begins for a sideways swipe, so a vertical drag
-    /// stays the list's scroll. A SwiftUI DragGesture on the rows took the drag from the
-    /// ScrollView there and the list stopped scrolling. iOS 17 keeps the DragGesture, which
-    /// that release resolves alongside the scroll.
-    @ViewBuilder
-    private func swipeGesture<V: View>(_ view: V) -> some View {
-        if #available(iOS 18.0, *) {
-            view.gesture(HorizontalPanGesture(onChanged: { drag = $0 }, onEnded: settle))
-        } else {
-            view.simultaneousGesture(
-                DragGesture(minimumDistance: 16)
-                    .onChanged { value in
-                        guard Self.isHorizontal(value) else { return }
-                        drag = value.translation.width
-                    }
-                    .onEnded { value in
-                        guard Self.isHorizontal(value) else { return settle(nil) }
-                        settle(value.predictedEndTranslation.width)
-                    }
-            )
-        }
-    }
-
-    /// The swipe ended `predicted` points from where it began (nil: it was abandoned). It
-    /// opens when it would come to rest past half the actions.
-    private func settle(_ predicted: CGFloat?) {
-        withAnimation(Self.spring) {
-            if let predicted {
-                revealed = (revealed ? revealWidth : 0) + predicted > revealWidth / 2
-            }
-            drag = 0
-        }
-    }
-
-    private static func isHorizontal(_ value: DragGesture.Value) -> Bool {
-        abs(value.translation.width) > abs(value.translation.height) * 1.5
     }
 }
 
-/// A pan that begins only when the finger moves sideways; a vertical drag fails it at once
-/// and stays with the enclosing scroll view.
-@available(iOS 18.0, *)
-private struct HorizontalPanGesture: UIGestureRecognizerRepresentable {
-    let onChanged: (CGFloat) -> Void
-    /// The predicted resting translation, or nil when the pan was cancelled.
-    let onEnded: (CGFloat?) -> Void
-
-    func makeCoordinator(converter: CoordinateSpaceConverter) -> Coordinator { Coordinator() }
-
-    func makeUIGestureRecognizer(context: Context) -> UIPanGestureRecognizer {
-        let pan = UIPanGestureRecognizer()
-        pan.delegate = context.coordinator
-        return pan
+/// The swipe-right gesture of the Agents list's rows (herdrup#552): ONE horizontal
+/// `UIPanGestureRecognizer` on the list's `UIScrollView`, like a table view's swipe, rather
+/// than a gesture on every row.
+///
+/// A gesture on each row hung the app. With a `UIGestureRecognizerRepresentable` pan on every
+/// agent row, the first vertical scroll of the folders list froze the main thread for good the
+/// moment the finger lifted (CI run 40510969880: the screen recording stops at the synthesized
+/// swipe's end, and every later UI query timed out). A SwiftUI `DragGesture` on the rows
+/// instead never saw a swipe inside the ScrollView (run 40477652920). This pan is UIKit's
+/// alone: SwiftUI's gesture graph never sees it, the scroll view's own pan runs beside it
+/// untouched, and it begins only for a sideways swipe that starts on a row with actions.
+///
+/// Not observable itself: each row observes its own `Box`, so a swipe redraws one row.
+@MainActor
+final class RowSwipeController: NSObject, UIGestureRecognizerDelegate {
+    /// One row's swipe: how far the finger has moved it, and whether its actions are open.
+    @Observable @MainActor
+    final class Box {
+        var drag: CGFloat = 0
+        var revealed = false
     }
 
-    func handleUIGestureRecognizerAction(_ recognizer: UIPanGestureRecognizer, context: Context) {
-        let translation = recognizer.translation(in: recognizer.view).x
-        switch recognizer.state {
-        case .began, .changed:
-            onChanged(translation)
+    private struct Place {
+        var frame: CGRect
+        var revealWidth: CGFloat
+    }
+
+    private var boxes: [String: Box] = [:]
+    private var places: [String: Place] = [:]
+    private weak var scrollView: UIScrollView?
+    private var pan: UIPanGestureRecognizer?
+    /// The row under the pan in progress.
+    private var swiping: String?
+
+    private static let spring = Animation.spring(response: 0.3, dampingFraction: 0.86)
+
+    /// The row's box, made on first use. A plain dictionary write: it invalidates nothing.
+    func box(_ id: String) -> Box {
+        if let box = boxes[id] { return box }
+        let box = Box()
+        boxes[id] = box
+        return box
+    }
+
+    func place(_ id: String, frame: CGRect, revealWidth: CGFloat) {
+        places[id] = Place(frame: frame, revealWidth: revealWidth)
+    }
+
+    func remove(_ id: String) {
+        places[id] = nil
+        boxes[id] = nil
+        if swiping == id { swiping = nil }
+    }
+
+    func close(_ id: String) {
+        guard let box = boxes[id], box.revealed || box.drag != 0 else { return }
+        withAnimation(Self.spring) {
+            box.revealed = false
+            box.drag = 0
+        }
+    }
+
+    /// Puts the pan on the list's scroll view; called from the list's display-link sample, so
+    /// it costs a pointer comparison per frame once attached.
+    func attach(_ scrollView: UIScrollView) {
+        guard scrollView !== self.scrollView else { return }
+        if let pan { pan.view?.removeGestureRecognizer(pan) }
+        let pan = UIPanGestureRecognizer(target: self, action: #selector(handlePan(_:)))
+        pan.delegate = self
+        scrollView.addGestureRecognizer(pan)
+        self.pan = pan
+        self.scrollView = scrollView
+    }
+
+    /// The row with actions at `point` (the list's content coordinates). Rows are full width,
+    /// so only the height decides.
+    private func row(at point: CGPoint) -> String? {
+        places.first { $0.value.frame.minY <= point.y && point.y < $0.value.frame.maxY }?.key
+    }
+
+    @objc private func handlePan(_ pan: UIPanGestureRecognizer) {
+        let translation = pan.translation(in: pan.view).x
+        switch pan.state {
+        case .began:
+            guard let id = row(at: pan.location(in: pan.view)) else { return }
+            // One row open at a time, like Mail.
+            for (other, box) in boxes where other != id && (box.revealed || box.drag != 0) {
+                withAnimation(Self.spring) {
+                    box.revealed = false
+                    box.drag = 0
+                }
+            }
+            swiping = id
+            box(id).drag = translation
+        case .changed:
+            guard let id = swiping else { return }
+            box(id).drag = translation
         case .ended:
+            guard let id = swiping, let width = places[id]?.revealWidth else { return }
+            swiping = nil
             // Where a flick would carry the row, as SwiftUI's predictedEndTranslation does.
-            onEnded(translation + recognizer.velocity(in: recognizer.view).x * 0.2)
+            let predicted = translation + pan.velocity(in: pan.view).x * 0.2
+            let box = self.box(id)
+            withAnimation(Self.spring) {
+                box.revealed = (box.revealed ? width : 0) + predicted > width / 2
+                box.drag = 0
+            }
         case .cancelled, .failed:
-            onEnded(nil)
+            guard let id = swiping else { return }
+            swiping = nil
+            let box = self.box(id)
+            withAnimation(Self.spring) { box.drag = 0 }
         default:
             break
         }
     }
 
-    final class Coordinator: NSObject, UIGestureRecognizerDelegate {
-        func gestureRecognizerShouldBegin(_ gestureRecognizer: UIGestureRecognizer) -> Bool {
-            guard let pan = gestureRecognizer as? UIPanGestureRecognizer else { return false }
-            let velocity = pan.velocity(in: pan.view)
-            return abs(velocity.x) > abs(velocity.y) * 1.5
-        }
+    // MARK: UIGestureRecognizerDelegate
+
+    /// Only a sideways swipe that starts on a row with actions; anything else stays the list's.
+    func gestureRecognizerShouldBegin(_ gestureRecognizer: UIGestureRecognizer) -> Bool {
+        guard gestureRecognizer === pan, let pan, let view = pan.view else { return false }
+        let velocity = pan.velocity(in: view)
+        guard abs(velocity.x) > abs(velocity.y) * 1.5 else { return false }
+        return row(at: pan.location(in: view)) != nil
+    }
+
+    /// The scroll view's own pan is left exactly as it is.
+    func gestureRecognizer(_ gestureRecognizer: UIGestureRecognizer,
+                           shouldRecognizeSimultaneouslyWith other: UIGestureRecognizer) -> Bool {
+        other === scrollView?.panGestureRecognizer
     }
 }
