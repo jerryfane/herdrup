@@ -3015,7 +3015,6 @@ struct GramRow: View, Equatable {
     }
 
     private var mine: Bool { !message.isFromAgent }
-    private var maxWidth: CGFloat { GramCardMetrics.cardWidth(sizeClass) }
     private var imageFile: GramFile? {
         guard viewer == .owner, let file = message.file, file.isImage else { return nil }
         return file
@@ -3094,8 +3093,8 @@ struct GramRow: View, Equatable {
 
     /// One part of the message (its text card, or its picture) with what every part
     /// shares: the tail on the group's last text part, the saved badge on the first part,
-    /// the context menu, and the width cap. The cap is applied AFTER the background so
-    /// a short bubble still hugs its text.
+    /// the context menu, and the width cap (`gramBubbleWidth`, of the width the avatar
+    /// leaves). The cap is applied AFTER the background so a short bubble still hugs its text.
     /// `tail` says the part ends in text and is the message's last part; the tail then
     /// shows on the group's last message only, in the bubble's own fill.
     private func chrome<Content: View>(_ content: Content, first: Bool, tail: Bool) -> some View {
@@ -3109,7 +3108,7 @@ struct GramRow: View, Equatable {
             // Never rebuilt by a feed pass while open (see StableContextMenu.swift); the
             // preview lifts the bubble's shape.
             .stableContextMenu(previewCornerRadius: GramBubble.radius) { menu }
-            .frame(maxWidth: maxWidth, alignment: mine ? .trailing : .leading)
+            .gramBubbleWidth(incoming: !mine, sizeClass: sizeClass)
     }
 
     /// The message's one menu, on every part of it (the attachment cards included): the

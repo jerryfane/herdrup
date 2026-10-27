@@ -70,6 +70,23 @@ final class GramColumnTests: XCTestCase {
         XCTAssertEqual(card.frame.midX, column.midX, accuracy: 2, "\(moment): the composer is centred under the column")
     }
 
+    /// An agent's bubble grows with the column on regular width (owner request 2026-10-27): up
+    /// to 80 % of it, never under 520, and at most 520 once the column is too narrow for more.
+    /// Measured on clientloop's code + file card (`g2`), which fills its whole cap.
+    private func assertAgentBubbleFollowsColumn(_ app: XCUIApplication, atMinimum: Bool, _ moment: String) {
+        let bubble = element(app, "gram-bubble-g2")
+        XCTAssertTrue(bubble.waitForExistence(timeout: 5), app.debugDescription)
+        let column = element(app, "gram-column").frame.width
+        if atMinimum {
+            let width = settle({ bubble.frame.width }, until: { $0 <= 520.5 })
+            XCTAssertLessThanOrEqual(width, 520.5, "\(moment): at the \(Int(column)) pt column the agent's card keeps today's 520 cap")
+        } else {
+            let width = settle({ bubble.frame.width }, until: { $0 > 520.5 })
+            XCTAssertGreaterThan(width, 520.5, "\(moment): at the \(Int(column)) pt column the agent's card grows past 520")
+            XCTAssertLessThanOrEqual(width, column * 0.8 + 0.5, "\(moment): the agent's card takes at most 80 % of the \(Int(column)) pt column")
+        }
+    }
+
     /// iPhone keeps today's layout: no handles, a full-width feed and composer. iPad shows
     /// both handles, named for VoiceOver, on the column's edges.
     func testGramWidthHandlesOnlyOnRegularWidth() {
@@ -118,7 +135,8 @@ final class GramColumnTests: XCTestCase {
 
     /// Dragging the right edge resizes Gram's column around its centre and the composer
     /// follows, without re-rendering the rows per tick; near 720 it snaps to Readable with its
-    /// readout; the width survives a relaunch; a double tap resets to Wide.
+    /// readout; the width survives a relaunch; a double tap resets to Wide. An agent's bubble
+    /// grows past 520 at Wide and keeps to 520 at the 560 pt minimum.
     func testDraggingTheGramEdgeResizesTheColumn() throws {
         try XCTSkipUnless(UIDevice.current.userInterfaceIdiom == .pad, "Gram's width is resizable on regular width only")
         // Landscape gives the detail column room for Wide (1000) and a drag down to Readable.
@@ -153,6 +171,7 @@ final class GramColumnTests: XCTestCase {
             XCTAssertEqual(right.frame.midX, column.frame.maxX, accuracy: 1, "the handle sits on the column's edge")
         }
         assertComposerMatchesColumn(app, "Wide")
+        assertAgentBubbleFollowsColumn(app, atMinimum: false, "Wide")
         let initialMinX = column.frame.minX
         record(app, "Gram column at Wide (\(Int(initial)) pt of \(Int(available)))")
 
@@ -213,6 +232,14 @@ final class GramColumnTests: XCTestCase {
             XCTAssertEqual(againRight.value as? String, "1000 points, Wide")
         }
         record(again, "Double tap resets the Gram column to Wide")
+
+        // Down to the 560 pt minimum (the drag overshoots it and stops there): the agent's
+        // bubble keeps to 520.
+        dragRightEdge(again, by: -(reset - 560) / 2 - 40)
+        let minimum = settle({ againColumn.frame.width }, until: { abs($0 - 560) < 0.5 })
+        XCTAssertEqual(minimum, 560, accuracy: 0.5, "the column stops at its 560 pt minimum")
+        assertAgentBubbleFollowsColumn(again, atMinimum: true, "Minimum")
+        record(again, "Gram column at its minimum, the agent's bubble at 520")
     }
 
     /// Set by the drag test: puts the iPad back as the other tests expect it, pass or fail.
