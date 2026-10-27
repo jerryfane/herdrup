@@ -324,6 +324,9 @@ case "$shard" in
     run_suite iPadSelectAgent "$IPAD_UDID" 5m -only-testing:HerdrUITests/SelectAgentFieldTests || failed=1
     # The needs-you pill pinned at the top of the sidebar (#551).
     run_suite iPadNeedsYouPill "$IPAD_UDID" 5m -only-testing:HerdrUITests/NeedsYouPillTests || failed=1
+    # Agent folders in the sidebar (#552): a closed folder's counts, open in place, kept open.
+    run_suite iPadAgentFolders "$IPAD_UDID" 5m \
+      -only-testing:HerdrUITests/AgentFoldersTests/testClosedFolderShowsWaitingCountAndOpensOnTap || failed=1
     # 20m: the chat-width tests (#523, ~100 s on iPad) took run 40289743354's slow runner to
     # 848 s of tests, past the old 15m once xcodebuild's own start-up was added.
     run_suite iPadChatUX "$IPAD_UDID" 20m -only-testing:HerdrUITests/ChatUXSmokeTests || failed=1
