@@ -714,8 +714,8 @@ struct GuestPaneView: View {
     private func refresh() async {
         do {
             let agents = try await client.agentList()
-            // The grant's terminal id first; name may be null in a guest's projection.
-            let shared = agents.first { $0.terminalID == access.agentTarget || $0.paneID == access.agentTarget }
+            // The grant's terminal or pane id first; name may be null in a guest's projection.
+            let shared = agents.first(where: access.isSharedAgent)
                 ?? agents.first { $0.name == access.agentName }
             agent = shared ?? agent
             connectionNote = nil
@@ -843,9 +843,10 @@ struct GuestPaneView: View {
     /// once, the rest are awaited, and only one whose upload failed or the host lost
     /// uploads here.
     private func deliver(_ batch: [ComposerAttachment]) async throws -> [GramAttachmentPrompt.Delivered] {
+        let target = access.liveAgentName(listed: agent)
         let sender = uploader.sender(client: client, into: $attachments, post: { _, attachment in
             try await client.guestGramPost(
-                text: "Attachment from \(access.guestName).", to: access.agentName,
+                text: "Attachment from \(access.guestName).", to: target,
                 attachment: attachment
             ).id
         })

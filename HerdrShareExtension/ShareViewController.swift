@@ -167,7 +167,7 @@ private final class ShareModel: ObservableObject {
             let client = HerdrClient(transport: access.transport(identity: identity, onFeatures: { features.set($0) }))
             let agents = try await client.agentList()
             try Task.checkCancellation()
-            guard let agent = agents.first(where: { $0.terminalID == access.agentTarget || $0.name == access.agentName }),
+            guard let agent = agents.first(where: { access.isSharedAgent($0) || $0.name == access.agentName }),
                   let name = agent.name, !name.isEmpty else {
                 connectionErrors.append("\(access.agentName): this share is no longer available. Open Herdrup to check access.")
                 return

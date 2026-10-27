@@ -33,6 +33,31 @@ public struct GuestAccess: Codable, Equatable, Hashable, Sendable, Identifiable 
     /// The composer placeholder: "Message <agent> as <name>".
     public var composerPlaceholder: String { "Message \(agentName) as \(guestName)" }
 
+    /// Whether `agent` is the one this share grants: listed by the grant's terminal id, or
+    /// by its pane id (a guest's projection may omit `terminal_id`).
+    public func isSharedAgent(_ agent: AgentInfo) -> Bool {
+        agent.terminalID == agentTarget || agent.paneID == agentTarget
+    }
+
+    /// This share under the name the host lists its agent by now, or nil when the name is
+    /// unchanged or the host does not list the shared agent (`isSharedAgent`). The grant is
+    /// the agent in that terminal, so it survives the owner renaming the agent.
+    public func renamed(listing agents: [AgentInfo]) -> GuestAccess? {
+        guard let name = agents.first(where: isSharedAgent)?.name,
+              !name.isEmpty, name != agentName else { return nil }
+        return GuestAccess(guestID: guestID, guestName: guestName, machineLabel: machineLabel,
+                           ownerName: ownerName, agentName: name, agentTarget: agentTarget,
+                           endpoint: endpoint, acceptedAt: acceptedAt)
+    }
+
+    /// The name to address the shared agent by (a guest's `gram.post` `to`): the one the
+    /// host lists it under now, since the saved name is stale between the owner renaming
+    /// the agent and the next home poll; else the saved one.
+    public func liveAgentName(listed agent: AgentInfo?) -> String {
+        guard let name = agent?.name, !name.isEmpty else { return self.agentName }
+        return name
+    }
+
     /// `onFeatures` hears what the host advertises in every session's hello reply, so a
     /// share whose owner turned Gram on (or a host that learned guest push) shows it on
     /// the next call without a new accept.
