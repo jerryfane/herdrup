@@ -32,7 +32,7 @@ where Item.ID == String {
     /// The stack's accessibility identifier and value (how many messages it holds).
     let messagesID: String
     let messagesValue: String
-    let columnCap: CGFloat
+    let column: FeedColumn
     /// The floating header's bottom edge (`GramView.headerBottom`, 0 until measured): rows
     /// under it are not on screen, and an anchored row may land at it.
     let visibleTop: CGFloat
@@ -207,9 +207,9 @@ where Item.ID == String {
             .accessibilityElement(children: .contain)
             .accessibilityIdentifier(messagesID)
             .accessibilityValue(messagesValue)
-            // iPad / Mac: a readable conversation column, centred, so a bubble never
-            // stretches across the whole detail pane.
-            .readableColumn(columnCap)
+            // A conversation column, centred, so a bubble never stretches across the whole
+            // detail pane on iPad / Mac.
+            .feedColumn(column)
             .background { if newestRequest != nil { ScrollsToTopOff() } }
         }
         .accessibilityIdentifier(feedID)
@@ -483,6 +483,25 @@ private struct ScrollsToTopOff: UIViewRepresentable {
                 }
                 ancestor = view.superview
             }
+        }
+    }
+}
+
+/// How wide a `WindowedBottomFeed`'s column is.
+enum FeedColumn {
+    /// The conversation column Chat uses too (`conversationColumn`): the reader's width on
+    /// iPad and Mac, resized from the page's edge handles; the whole width on iPhone. UI tests
+    /// measure it as `probe`.
+    case conversation(probe: String)
+    /// At most this wide, centred.
+    case capped(CGFloat)
+}
+
+private extension View {
+    @ViewBuilder func feedColumn(_ column: FeedColumn) -> some View {
+        switch column {
+        case .conversation(let probe): conversationColumn(probe: probe)
+        case .capped(let cap): readableColumn(cap)
         }
     }
 }

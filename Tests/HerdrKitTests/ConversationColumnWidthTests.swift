@@ -1,16 +1,53 @@
 import XCTest
 @testable import HerdrKit
 
-final class ChatColumnWidthTests: XCTestCase {
-    private typealias W = ChatColumnWidth
+final class ConversationColumnWidthTests: XCTestCase {
+    private typealias W = ConversationColumnWidth
 
     func testDefaultsAndStorageKey() {
-        XCTAssertEqual(W.storageKey, "chat.columnWidth")
+        XCTAssertEqual(W.storageKey, "conversation.columnWidth")
         XCTAssertEqual(W.defaultWidth, 1000)
         XCTAssertEqual(W.minimum, 560)
         XCTAssertEqual(W.readable, 720)
         XCTAssertEqual(W.wide, 1000)
         XCTAssertEqual(W.snapDistance, 12)
+    }
+
+    private func withDefaults(_ body: (UserDefaults) throws -> Void) throws {
+        let suite = "herdr.conversationcolumn.\(UUID().uuidString)"
+        let defaults = try XCTUnwrap(UserDefaults(suiteName: suite))
+        defer { defaults.removePersistentDomain(forName: suite) }
+        try body(defaults)
+    }
+
+    /// A reader who sized Chat before the width was shared keeps that width: the one Chat
+    /// and Gram now read.
+    func testMigrationKeepsTheWidthChosenInChat() throws {
+        try withDefaults { defaults in
+            defaults.set(820.0, forKey: "chat.columnWidth")
+            W.migrate(defaults)
+            XCTAssertEqual(defaults.object(forKey: W.storageKey) as? Double, 820)
+            XCTAssertNil(defaults.object(forKey: "chat.columnWidth"), "the old key is gone")
+            W.migrate(defaults)
+            XCTAssertEqual(defaults.object(forKey: W.storageKey) as? Double, 820, "a second launch changes nothing")
+        }
+    }
+
+    func testMigrationNeverOverwritesTheSharedWidth() throws {
+        try withDefaults { defaults in
+            defaults.set(W.readable, forKey: W.storageKey)
+            defaults.set(W.full, forKey: "chat.columnWidth")
+            W.migrate(defaults)
+            XCTAssertEqual(defaults.object(forKey: W.storageKey) as? Double, W.readable)
+            XCTAssertNil(defaults.object(forKey: "chat.columnWidth"))
+        }
+    }
+
+    func testMigrationWithoutAChatWidthStoresNothing() throws {
+        try withDefaults { defaults in
+            W.migrate(defaults)
+            XCTAssertNil(defaults.object(forKey: W.storageKey), "the default width applies")
+        }
     }
 
     func testDisplayedIsTheStoredWidthUpToTheAvailableWidth() {

@@ -21,10 +21,17 @@ struct HerdrApp: App {
         // transaction that completes outside a purchase() call — e.g. an Ask-to-Buy
         // approved later — is finished promptly instead of waiting for Settings to open.
         _ = TipStore.shared
+        // Chat's column width became the width Chat and Gram share (#541): keep the reader's.
+        ConversationColumnWidth.migrate(.standard)
         #if DEBUG
         // A mock run starts with no downloaded gram files, so what a test sees (the image
         // card's fetched preview) comes from this run's canned replies, not an earlier one's.
         if ScreenshotMock.mode != nil { GramView.Downloads.invalidate() }
+        // And from the default column width, so one test's choice can't leak into the next,
+        // unless `HERDR_MOCK_COLUMN_WIDTH=keep` (a relaunch checking the width is remembered).
+        if ScreenshotMock.mode != nil, ProcessInfo.processInfo.environment["HERDR_MOCK_COLUMN_WIDTH"] != "keep" {
+            UserDefaults.standard.removeObject(forKey: ConversationColumnWidth.storageKey)
+        }
         #endif
     }
 
@@ -5571,9 +5578,9 @@ struct TerminalPaneContent: View {
                             // is a stable measure of the room the composer grows over.
                             replyBar
                                 .environment(\.composerEditorRoom, terminalHeight)
-                                // In Chat on iPad and Mac, the composer takes the chat column's
-                                // width, centred under it; the terminal keeps the full width.
-                                .chatColumnComposerWidth(showingChat)
+                                // In Chat on iPad and Mac, the composer takes the conversation
+                                // column's width, centred under it; the terminal keeps the full width.
+                                .conversationColumn(showingChat)
                         }
                         .fixedSize(horizontal: false, vertical: true)
                         // Opaque, so rows the composer grows over do not show through the

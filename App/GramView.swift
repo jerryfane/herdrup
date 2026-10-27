@@ -574,23 +574,30 @@ struct GramView: View {
     /// `Spacer()` for this section, so the screen showed one empty system sidebar and one
     /// hand-rolled one. Reuses the SAME `content` / `bannerView` / `composer` as the phone, so
     /// every send/attach/poll behaviour is identical.
+    ///
+    /// The feed, header, banner and composer share the conversation column Chat uses
+    /// (`conversationColumn`), at the one width the reader sets from either page's edge
+    /// handles (#541). The column reads the width itself, so a drag never re-runs this body.
     private var iPadBody: some View {
         VStack(spacing: 0) {
             content
+                // Under the floating header: its trailing controls sit at the column's edge,
+                // and stay tappable there; the readout shows below it.
+                .conversationColumnResizer(.gram, readoutTop: headerBottom)
                 .gramFloatingHeader {
                     iPadHeader
-                        .readableColumn(GramBubble.columnCap)
+                        .conversationColumn()
                         .onGeometryChange(for: CGFloat.self) { proxy in
                             proxy.frame(in: .named(Self.feedPageSpace)).maxY
                         } action: { if abs($0 - headerBottom) > 0.5 { headerBottom = $0 } }
                 }
-            // The banner and composer share the feed's capped column, so the field lines up
-            // under the messages instead of spanning the whole detail pane.
+            // The banner and composer share the feed's column, so the field lines up under
+            // the messages instead of spanning the whole detail pane.
             measuredBanner
-                .readableColumn(GramBubble.columnCap)
+                .conversationColumn()
             composer
                 .environment(\.composerEditorRoom, composerRoom)
-                .readableColumn(GramBubble.columnCap)
+                .conversationColumn()
                 .layoutPriority(1)   // see phoneBody: the composer must always fit
                 .zIndex(1)           // see phoneBody: the @-mention list floats over the feed
         }
@@ -632,9 +639,6 @@ struct GramView: View {
             identifierPrefix: "gram-search"
         )
     }
-
-    /// The feed's width cap: `GramBubble.columnCap` at regular width, none on iPhone.
-    private var feedCap: CGFloat { hSizeClass == .regular ? GramBubble.columnCap : .infinity }
 
     private var canFilter: Bool { showingSaved || phase == .loaded }
 
@@ -1007,7 +1011,6 @@ struct GramView: View {
                 saved: visibleSaved,
                 search: search,
                 headerBottom: headerBottom,
-                columnCap: feedCap,
                 newestToken: newestToken,
                 downloadingFileFor: downloadingFileFor,
                 downloadBytes: downloadBytes,
@@ -1100,7 +1103,7 @@ struct GramView: View {
                 feedID: "gram-feed",
                 messagesID: "gram-feed-messages",
                 messagesValue: "\(visibleMessages.count) messages",
-                columnCap: feedCap,
+                column: .conversation(probe: "gram-column"),
                 visibleTop: headerBottom,
                 search: search,
                 visibility: feedVisibility,
@@ -2714,7 +2717,6 @@ private struct GramSavedFeed: View {
     /// The floating header's bottom edge (`GramView.headerBottom`): rows under it are not on
     /// screen, and an anchored row may land at it.
     let headerBottom: CGFloat
-    let columnCap: CGFloat
     /// `GramView.newestToken`: a re-tap of the selected Gram tab goes to the newest saved.
     let newestToken: Int
     let downloadingFileFor: String?
@@ -2757,7 +2759,7 @@ private struct GramSavedFeed: View {
                 // How many saved messages are drawn, so a UI test can tell the window from all.
                 messagesID: "gram-saved-messages",
                 messagesValue: "\(rows.count) of \(saved.count) saved",
-                columnCap: columnCap,
+                column: .conversation(probe: "gram-column"),
                 visibleTop: headerBottom,
                 search: search,
                 visibility: visibility,
@@ -3274,9 +3276,10 @@ enum GramBubble {
     static let avatarSize: CGFloat = 28
     /// How far an agent group sits in from the feed's edge: the avatar plus an 8 pt gap.
     static let groupIndent: CGFloat = 36
-    /// iPad / Mac: the feed's width cap (#354 follow-up). About the width of a Messages
-    /// conversation on iPad, so a long message wraps at a readable measure and your bubbles
-    /// on the right stay near the agents' on the left.
+    /// The guest's Gram feed's width cap (#354 follow-up); the owner's feeds follow the
+    /// conversation column on iPad and Mac (`conversationColumn`). About the
+    /// width of a Messages conversation on iPad, so a long message wraps at a readable measure
+    /// and your bubbles on the right stay near the agents' on the left.
     static let columnCap: CGFloat = 720
 }
 

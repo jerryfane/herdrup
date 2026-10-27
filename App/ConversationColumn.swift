@@ -2,67 +2,144 @@ import HerdrKit
 import SwiftUI
 import UIKit
 
-/// The Chat column's width as laid out (#523 items 2 and 12). On regular width (iPad, Mac)
-/// it is the reader's chosen width (`ChatColumnWidth`), up to the width the chat has; on
-/// compact width (iPhone) it keeps the fixed readable cap, which a phone never reaches.
-enum ChatColumnLayout {
-    static func width(stored: Double, available: CGFloat, regular: Bool) -> CGFloat {
-        guard regular else { return ChatStyle.columnWidth }
+/// The conversation column's width as laid out, in Chat and Gram (#523 items 2 and 12, #541).
+/// On regular width (iPad, Mac) it is the reader's chosen width (`ConversationColumnWidth`),
+/// up to the width the conversation has; on compact width (iPhone) it is `compact`, the
+/// surface's own cap.
+enum ConversationColumnLayout {
+    static func width(stored: Double, available: CGFloat, regular: Bool, compact: CGFloat) -> CGFloat {
+        guard regular else { return compact }
         // Before the first measurement the chosen width stands, so the column never lays out
         // at zero for a frame.
-        guard available > 0 else { return CGFloat(ChatColumnWidth.sanitized(stored)) }
-        return CGFloat(ChatColumnWidth.displayed(stored: stored, available: Double(available)))
+        guard available > 0 else { return CGFloat(ConversationColumnWidth.sanitized(stored)) }
+        return CGFloat(ConversationColumnWidth.displayed(stored: stored, available: Double(available)))
+    }
+}
+
+/// Where a column resizer sits: names its handles for VoiceOver and the UI tests
+/// (`chat-width-handle-left`, `gram-width-readout`).
+enum ConversationSurface: String {
+    case chat, gram
+
+    var name: String {
+        switch self {
+        case .chat: return "Chat"
+        case .gram: return "Gram"
+        }
+    }
+
+    var resizeHint: String {
+        switch self {
+        case .chat: return "Drag to resize the chat. Double-tap to reset to Wide."
+        case .gram: return "Drag to resize Gram. Double-tap to reset to Wide."
+        }
     }
 }
 
 extension View {
-    /// Gives the composer the Chat column's width, centred, while `active` (Chat mode) on
-    /// regular width. Terminal mode and compact width keep the full width.
-    func chatColumnComposerWidth(_ active: Bool) -> some View {
-        modifier(ChatColumnComposerWidth(active: active))
+    /// Lays the view out in the conversation column, centred: while `active`, the reader's
+    /// chosen width on regular width (`ConversationColumnLayout`) and at most `cap` on compact
+    /// width; otherwise at most `cap`. Chat's composer, and Gram's feed, header and composer.
+    ///
+    /// The width is read here, not by the page: a drag re-lays out what this wraps without
+    /// re-running the page's body, and so without re-rendering its rows. `probe` names the
+    /// column's frame for the UI tests (mock runs only).
+    func conversationColumn(_ active: Bool = true, cap: CGFloat = .infinity, probe: String? = nil) -> some View {
+        modifier(ConversationColumnFrame(active: active, cap: cap, probe: probe))
+    }
+
+    /// Lays the conversation column's resizer (`ConversationColumnResizer`) over this view on
+    /// regular width, with this view's width as the most the column can take. `readoutTop`
+    /// keeps the readout clear of chrome floating over the view's top.
+    func conversationColumnResizer(_ surface: ConversationSurface, readoutTop: CGFloat = 0) -> some View {
+        modifier(ConversationColumnResizing(surface: surface, readoutTop: readoutTop))
     }
 }
 
-private struct ChatColumnComposerWidth: ViewModifier {
+private struct ConversationColumnFrame: ViewModifier {
     let active: Bool
+    let cap: CGFloat
+    let probe: String?
     @Environment(\.horizontalSizeClass) private var sizeClass
-    @AppStorage(ChatColumnWidth.storageKey) private var stored = ChatColumnWidth.defaultWidth
-    /// The band's full width: the same as the chat's, which spans the pane above it.
+    @AppStorage(ConversationColumnWidth.storageKey) private var stored = ConversationColumnWidth.defaultWidth
+    /// The whole width the column could take.
     @State private var available: CGFloat = 0
 
     func body(content: Content) -> some View {
-        let regular = sizeClass == .regular
         content
-            .frame(maxWidth: active && regular
-                   ? ChatColumnLayout.width(stored: stored, available: available, regular: true)
-                   : .infinity)
+            // Both bounds, so the column is exactly its width whatever it holds.
+            .frame(minWidth: 0, maxWidth: active
+                   ? ConversationColumnLayout.width(stored: stored, available: available,
+                                                    regular: sizeClass == .regular, compact: cap)
+                   : cap)
+            // At the bottom: Chat and Gram open at their newest rows, so it is on screen.
+            .background(alignment: .bottom) { widthProbe(probe) }
             .frame(maxWidth: .infinity)
             .onGeometryChange(for: CGFloat.self) { $0.size.width } action: { available = $0 }
     }
 }
 
-/// The two edge handles that resize the Chat column on regular width, and the readout shown
-/// while one is dragged. Laid over the whole chat; only the handles hit-test, so scrolling
-/// and text selection elsewhere are untouched.
+/// A UI-test probe (mock runs only) naming a width: a 1 pt strip along an edge of what it
+/// backs, so its frame gives the width and edges without an accessibility element over the
+/// rows (which would stand between a test's press and a bubble).
+@ViewBuilder private func widthProbe(_ identifier: String?) -> some View {
+    #if DEBUG
+    if let identifier, ScreenshotMock.mode != nil {
+        Color.clear
+            .frame(height: 1)
+            .accessibilityElement()
+            .accessibilityIdentifier(identifier)
+            .accessibilityLabel(identifier)
+            .allowsHitTesting(false)
+    }
+    #endif
+}
+
+private struct ConversationColumnResizing: ViewModifier {
+    let surface: ConversationSurface
+    let readoutTop: CGFloat
+    @Environment(\.horizontalSizeClass) private var sizeClass
+    /// The wrapped view's width: the most the column can take.
+    @State private var available: CGFloat = 0
+
+    func body(content: Content) -> some View {
+        content
+            // The width the column can take, for the UI tests (`gram-width-area`).
+            .background(alignment: .top) { widthProbe("\(surface.rawValue)-width-area") }
+            .overlay {
+                if sizeClass == .regular, available > 0 {
+                    ConversationColumnResizer(surface: surface, available: available, readoutTop: readoutTop)
+                }
+            }
+            .onGeometryChange(for: CGFloat.self) { $0.size.width } action: { available = $0 }
+    }
+}
+
+/// The two edge handles that resize the conversation column on regular width, and the
+/// readout shown while one is dragged. Laid over the whole conversation; only the handles
+/// hit-test, so scrolling and text selection elsewhere are untouched. Chat and Gram share
+/// the one stored width, so resizing either resizes both.
 ///
 /// Dragging either edge resizes around the centre (each point of drag is two of width) between
-/// 560 pt and the chat's whole width, snapping to Readable, Wide and Full. A double tap (double
-/// click on the Mac) resets to Wide. On the Mac nothing is drawn at rest; a hover shows the
-/// edge's hairline and grip, as it does on an iPad with a pointer. On touch the grip shows
+/// 560 pt and the conversation's whole width, snapping to Readable, Wide and Full. A double tap
+/// (double click on the Mac) resets to Wide. On the Mac nothing is drawn at rest; a hover shows
+/// the edge's hairline and grip, as it does on an iPad with a pointer. On touch the grip shows
 /// faintly at rest so it can be found.
-struct ChatColumnResizer: View {
-    /// The chat's whole width.
+private struct ConversationColumnResizer: View {
+    let surface: ConversationSurface
+    /// The conversation's whole width.
     let available: CGFloat
-    @Binding var stored: Double
+    let readoutTop: CGFloat
 
+    @AppStorage(ConversationColumnWidth.storageKey) private var stored = ConversationColumnWidth.defaultWidth
     @Environment(\.accessibilityReduceMotion) private var reduceMotion
-    @State private var hovered: ChatColumnWidth.Edge?
-    @State private var dragging: ChatColumnWidth.Edge?
+    @State private var hovered: ConversationColumnWidth.Edge?
+    @State private var dragging: ConversationColumnWidth.Edge?
     @State private var dragStartWidth: Double?
     @State private var readoutShown = false
     @State private var hideReadout: Task<Void, Never>?
     /// The last short, still touch on a handle: a second one soon after on the same edge resets.
-    @State private var lastTap: (edge: ChatColumnWidth.Edge, at: Date)?
+    @State private var lastTap: (edge: ConversationColumnWidth.Edge, at: Date)?
 
     /// The Mac: a pointer, so a narrower hit band and nothing drawn at rest.
     private static let onMac = ProcessInfo.processInfo.isiOSAppOnMac
@@ -73,7 +150,7 @@ struct ChatColumnResizer: View {
     private static let readoutHold: Duration = {
         #if DEBUG
         // UI tests read the readout after XCUITest releases the drag.
-        if let seconds = ProcessInfo.processInfo.environment["HERDR_CHAT_WIDTH_READOUT_HOLD"].flatMap(Double.init) {
+        if let seconds = ProcessInfo.processInfo.environment["HERDR_COLUMN_WIDTH_READOUT_HOLD"].flatMap(Double.init) {
             return .milliseconds(Int(seconds * 1000))
         }
         #endif
@@ -81,11 +158,11 @@ struct ChatColumnResizer: View {
     }()
 
     private var availableWidth: Double { Double(available) }
-    private var width: Double { ChatColumnWidth.displayed(stored: stored, available: availableWidth) }
+    private var width: Double { ConversationColumnWidth.displayed(stored: stored, available: availableWidth) }
 
     var body: some View {
-        // On the column's edges, but never past the chat's own: at Full the bands sit just
-        // inside, so they never cover the sidebar or the window edge.
+        // On the column's edges, but never past the conversation's own: at Full the bands sit
+        // just inside, so they never cover the sidebar or the window edge.
         let reach = max(0, min(CGFloat(width), available - Self.hitWidth) / 2)
         ZStack {
             handle(.leading).offset(x: -reach)
@@ -101,7 +178,7 @@ struct ChatColumnResizer: View {
     }
 
     private var readout: some View {
-        Text(ChatColumnWidth.readout(width, available: availableWidth))
+        Text(ConversationColumnWidth.readout(width, available: availableWidth))
             .font(Typography.machine(12))
             .tracking(0.3)
             .foregroundStyle(Palette.text)
@@ -111,12 +188,12 @@ struct ChatColumnResizer: View {
             .background(Color(hex: 0x40466E).opacity(0.96), in: Capsule())
             .overlay(Capsule().strokeBorder(Color.white.opacity(0.2), lineWidth: 1))
             .shadow(color: .black.opacity(0.7), radius: 10, y: 6)
-            .padding(.top, 14)
+            .padding(.top, 14 + readoutTop)
             .allowsHitTesting(false)
-            .accessibilityIdentifier("chat-width-readout")
+            .accessibilityIdentifier("\(surface.rawValue)-width-readout")
     }
 
-    private func handle(_ edge: ChatColumnWidth.Edge) -> some View {
+    private func handle(_ edge: ConversationColumnWidth.Edge) -> some View {
         let active = dragging == edge
         // Hover only happens with a pointer (the Mac, or an iPad with a trackpad or mouse).
         let shown = dragging != nil || hovered == edge
@@ -141,14 +218,14 @@ struct ChatColumnResizer: View {
         }
         .gesture(drag(edge))
         .accessibilityElement()
-        .accessibilityIdentifier(edge == .leading ? "chat-width-handle-left" : "chat-width-handle-right")
-        .accessibilityLabel("Chat width")
-        .accessibilityValue(ChatColumnWidth.accessibilityValue(width, available: availableWidth))
-        .accessibilityHint("Drag to resize the chat. Double-tap to reset to Wide.")
+        .accessibilityIdentifier("\(surface.rawValue)-width-handle-\(edge == .leading ? "left" : "right")")
+        .accessibilityLabel("\(surface.name) width")
+        .accessibilityValue(ConversationColumnWidth.accessibilityValue(width, available: availableWidth))
+        .accessibilityHint(surface.resizeHint)
         .accessibilityAdjustableAction { direction in
             switch direction {
-            case .increment: choose(ChatColumnWidth.incremented(width, available: availableWidth))
-            case .decrement: choose(ChatColumnWidth.decremented(width, available: availableWidth))
+            case .increment: choose(ConversationColumnWidth.incremented(width, available: availableWidth))
+            case .decrement: choose(ConversationColumnWidth.decremented(width, available: availableWidth))
             @unknown default: break
             }
         }
@@ -158,7 +235,7 @@ struct ChatColumnResizer: View {
     /// One gesture for drag and double tap: a drag that starts on touch-down, so the column
     /// follows the finger at once, and that counts as a tap when it ends where it began.
     /// Global space, because the handle moves with the column while it is dragged.
-    private func drag(_ edge: ChatColumnWidth.Edge) -> some Gesture {
+    private func drag(_ edge: ConversationColumnWidth.Edge) -> some Gesture {
         DragGesture(minimumDistance: 0, coordinateSpace: .global)
             .onChanged { value in
                 let start = dragStartWidth ?? width
@@ -168,9 +245,9 @@ struct ChatColumnResizer: View {
                     dragging = edge
                     showReadout()
                 }
-                let next = ChatColumnWidth.dragged(from: start, translation: Double(value.translation.width),
+                let next = ConversationColumnWidth.dragged(from: start, translation: Double(value.translation.width),
                                                    edge: edge, available: availableWidth)
-                stored = ChatColumnWidth.stored(for: next, available: availableWidth)
+                stored = ConversationColumnWidth.stored(for: next, available: availableWidth)
             }
             .onEnded { value in
                 let moved = hypot(value.translation.width, value.translation.height)
@@ -194,11 +271,11 @@ struct ChatColumnResizer: View {
     }
 
     private func choose(_ next: Double) {
-        stored = ChatColumnWidth.stored(for: next, available: availableWidth)
+        stored = ConversationColumnWidth.stored(for: next, available: availableWidth)
     }
 
     private func reset() {
-        stored = ChatColumnWidth.resetWidth
+        stored = ConversationColumnWidth.resetWidth
         showReadout()
         scheduleReadoutHide()
     }

@@ -125,7 +125,7 @@ struct GuestGramList: View {
                 feedID: "guest-gram-feed",
                 messagesID: "guest-gram-messages",
                 messagesValue: "\(rows.count) messages",
-                columnCap: GramBubble.columnCap,
+                column: .capped(GramBubble.columnCap),
                 visibleTop: 0,
                 search: "",
                 visibility: visibility,

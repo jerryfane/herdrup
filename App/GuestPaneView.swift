@@ -524,8 +524,8 @@ struct GuestPaneView: View {
                     .onGeometryChange(for: CGFloat.self) { $0.size.height } action: { bottomChromeHeight = $0 }
                     composer
                         .environment(\.composerEditorRoom, terminalHeight)
-                        // In Chat on iPad and Mac, the chat column's width, centred under it.
-                        .chatColumnComposerWidth(showingChat)
+                        // In Chat on iPad and Mac, the conversation column's width, centred under it.
+                        .conversationColumn(showingChat)
                         .padding(.bottom, 8)
                 }
                 .fixedSize(horizontal: false, vertical: true)

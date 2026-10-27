@@ -15,8 +15,8 @@ enum ChatStyle {
     /// The answered-question tick and a table's gains: the mockup's `--ok`.
     static let ok = Color(hex: 0x7FC89A)
     /// The readable column: the chat's cap on compact width, and the content sheet's.
-    /// On regular width the reader sizes the column (`ChatColumnLayout`).
-    static let columnWidth = CGFloat(ChatColumnWidth.readable)
+    /// On regular width the reader sizes the column (`conversationColumn`).
+    static let columnWidth = CGFloat(ConversationColumnWidth.readable)
 }
 
 /// Why an answer from the chat did not land, shown under the question.
@@ -418,17 +418,8 @@ struct ChatView: View {
     /// `(index, total, capped)`: `capped` when the matches stop at `TranscriptSearch.matchCap`.
     var onFindResult: (Int, Int, Bool) -> Void = { _, _, _ in }
 
-    /// Regular width (iPad, Mac) gets the resizable column; it changes on rotation or a window
-    /// resize, never per keystroke.
-    @Environment(\.horizontalSizeClass) private var sizeClass
     @Environment(\.accessibilityReduceMotion) private var reduceMotion
     @AppStorage(ChatTextSize.storageKey) private var chatFontSize = ChatTextSize.defaultPoints
-    @AppStorage(ChatColumnWidth.storageKey) private var storedColumnWidth = ChatColumnWidth.defaultWidth
-    /// The chat's whole width: the most the column can take.
-    @State private var chatWidth: CGFloat = 0
-    private var columnWidth: CGFloat {
-        ChatColumnLayout.width(stored: storedColumnWidth, available: chatWidth, regular: sizeClass == .regular)
-    }
     private var textScale: CGFloat { CGFloat(chatFontSize / ChatTextSize.defaultPoints) }
     @State private var expanded: Set<String> = []
     @State private var openNote: TranscriptNote?
@@ -623,13 +614,9 @@ struct ChatView: View {
                 Text("No messages yet").font(Typography.app(14 * textScale)).foregroundStyle(Palette.textFaint)
             }
         }
-        .overlay {
-            if sizeClass == .regular, chatWidth > 0 {
-                ChatColumnResizer(available: chatWidth, stored: $storedColumnWidth)
-            }
-        }
+        // The resizer's width is the chat's whole width: the most the column can take.
+        .conversationColumnResizer(.chat)
         .background { probe("chat-area", "Chat area") }
-        .onGeometryChange(for: CGFloat.self) { $0.size.width } action: { chatWidth = $0 }
         .task(id: model.loaded) {
             guard model.loaded, !landed, findRequest == nil else { return }
             for _ in 0..<8 {
@@ -675,11 +662,11 @@ struct ChatView: View {
         .padding(.horizontal, 16)
         .padding(.top, 8)
         .padding(.bottom, 12)
-        // Both bounds, so the column is exactly the chosen width (or the chat's, if narrower)
-        // whatever its rows, and the composer under it lines up.
-        .frame(minWidth: 0, maxWidth: columnWidth)
-        .background { columnProbe }
-        .frame(maxWidth: .infinity)
+        // The column is exactly the chosen width (or the chat's, if narrower) whatever its
+        // rows, and the composer under it lines up. Laid out by the shared column, which reads
+        // the width itself: a drag never re-runs this body, so it never re-renders the rows.
+        // UI tests measure it as `chat-column`.
+        .conversationColumn(cap: ChatStyle.columnWidth, probe: "chat-column")
         .background {
             ScrollActivityObserver(isEnabled: isActive, onChange: { scrolling in
                 // A tap tracks too. Only an actual drag/deceleration may cancel
@@ -967,10 +954,8 @@ struct ChatView: View {
         #endif
     }
 
-    /// UI tests measure the column the transcript is laid out in (`chat-column`) and the
-    /// chat's whole width (`chat-area`: `chat-view`'s own frame spans its scrolled-away content).
-    @ViewBuilder private var columnProbe: some View { probe("chat-column", "Chat column") }
-
+    /// UI tests measure the chat's whole width (`chat-area`: `chat-view`'s own frame spans its
+    /// scrolled-away content); the column is `chat-column` (`conversationColumn`).
     @ViewBuilder private func probe(_ identifier: String, _ label: String) -> some View {
         #if DEBUG
         if ScreenshotMock.mode != nil {
