@@ -299,8 +299,15 @@ case "$shard" in
     # a slow hosted runner): with them in the app round, #433's run 38703928881 ran out of
     # its 30 m on the last class.
     run_suite iPhoneStatusMotion "$IPHONE_UDID" 10m -only-testing:HerdrUITests/StatusMotionTests || failed=1
+    # Round 4's agent-list classes own a round (#551, #552): with them in the app round, run
+    # 40589424949 spent 1761 s on 84 cases (AgentFoldersTests 170 s, NeedsYouPillTests 122 s)
+    # and ran out of the 30 m on the last class, every case passing.
+    run_suite iPhoneAgentList "$IPHONE_UDID" 10m -only-testing:HerdrUITests/AgentFoldersTests \
+      -only-testing:HerdrUITests/NeedsYouPillTests || failed=1
+    check_classes_ran TestReceipts/iPhoneAgentList-first.xcresult AgentFoldersTests NeedsYouPillTests || failed=1
     skip=(-skip-testing:HerdrUITests/GramTests -skip-testing:HerdrUITests/StatusMotionTests
-      -skip-testing:HerdrUITests/ChatViewTests -skip-testing:HerdrUITests/ChatUXSmokeTests -skip-testing:HerdrUITests/PagingTests)
+      -skip-testing:HerdrUITests/ChatViewTests -skip-testing:HerdrUITests/ChatUXSmokeTests -skip-testing:HerdrUITests/PagingTests
+      -skip-testing:HerdrUITests/AgentFoldersTests -skip-testing:HerdrUITests/NeedsYouPillTests)
     for class in "${TERMINAL_CLASSES[@]}"; do skip+=("-skip-testing:HerdrUITests/$class"); done
     run_suite iPhoneApp "$IPHONE_UDID" 30m -only-testing:HerdrUITests "${skip[@]}" || failed=1
     swiftterm_api iPhone "$IPHONE_UDID" || failed=1
