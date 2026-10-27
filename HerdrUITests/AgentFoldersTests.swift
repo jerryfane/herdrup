@@ -51,6 +51,22 @@ final class AgentFoldersTests: XCTestCase {
         return action
     }
 
+    /// Taps `folder` and waits until it reads `expanded` (or collapsed), tapping once more if
+    /// the first tap did nothing. On a loaded simulator the synthesized tap's touch-up can reach
+    /// the app after the row's long-press menu has started to lift, and that cancels the tap:
+    /// run 40574364856's iPad recording shows the lift on the Enyo row at the tap, then the
+    /// folder staying closed for 25 s. A second tap is what a person would do; the folder must
+    /// then open or close exactly as asked.
+    private func toggle(_ folder: XCUIElement, toExpanded expanded: Bool) {
+        let state = expanded ? "expanded" : "collapsed"
+        func done() -> Bool { (folder.value as? String)?.hasPrefix(state) == true }
+        folder.tap()
+        if !poll(10, every: 0.25, done) {
+            folder.tap()
+        }
+        XCTAssertTrue(poll(10, every: 0.25, done), "tapping \(folder) did not make it \(state)")
+    }
+
     func testClosedFolderShowsWaitingCountAndOpensOnTap() {
         var app = launch()
         let enyo = waitForFolders(app)
@@ -69,7 +85,7 @@ final class AgentFoldersTests: XCTestCase {
         XCTAssertLessThan(enyo.frame.minY, herdr.frame.minY, "folders in their order")
 
         // Tap opens it in place: its agents, most urgent first, under it and indented.
-        enyo.tap()
+        toggle(enyo, toExpanded: true)
         let review = row(app, "w1:p3")
         XCTAssertTrue(review.waitForHittable(timeout: 5), "tap opens the folder")
         XCTAssertEqual(enyo.value as? String, "expanded, 1 waiting, 1 stopped")
@@ -80,11 +96,11 @@ final class AgentFoldersTests: XCTestCase {
                        "waiting, stopped, working, idle")
 
         // Tap again closes it.
-        enyo.tap()
+        toggle(enyo, toExpanded: false)
         XCTAssertTrue(poll(5, every: 0.1) { !review.exists }, "a second tap closes the folder")
 
         // One open, one closed, a star: the screenshot.
-        herdr.tap()
+        toggle(herdr, toExpanded: true)
         XCTAssertTrue(row(app, "w1:p4").waitForHittable(timeout: 5), "Herdr opens")
         row(app, "w1:p4").waitForSettledFrame()
         attach(app, "agent-folders")
