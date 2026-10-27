@@ -19,6 +19,8 @@ struct AgentFoldersMockTransport: HerdrTransport {
         ProcessInfo.processInfo.environment["HERDR_MOCK_GROUPS"] != "off"
     }
 
+    static let idleStatus = ProcessInfo.processInfo.environment["HERDR_PROBE_NO_IDLE"] == "1" ? "working" : "idle"
+
     /// (pane id, name, status); a status of "stopped" is a pane that is gone.
     static let roster: [(String, String, String)] = [
         ("w1:p1", "jarvis", "blocked"),
@@ -39,8 +41,9 @@ struct AgentFoldersMockTransport: HerdrTransport {
         ("w2:p11", "mcb-sync", "working"),
         ("w2:p12", "enyo", "working"),
         ("w2:p13", "herdr-app", "working"),
-        ("w4:p1", "enyo-scout", "idle"),
-        ("w4:p2", "vesta", "idle"),
+        // TEMPORARY probe switch (folders hang, #552): HERDR_PROBE_NO_IDLE=1 makes them work.
+        ("w4:p1", "enyo-scout", Self.idleStatus),
+        ("w4:p2", "vesta", Self.idleStatus),
     ]
 
     static let livePaneIDs = Set(roster.filter { $0.2 != "stopped" }.map { $0.0 })
