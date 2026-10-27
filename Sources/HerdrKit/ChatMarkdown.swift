@@ -10,7 +10,8 @@ public enum ChatMarkdownBlock: Equatable, Sendable {
     /// Items keep their own inline markdown. `start` is the first number of an ordered list.
     case list(ordered: Bool, start: Int, items: [ChatMarkdownListItem])
     case code(language: String?, String)
-    /// A CLOSED fence whose language is a diagram the app draws (today only `mermaid`).
+    /// A CLOSED fence whose language is a diagram the app draws: `mermaid`, or `svg` (an
+    /// ```svg fence, or an ```xml fence whose document is an `<svg>`).
     /// While the closing fence has not arrived (a reply still streaming) it stays `.code`,
     /// so a half-written diagram is never sent to the renderer.
     case diagram(kind: String, source: String)
@@ -72,7 +73,7 @@ public enum ChatMarkdown {
                 let closed = i < lines.count
                 i += 1
                 let source = code.joined(separator: "\n")
-                if closed, let kind = diagramKind(language) {
+                if closed, let kind = diagramKind(language, source: source) {
                     blocks.append(.diagram(kind: kind, source: source))
                 } else {
                     blocks.append(.code(language: language.isEmpty ? nil : language, source))
@@ -173,9 +174,13 @@ public enum ChatMarkdown {
     }
 
     /// The diagram a fence's info string names (its first word, any case), if the app draws it.
-    private static func diagramKind(_ language: String) -> String? {
-        let word = language.split(whereSeparator: \.isWhitespace).first.map { $0.lowercased() }
-        return word == "mermaid" ? "mermaid" : nil
+    private static func diagramKind(_ language: String, source: String) -> String? {
+        switch language.split(whereSeparator: \.isWhitespace).first.map({ $0.lowercased() }) {
+        case "mermaid": return "mermaid"
+        case "svg": return "svg"
+        case "xml": return SVGDiagram.looksLikeSVG(source) ? "svg" : nil
+        default: return nil
+        }
     }
 
     private static func isRule(_ trimmed: String) -> Bool {

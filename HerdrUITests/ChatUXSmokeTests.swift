@@ -2,7 +2,7 @@ import XCTest
 
 final class ChatUXSmokeTests: XCTestCase {
     private func launch(failingRefresh: Bool = false, pendingQuestion: Bool = false, large: Bool = false,
-                        copyFixture: Bool = false, plan: String = "", mermaid: Bool = false,
+                        copyFixture: Bool = false, plan: String = "", mermaid: Bool = false, svg: Bool = false,
                         longSession: Bool = false, subagents: Bool = false,
                         environment: [String: String] = [:]) -> XCUIApplication {
         continueAfterFailure = false
@@ -14,6 +14,7 @@ final class ChatUXSmokeTests: XCTestCase {
             "HERDR_CHAT_UX_COPY": copyFixture ? "1" : "0",
             "HERDR_CHAT_UX_PLAN": plan,
             "HERDR_CHAT_UX_MERMAID": mermaid ? "1" : "0",
+            "HERDR_CHAT_UX_SVG": svg ? "1" : "0",
             "HERDR_CHAT_UX_LONG_SESSION": longSession ? "1" : "0",
             "HERDR_CHAT_UX_SUBAGENTS": subagents ? "1" : "0"
         ].merging(environment) { _, new in new })
@@ -267,6 +268,48 @@ final class ChatUXSmokeTests: XCTestCase {
         XCTAssertEqual(cachedImage.frame.width, shownSize.width, accuracy: 0.5)
         XCTAssertEqual(cachedImage.frame.height, shownSize.height, accuracy: 0.5)
         record(relaunched, "Mermaid diagram from the disk cache after relaunch")
+    }
+
+    /// The owner's ```svg block (round 4) is drawn as an image in the app's colours, opens full
+    /// screen, and shows its code on request; a broken SVG stays a code block.
+    func testSVGReplyRendersAnImageAndABrokenOneStaysCode() {
+        let app = launch(svg: true)
+        let image = app.buttons["chat-svg-image"].firstMatch
+        XCTAssertTrue(image.waitForExistence(timeout: 30),
+                      "The SVG must finish rendering offscreen: \(app.debugDescription)")
+        XCTAssertGreaterThan(image.frame.width, 100, "\(image.frame)")
+        // 900 × 360 drawn to the column: the aspect is the SVG's own.
+        XCTAssertEqual(image.frame.width / image.frame.height, 2.5, accuracy: 0.05, "\(image.frame)")
+        XCTAssertTrue((image.value as? String ?? "").hasPrefix("drawn "), String(describing: image.value))
+        XCTAssertEqual(app.buttons.matching(identifier: "chat-svg-image").count, 1,
+                       "Only the well-formed SVG is drawn")
+        let source = app.staticTexts.matching(NSPredicate(format: "label CONTAINS %@", "Clinic system (cloud)")).firstMatch
+        XCTAssertFalse(source.exists, "The SVG's source must not be drawn as code")
+
+        let broken = app.staticTexts["chat-svg-error"]
+        XCTAssertTrue(broken.waitForExistence(timeout: 10), app.debugDescription)
+        XCTAssertTrue(app.staticTexts.matching(NSPredicate(format: "label CONTAINS %@", "<rect width=\"4\">")).firstMatch.exists,
+                      "A malformed SVG falls back to its code")
+
+        let chat = app.descendants(matching: .any)["chat-view"].firstMatch
+        for _ in 0..<4 where !image.isHittable {
+            chat.swipeDown(velocity: .slow)
+        }
+        record(app, "SVG reply drawn as an image")
+        image.tap()
+        let viewer = app.descendants(matching: .any)["chat-svg-viewer"].firstMatch
+        XCTAssertTrue(viewer.waitForExistence(timeout: 10), app.debugDescription)
+        record(app, "SVG viewer full screen")
+        app.buttons["chat-svg-viewer-done"].tap()
+        XCTAssertTrue(viewer.waitForNonExistence(timeout: 10))
+
+        let toggle = app.buttons["chat-svg-toggle"].firstMatch
+        for _ in 0..<4 where !toggle.isHittable {
+            chat.swipeDown(velocity: .slow)
+        }
+        toggle.tap()
+        XCTAssertTrue(source.waitForExistence(timeout: 5), "Show code reveals the SVG's source")
+        XCTAssertFalse(app.buttons["chat-svg-image"].exists)
     }
 
     /// Pixels per point of this device's screen, from a screenshot of it.

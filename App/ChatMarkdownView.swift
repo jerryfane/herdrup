@@ -45,8 +45,8 @@ struct ChatMarkdownView: View {
             .padding(.top, 2)
         case .code(let language, let code):
             GramCodeBlock(code: code, language: language, textScale: textScale)
-        case .diagram(_, let source):
-            ChatMermaidView(source: source)
+        case .diagram(let kind, let source):
+            ChatMermaidView(source: source, kind: kind)
         case .table(let header, let rows):
             ChatMarkdownTable(header: header, rows: rows)
         case .quote(let text):

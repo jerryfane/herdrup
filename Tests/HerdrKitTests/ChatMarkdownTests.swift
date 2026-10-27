@@ -94,6 +94,18 @@ final class ChatMarkdownTests: XCTestCase {
         XCTAssertEqual(ChatMarkdown.blocks("```\ngraph TD\n```"), [.code(language: nil, "graph TD")])
     }
 
+    /// ```svg, and ```xml holding an `<svg>` document, are drawn; other XML stays code, and so
+    /// does an SVG still streaming.
+    func testSVGAndSVGDocumentXMLFencesAreDiagrams() {
+        let svg = "<svg viewBox=\"0 0 10 10\">\n  <rect width=\"4\" height=\"4\"/>\n</svg>"
+        XCTAssertEqual(ChatMarkdown.blocks("```svg\n\(svg)\n```"), [.diagram(kind: "svg", source: svg)])
+        XCTAssertEqual(ChatMarkdown.blocks("```XML\n<?xml version=\"1.0\"?>\n\(svg)\n```"),
+                       [.diagram(kind: "svg", source: "<?xml version=\"1.0\"?>\n\(svg)")])
+        XCTAssertEqual(ChatMarkdown.blocks("```xml\n<config><svg/></config>\n```"),
+                       [.code(language: "xml", "<config><svg/></config>")])
+        XCTAssertEqual(ChatMarkdown.blocks("```svg\n<svg>"), [.code(language: "svg", "<svg>")])
+    }
+
     func testOrderedListKeepsItsStartNumber() {
         XCTAssertEqual(ChatMarkdown.blocks("3. three\n4. four"), [
             .list(ordered: true, start: 3, items: [ChatMarkdownListItem(text: "three"), ChatMarkdownListItem(text: "four")]),

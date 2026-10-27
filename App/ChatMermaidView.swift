@@ -7,11 +7,18 @@ import SwiftUI
 /// source or swaps the drawing for its code. If mermaid cannot draw it, the block is the
 /// plain code block it was before, captioned "Diagram couldn't render".
 ///
+/// An ```svg block (or an ```xml one holding an `<svg>`) is the same card, drawn by the same
+/// renderer and caches: cleaned first (`SVGDiagram.sanitize`: no script, no loads, the
+/// palette for its `var(--fg)`-style colours), then rasterised as an image. One that does
+/// not parse is its code block.
+///
 /// Only CLOSED fences get here (`ChatMarkdown`), so a reply still streaming shows code
 /// until its diagram is complete. Search still matches the source (it searches the reply
 /// text, not this view).
 struct ChatMermaidView: View {
     let source: String
+    /// `ChatMarkdownBlock.diagram`'s kind: `mermaid` or `svg`.
+    var kind = "mermaid"
 
     @Environment(\.chatTextScale) private var textScale
     @Environment(\.displayScale) private var displayScale
@@ -25,10 +32,23 @@ struct ChatMermaidView: View {
     private static let shape = RoundedRectangle(cornerRadius: 12)
     private static let inset: CGFloat = 10
 
+    private var isSVG: Bool { kind == "svg" }
+    /// Accessibility identifiers: `chat-mermaid…` or `chat-svg…`.
+    private var tag: String { isSVG ? "chat-svg" : "chat-mermaid" }
+
+    /// The cleaned SVG, parsed once per source (`ChatSVG`); nil for mermaid, or when the SVG
+    /// does not parse.
+    private var svg: SVGDiagram.Sanitized? { isSVG ? ChatSVG.sanitized(source) : nil }
+
     private var request: MermaidRenderer.Request? {
         let available = width - 2 * Self.inset
         guard available > 0 else { return nil }
-        return MermaidRenderer.Request(source: source,
+        var drawing = MermaidRenderer.Request.Drawing.mermaid
+        if isSVG {
+            guard let svg else { return nil }
+            drawing = .svg(svg)
+        }
+        return MermaidRenderer.Request(drawing: drawing, source: source,
                                        widthBucket: MermaidDiagram.widthBucket(Double(available)),
                                        textScale: textScale, displayScale: displayScale)
     }
@@ -41,7 +61,7 @@ struct ChatMermaidView: View {
 
     var body: some View {
         Group {
-            if failed && shown == nil {
+            if (failed || (isSVG && svg == nil)) && shown == nil {
                 fallback
             } else {
                 card
@@ -64,7 +84,7 @@ struct ChatMermaidView: View {
         }
         .fullScreenCover(isPresented: $viewing) { viewer }
         .accessibilityElement(children: .contain)
-        .accessibilityIdentifier("chat-mermaid")
+        .accessibilityIdentifier(tag)
     }
 
     private var card: some View {
@@ -86,7 +106,7 @@ struct ChatMermaidView: View {
     private var header: some View {
         let copied = receipt.text == source
         return HStack(spacing: 14) {
-            Text("Mermaid")
+            Text(isSVG ? "SVG" : "Mermaid")
                 .font(Typography.app(11.5))
                 .foregroundStyle(Palette.textDim)
             Spacer(minLength: 0)
@@ -96,14 +116,14 @@ struct ChatMermaidView: View {
                     .foregroundStyle(copied ? Palette.done : Palette.text)
             }
             .buttonStyle(.plain)
-            .accessibilityIdentifier("chat-mermaid-copy")
+            .accessibilityIdentifier("\(tag)-copy")
             Button { showCode.toggle() } label: {
-                Text(showCode ? "Show diagram" : "Show code")
+                Text(showCode ? (isSVG ? "Show image" : "Show diagram") : "Show code")
                     .font(Typography.app(12, .semibold))
                     .foregroundStyle(Palette.text)
             }
             .buttonStyle(.plain)
-            .accessibilityIdentifier("chat-mermaid-toggle")
+            .accessibilityIdentifier("\(tag)-toggle")
         }
         .padding(.horizontal, Self.inset)
         .padding(.top, 7)
@@ -121,17 +141,17 @@ struct ChatMermaidView: View {
                     .frame(width: size.width, height: size.height)
             }
             .buttonStyle(.plain)
-            .accessibilityLabel(MermaidDiagram.accessibilityLabel(source))
+            .accessibilityLabel(isSVG ? SVGDiagram.accessibilityLabel(source) : MermaidDiagram.accessibilityLabel(source))
             .accessibilityValue(Self.drawnProbe(shown))
-            .accessibilityHint("Opens the diagram full screen")
-            .accessibilityIdentifier("chat-mermaid-image")
+            .accessibilityHint(isSVG ? "Opens the image full screen" : "Opens the diagram full screen")
+            .accessibilityIdentifier("\(tag)-image")
         } else {
             ProgressView()
                 .tint(Palette.textDim)
                 .frame(maxWidth: .infinity)
                 .frame(height: max(120, (width - 2 * Self.inset) * 0.5))
-                .accessibilityLabel("Rendering diagram")
-                .accessibilityIdentifier("chat-mermaid-placeholder")
+                .accessibilityLabel(isSVG ? "Rendering image" : "Rendering diagram")
+                .accessibilityIdentifier("\(tag)-placeholder")
         }
     }
 
@@ -164,14 +184,14 @@ struct ChatMermaidView: View {
         }
     }
 
-    /// Mermaid could not draw it: the code block, as before diagrams existed, and why.
+    /// It cannot be drawn: the code block, as before diagrams existed, and why.
     private var fallback: some View {
         VStack(alignment: .leading, spacing: 4) {
-            GramCodeBlock(code: source, language: "mermaid", textScale: textScale)
-            Text("Diagram couldn't render")
+            GramCodeBlock(code: source, language: kind, textScale: textScale)
+            Text(isSVG ? "SVG couldn't render" : "Diagram couldn't render")
                 .font(Typography.app(12 * textScale))
                 .foregroundStyle(Palette.textFaint)
-                .accessibilityIdentifier("chat-mermaid-error")
+                .accessibilityIdentifier("\(tag)-error")
         }
     }
 
@@ -180,18 +200,41 @@ struct ChatMermaidView: View {
             HtmlWebView(html: MermaidDiagram.viewerDocument(svg: shown?.svg ?? "",
                                                             background: MermaidRenderer.hex(Palette.ground)))
                 .ignoresSafeArea(edges: .bottom)
-                .accessibilityIdentifier("chat-mermaid-viewer")
-                .navigationTitle("Diagram")
+                .accessibilityIdentifier("\(tag)-viewer")
+                .navigationTitle(isSVG ? "SVG" : "Diagram")
                 .navigationBarTitleDisplayMode(.inline)
                 .toolbar {
                     ToolbarItem(placement: .cancellationAction) {
                         Button("Done") { viewing = false }
-                            .accessibilityIdentifier("chat-mermaid-viewer-done")
+                            .accessibilityIdentifier("\(tag)-viewer-done")
                     }
                     ToolbarItem(placement: .primaryAction) {
                         Button(receipt.text == source ? "Copied" : "Copy source") { receipt.record(source) }
                     }
                 }
         }
+    }
+}
+
+/// Each ```svg block's cleaned document, parsed once per source: a row's body runs on every
+/// redraw (typing, scrolling), and the parse must not run with it.
+@MainActor
+enum ChatSVG {
+    private final class Entry {
+        let value: SVGDiagram.Sanitized?
+        init(_ value: SVGDiagram.Sanitized?) { self.value = value }
+    }
+
+    private static let cache: NSCache<NSString, Entry> = {
+        let cache = NSCache<NSString, Entry>()
+        cache.countLimit = 64
+        return cache
+    }()
+
+    static func sanitized(_ source: String) -> SVGDiagram.Sanitized? {
+        if let hit = cache.object(forKey: source as NSString) { return hit.value }
+        let value = SVGDiagram.sanitize(source, variables: MermaidRenderer.svgVariables)
+        cache.setObject(Entry(value), forKey: source as NSString)
+        return value
     }
 }
