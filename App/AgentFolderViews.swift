@@ -182,15 +182,13 @@ private struct LeadingSwipeActions: ViewModifier {
                     }
                 }
                 .clipped()
-                // Where the row is in the list's content, for the list's pan to find it. A
-                // frame in content coordinates does not move while the list scrolls, so this
-                // costs nothing per scroll frame, and the write invalidates no view.
-                .onGeometryChange(for: CGRect.self) { proxy in
-                    proxy.frame(in: .named(agentRosterContentSpace))
-                } action: { frame in
-                    swipes.place(id, frame: frame, revealWidth: width)
-                }
-                .onDisappear { swipes.remove(id) }
+                // A UIKit marker over the row's frame, for the list's pan to find it under the
+                // finger (like `stableContextMenu`'s anchor). NO GEOMETRY READER: a per-row
+                // `onGeometryChange` in the list's content space kept the lazy list's update
+                // transaction from ever settling once it scrolled (run 40538770025's samples:
+                // 647 of 647 main-thread samples in GraphHost.flushTransactions, with this
+                // reader's closure inside).
+                .background(RowSwipeMarker(id: id, revealWidth: width, swipes: swipes))
         }
     }
 }
@@ -217,17 +215,13 @@ final class RowSwipeController: NSObject, UIGestureRecognizerDelegate {
         var revealed = false
     }
 
-    private struct Place {
-        var frame: CGRect
-        var revealWidth: CGFloat
-    }
-
     private var boxes: [String: Box] = [:]
-    private var places: [String: Place] = [:]
+    /// The swipeable rows' markers now in a window.
+    private let markers = NSHashTable<RowSwipeMarkerView>.weakObjects()
     private weak var scrollView: UIScrollView?
     private var pan: UIPanGestureRecognizer?
-    /// The row under the pan in progress.
-    private var swiping: String?
+    /// The row under the pan in progress, and how wide its actions are.
+    private var swiping: (id: String, revealWidth: CGFloat)?
 
     private static let spring = Animation.spring(response: 0.3, dampingFraction: 0.86)
 
@@ -239,15 +233,8 @@ final class RowSwipeController: NSObject, UIGestureRecognizerDelegate {
         return box
     }
 
-    func place(_ id: String, frame: CGRect, revealWidth: CGFloat) {
-        places[id] = Place(frame: frame, revealWidth: revealWidth)
-    }
-
-    func remove(_ id: String) {
-        places[id] = nil
-        boxes[id] = nil
-        if swiping == id { swiping = nil }
-    }
+    func add(_ marker: RowSwipeMarkerView) { markers.add(marker) }
+    func remove(_ marker: RowSwipeMarkerView) { markers.remove(marker) }
 
     func close(_ id: String) {
         guard let box = boxes[id], box.revealed || box.drag != 0 else { return }
@@ -269,17 +256,19 @@ final class RowSwipeController: NSObject, UIGestureRecognizerDelegate {
         self.scrollView = scrollView
     }
 
-    /// The row with actions at `point` (the list's content coordinates). Rows are full width,
-    /// so only the height decides.
-    private func row(at point: CGPoint) -> String? {
-        places.first { $0.value.frame.minY <= point.y && point.y < $0.value.frame.maxY }?.key
+    /// The row with actions under `point` (in `view`). Looked up only when a pan begins.
+    private func row(at point: CGPoint, in view: UIView) -> RowSwipeMarkerView? {
+        markers.allObjects.first { marker in
+            marker.window != nil && marker.bounds.contains(view.convert(point, to: marker))
+        }
     }
 
     @objc private func handlePan(_ pan: UIPanGestureRecognizer) {
         let translation = pan.translation(in: pan.view).x
         switch pan.state {
         case .began:
-            guard let id = row(at: pan.location(in: pan.view)) else { return }
+            guard let view = pan.view, let marker = row(at: pan.location(in: view), in: view) else { return }
+            let id = marker.rowID
             // One row open at a time, like Mail.
             for (other, box) in boxes where other != id && (box.revealed || box.drag != 0) {
                 withAnimation(Self.spring) {
@@ -287,13 +276,14 @@ final class RowSwipeController: NSObject, UIGestureRecognizerDelegate {
                     box.drag = 0
                 }
             }
-            swiping = id
+            swiping = (id, marker.revealWidth)
             box(id).drag = translation
         case .changed:
-            guard let id = swiping else { return }
+            guard let id = swiping?.id else { return }
             box(id).drag = translation
         case .ended:
-            guard let id = swiping, let width = places[id]?.revealWidth else { return }
+            guard let swipe = swiping else { return }
+            let id = swipe.id, width = swipe.revealWidth
             swiping = nil
             // Where a flick would carry the row, as SwiftUI's predictedEndTranslation does.
             let predicted = translation + pan.velocity(in: pan.view).x * 0.2
@@ -303,7 +293,7 @@ final class RowSwipeController: NSObject, UIGestureRecognizerDelegate {
                 box.drag = 0
             }
         case .cancelled, .failed:
-            guard let id = swiping else { return }
+            guard let id = swiping?.id else { return }
             swiping = nil
             let box = self.box(id)
             withAnimation(Self.spring) { box.drag = 0 }
@@ -319,12 +309,45 @@ final class RowSwipeController: NSObject, UIGestureRecognizerDelegate {
         guard gestureRecognizer === pan, let pan, let view = pan.view else { return false }
         let velocity = pan.velocity(in: view)
         guard abs(velocity.x) > abs(velocity.y) * 1.5 else { return false }
-        return row(at: pan.location(in: view)) != nil
+        return row(at: pan.location(in: view), in: view) != nil
     }
 
     /// The scroll view's own pan is left exactly as it is.
     func gestureRecognizer(_ gestureRecognizer: UIGestureRecognizer,
                            shouldRecognizeSimultaneouslyWith other: UIGestureRecognizer) -> Bool {
         other === scrollView?.panGestureRecognizer
+    }
+}
+
+/// Marks a swipeable row's frame in UIKit for `RowSwipeController`. It draws nothing, takes no
+/// touches, and SwiftUI updates it only when the row's id or action width changes.
+private struct RowSwipeMarker: UIViewRepresentable {
+    let id: String
+    let revealWidth: CGFloat
+    let swipes: RowSwipeController
+
+    func makeUIView(context: Context) -> RowSwipeMarkerView {
+        let view = RowSwipeMarkerView()
+        view.isUserInteractionEnabled = false
+        view.swipes = swipes
+        view.rowID = id
+        view.revealWidth = revealWidth
+        return view
+    }
+
+    func updateUIView(_ view: RowSwipeMarkerView, context: Context) {
+        if view.rowID != id { view.rowID = id }
+        if view.revealWidth != revealWidth { view.revealWidth = revealWidth }
+    }
+}
+
+final class RowSwipeMarkerView: UIView {
+    weak var swipes: RowSwipeController?
+    var rowID = ""
+    var revealWidth: CGFloat = 0
+
+    override func didMoveToWindow() {
+        super.didMoveToWindow()
+        if window != nil { swipes?.add(self) } else { swipes?.remove(self) }
     }
 }
