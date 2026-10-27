@@ -24,8 +24,8 @@ import pathlib
 import re
 import sys
 
-# The bundled set, in picker order. Herdy (from the app icon) is the default for an
-# agent without a choice. Keep in sync with `AgentMascot` (Sources/HerdrKit/AgentAvatarDescriptor.swift).
+# The bundled set, in picker order. An agent without a choice wears none of them (it
+# shows its initial tile). Keep in sync with `AgentMascot` (Sources/HerdrKit/AgentAvatarDescriptor.swift).
 MASCOTS = ["herdy", "bot", "blip", "tri", "squib", "zag", "cub", "dome", "pip", "prism", "nib", "drop"]
 
 HERE = pathlib.Path(__file__).resolve().parent

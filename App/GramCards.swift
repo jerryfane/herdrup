@@ -110,7 +110,8 @@ enum GramDates {
 
 /// An agent's round avatar in Gram: the picture of the roster agent its routing name
 /// denotes (`AgentAvatarView`, herdrup#538), so a sender looks the same here as in the agent
-/// list. A federated name finds the agent on that machine; an unknown sender wears Herdy.
+/// list. A federated name finds the agent on that machine; an unknown sender wears the
+/// initial tile.
 struct GramAvatar: View {
     let name: String
     let size: CGFloat

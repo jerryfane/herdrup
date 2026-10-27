@@ -7,14 +7,15 @@ import HerdrKit
 
 // Agent profile pictures (herdrup#538): one bundled mascot or one photo per agent, stored on
 // the herdr server keyed by the agent's terminal id, so every owner device and every guest
-// of the agent sees the same picture. Herdy is what an agent with no choice wears.
+// of the agent sees the same picture. An agent with no choice shows its initial tile.
 
 // MARK: - Directory
 
 /// What every avatar on screen draws from: the roster (so a Gram sender's name finds its
 /// agent), this device's pending changes, the decoded photos, and whether this connection
 /// may edit. One per connected home (the owner's `TerminalHomeView`, a guest's
-/// `GuestHomeView`), handed down through the environment; a view without one draws Herdy.
+/// `GuestHomeView`), handed down through the environment; a view without one draws the
+/// initial tile.
 @Observable
 final class AgentAvatarDirectory {
     /// Fetches photo bytes (`agent.avatar.get`) and saves changes (`agent.avatar.set`).
@@ -145,9 +146,9 @@ final class AgentAvatarDirectory {
 
 /// One agent's round picture, everywhere an agent is shown: the roster and sidebar, the
 /// archived rows, a guest's home, the guest accept card, and Gram's bubbles, stacks and
-/// pickers. Photo (cached, fetched by content address) → mascot → Herdy. The name's
-/// generated circle is kept only for a mascot this build does not ship, or an asset that
-/// fails to load.
+/// pickers. Photo (cached, fetched by content address) → mascot → the initial tile. The
+/// initial tile is also what a mascot this build does not ship and a photo that fails to
+/// load fall back to.
 struct AgentAvatarView: View {
     private enum Source {
         case agent(AgentInfo?)
@@ -160,7 +161,7 @@ struct AgentAvatarView: View {
     private let glyphSize: CGFloat?
     @Environment(AgentAvatarDirectory.self) private var directory: AgentAvatarDirectory?
 
-    /// A known agent (or nil: the default). `name` drives only the fallback circle.
+    /// A known agent (or nil: the default). `name` drives only the initial tile.
     init(agent: AgentInfo?, name: String, size: CGFloat, glyphSize: CGFloat? = nil) {
         source = .agent(agent)
         self.name = name
@@ -173,7 +174,8 @@ struct AgentAvatarView: View {
         source = .gramSender(gramSender)
         name = GramMessage.agentName(from: gramSender)
         self.size = size
-        glyphSize = nil
+        // Gram's initial was a touch larger than a row's before pictures (herdrup#538).
+        glyphSize = (size * 0.45).rounded()
     }
 
     private var agent: AgentInfo? {
@@ -202,37 +204,50 @@ struct AgentAvatarView: View {
 
     private func render(_ appearance: AgentAvatarAppearance) -> (AnyView, String, String) {
         switch appearance {
+        case .initial, .unknownMascot:
+            return initialFace(appearance.identifierSuffix)
         case .mascot(let mascot):
-            return mascotFace(mascot)
-        case .unknownMascot:
-            return (AnyView(fallbackCircle), "unknown", name)
+            let asset = AgentMascotArt.assetName(mascot)
+            guard UIImage(named: asset) != nil else { return initialFace(AgentAvatarAppearance.initial.identifierSuffix) }
+            return (AnyView(Image(asset).resizable().interpolation(.high).aspectRatio(contentMode: .fit)),
+                    appearance.identifierSuffix, mascot.displayName)
         case .image(let sha256):
             switch directory?.photo(sha256) ?? .failed {
             case .ready(let image):
                 return (AnyView(Image(uiImage: image).resizable().interpolation(.high).scaledToFill()
-                    .overlay(Circle().stroke(Palette.hairline, lineWidth: 1))), "image", "Photo")
+                    .overlay(Circle().stroke(Palette.hairline, lineWidth: 1))), appearance.identifierSuffix, "Photo")
             case .loading:
                 return (AnyView(Circle().fill(Palette.surfaceRaised)), "loading", "Photo")
             case .failed:
-                return mascotFace(.default)
+                return initialFace(AgentAvatarAppearance.initial.identifierSuffix)
             }
         }
     }
 
-    private func mascotFace(_ mascot: AgentMascot) -> (AnyView, String, String) {
-        let asset = AgentMascotArt.assetName(mascot)
-        guard UIImage(named: asset) != nil else { return (AnyView(fallbackCircle), "fallback", name) }
-        return (AnyView(Image(asset).resizable().interpolation(.high).aspectRatio(contentMode: .fit)),
-                mascot.rawValue, mascot.displayName)
+    private func initialFace(_ identifier: String) -> (AnyView, String, String) {
+        (AnyView(AgentInitialTile(name: name, size: size, glyphSize: glyphSize)),
+         identifier, AgentInitialTile.label(for: name))
     }
+}
 
-    private var fallbackCircle: some View {
+/// The default avatar: the name's initial on its identity gradient, the look every agent
+/// had before mascots (herdrup#538). Also the picker's "Use default" option.
+struct AgentInitialTile: View {
+    let name: String
+    let size: CGFloat
+    var glyphSize: CGFloat? = nil
+
+    /// What VoiceOver reads for the tile, e.g. "Initial J".
+    static func label(for name: String) -> String { "Initial \(AgentIdentity.glyph(forName: name))" }
+
+    var body: some View {
         Circle().fill(AgentIdentity.gradient(forName: name))
             .overlay(Text(AgentIdentity.glyph(forName: name))
                 .font(Typography.app(glyphSize ?? (size * 0.42).rounded(), .bold))
                 .foregroundStyle(.white)
                 .lineLimit(1)
                 .minimumScaleFactor(0.5))
+            .frame(width: size, height: size)
     }
 }
 
@@ -252,9 +267,9 @@ struct AgentAvatarMenuButton: View {
     }
 }
 
-/// The avatar sheet: the twelve mascots (Herdy marked default), a photo from the library
-/// cropped to a circle, and a way back to the default. Every choice applies at once and is
-/// shared with the owner's other devices and the agent's guests.
+/// The avatar sheet: the default (the agent's initial tile), the twelve mascots, and a photo
+/// from the library cropped to a circle. Every choice applies at once and is shared with the
+/// owner's other devices and the agent's guests.
 struct AgentAvatarSheet: View {
     let agent: AgentInfo
     let name: String
@@ -321,27 +336,45 @@ struct AgentAvatarSheet: View {
 
     private var mascotGrid: some View {
         LazyVGrid(columns: [GridItem(.adaptive(minimum: 68), spacing: 12)], spacing: 14) {
+            // "Use default": clears the choice, back to the agent's own initial tile.
+            choiceCell(label: "Use default", accessibilityLabel: "Use default, \(AgentInitialTile.label(for: name))",
+                       selected: current == .initial, identifier: "agent-avatar-use-default") {
+                apply(nil)
+            } face: {
+                AgentInitialTile(name: name, size: 56, glyphSize: 24)
+            }
             ForEach(AgentMascot.allCases) { mascot in
-                Button { apply(.bundled(mascot)) } label: {
-                    VStack(spacing: 5) {
-                        Image(AgentMascotArt.assetName(mascot)).resizable().interpolation(.high)
-                            .aspectRatio(contentMode: .fit)
-                            .frame(width: 56, height: 56)
-                            .clipShape(Circle())
-                            .padding(3)
-                            .overlay(Circle().stroke(current == .mascot(mascot) ? Palette.text : .clear,
-                                                     lineWidth: 2.5))
-                        Text(mascot == .default ? "\(mascot.displayName) · default" : mascot.displayName)
-                            .font(Typography.app(11.5)).foregroundStyle(Palette.textDim)
-                            .lineLimit(1).minimumScaleFactor(0.7)
-                    }
+                choiceCell(label: mascot.displayName, accessibilityLabel: mascot.displayName,
+                           selected: current == .mascot(mascot),
+                           identifier: "agent-avatar-choice-\(mascot.rawValue)") {
+                    apply(.bundled(mascot))
+                } face: {
+                    Image(AgentMascotArt.assetName(mascot)).resizable().interpolation(.high)
+                        .aspectRatio(contentMode: .fit)
+                        .frame(width: 56, height: 56)
+                        .clipShape(Circle())
                 }
-                .buttonStyle(.plain)
-                .accessibilityLabel(mascot == .default ? "\(mascot.displayName), default" : mascot.displayName)
-                .accessibilityAddTraits(current == .mascot(mascot) ? .isSelected : [])
-                .accessibilityIdentifier("agent-avatar-choice-\(mascot.rawValue)")
             }
         }
+    }
+
+    private func choiceCell(label: String, accessibilityLabel: String, selected: Bool, identifier: String,
+                            action: @escaping () -> Void,
+                            @ViewBuilder face: () -> some View) -> some View {
+        Button(action: action) {
+            VStack(spacing: 5) {
+                face()
+                    .padding(3)
+                    .overlay(Circle().stroke(selected ? Palette.text : .clear, lineWidth: 2.5))
+                Text(label)
+                    .font(Typography.app(11.5)).foregroundStyle(Palette.textDim)
+                    .lineLimit(1).minimumScaleFactor(0.7)
+            }
+        }
+        .buttonStyle(.plain)
+        .accessibilityLabel(accessibilityLabel)
+        .accessibilityAddTraits(selected ? .isSelected : [])
+        .accessibilityIdentifier(identifier)
     }
 
     private var actions: some View {
@@ -361,21 +394,15 @@ struct AgentAvatarSheet: View {
             .accessibilityIdentifier("agent-avatar-choose-photo")
 
             if case .image = current {
-                resetButton("Remove photo", identifier: "agent-avatar-remove-photo")
-            } else if current != .mascot(.default) {
-                resetButton("Use default", identifier: "agent-avatar-use-default")
+                Button { apply(nil) } label: {
+                    Text("Remove photo").frame(maxWidth: .infinity, minHeight: 44)
+                }
+                .buttonStyle(.plain)
+                .foregroundStyle(Palette.textDim)
+                .accessibilityIdentifier("agent-avatar-remove-photo")
             }
         }
         .font(Typography.app(15, .semibold))
-    }
-
-    private func resetButton(_ title: String, identifier: String) -> some View {
-        Button { apply(nil) } label: {
-            Text(title).frame(maxWidth: .infinity, minHeight: 44)
-        }
-        .buttonStyle(.plain)
-        .foregroundStyle(Palette.textDim)
-        .accessibilityIdentifier(identifier)
     }
 
     private func apply(_ choice: AgentAvatarChoice?) {
