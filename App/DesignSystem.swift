@@ -260,23 +260,33 @@ enum AgentAvatarBadge: Equatable {
     }
 }
 
-/// The round avatar of a Messages-style agent row: the name's colour and initial, with the
-/// status as a 22 pt badge on its lower-right edge, ringed with the ground colour. The
-/// owner's roster and a guest's shared-agent list draw the same avatar.
+/// The round avatar of a Messages-style agent row: the agent's picture (`AgentAvatarView`:
+/// its photo or mascot, Herdy by default, herdrup#538), with the status as a 22 pt badge on
+/// its lower-right edge, ringed with the ground colour. The owner's roster and a guest's
+/// shared-agent list draw the same avatar.
 struct AgentAvatar: View {
     let name: String
     let badge: AgentAvatarBadge
     /// What VoiceOver reads for the badge: the status is colour + shape, so it is named.
     let badgeLabel: String
     var diameter: CGFloat = 52
+    /// The fallback circle's initial size (an unknown mascot id or a missing asset).
     var glyphSize: CGFloat = 22
+    /// The agent whose picture this is; nil draws the default.
+    var info: AgentInfo? = nil
+    /// The photo sheet's crop preview, shown instead of the agent's current picture.
+    var preview: UIImage? = nil
 
     var body: some View {
         ZStack(alignment: .bottomTrailing) {
-            Circle().fill(AgentIdentity.gradient(forName: name))
-                .frame(width: diameter, height: diameter)
-                .overlay(Text(AgentIdentity.glyph(forName: name))
-                    .font(Typography.app(glyphSize, .bold)).foregroundStyle(.white))
+            if let preview {
+                Image(uiImage: preview).resizable().interpolation(.high)
+                    .frame(width: diameter, height: diameter)
+                    .clipShape(Circle())
+                    .overlay(Circle().stroke(Palette.hairline, lineWidth: 1))
+            } else {
+                AgentAvatarView(agent: info, name: name, size: diameter, glyphSize: glyphSize)
+            }
             badgeView
                 .accessibilityLabel(Text(badgeLabel))
                 .offset(x: 4, y: 4)

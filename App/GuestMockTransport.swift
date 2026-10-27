@@ -303,7 +303,7 @@ struct GuestMockTransport: HerdrTransport {
         case .blocked: "blocked"
         }
         let running = scenario != .paused
-        return #"{"terminal_id":"w1-3","pane_id":"w1-3","name":"llm-opt","agent":"omp","display_agent":"omp","agent_status":"\#(status)","guest_running":\#(running)}"#
+        return #"{"terminal_id":"w1-3","avatar":{"style":"mascot","mascot":"pip","sha256":null,"updated_unix_ms":1723041000000},"pane_id":"w1-3","name":"llm-opt","agent":"omp","display_agent":"omp","agent_status":"\#(status)","guest_running":\#(running)}"#
     }
 
     /// Not shared with this guest; the UI must never show it.
