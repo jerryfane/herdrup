@@ -1,19 +1,35 @@
 import Foundation
 
-/// The Chat column's width on iPad and Mac (#523 items 2 and 12): the reader drags either edge
-/// of the column to resize it around its centre, between `minimum` and the whole width the chat
-/// has (Full), with snap points at Readable, Wide and Full. The composer takes the same width.
+/// The conversation column's width on iPad and Mac, shared by Chat and Gram (#523 items 2 and
+/// 12, #541): the reader drags either edge of the column to resize it around its centre,
+/// between `minimum` and the whole width the conversation has (Full), with snap points at
+/// Readable, Wide and Full. The composer takes the same width.
 ///
-/// The width is remembered per device under `storageKey`. A window narrower than the stored
-/// width shows the window's width (`displayed`) and leaves the stored width alone, so widening
-/// the window again brings the chosen width back.
-public enum ChatColumnWidth {
-    public static let storageKey = "chat.columnWidth"
+/// One width for both, remembered per device under `storageKey`: resizing Chat resizes Gram
+/// and the other way round. A window narrower than the stored width shows the window's width
+/// (`displayed`) and leaves the stored width alone, so widening the window again brings the
+/// chosen width back.
+public enum ConversationColumnWidth {
+    public static let storageKey = "conversation.columnWidth"
+    /// Where the width lived while only Chat had it. `migrate(_:)` moves it to `storageKey`.
+    public static let legacyChatStorageKey = "chat.columnWidth"
+
+    /// Moves a width stored under `legacyChatStorageKey` to `storageKey`, so a reader who sized
+    /// Chat keeps that width (now Gram's too). A width already under `storageKey` wins. Run at
+    /// launch, before any view reads the width.
+    public static func migrate(_ defaults: UserDefaults) {
+        guard let legacy = defaults.object(forKey: legacyChatStorageKey) else { return }
+        if defaults.object(forKey: storageKey) == nil, let width = (legacy as? NSNumber)?.doubleValue {
+            defaults.set(width, forKey: storageKey)
+        }
+        defaults.removeObject(forKey: legacyChatStorageKey)
+    }
+
     public static let minimum: Double = 560
     public static let readable: Double = 720
     public static let wide: Double = 1000
-    /// What Full stores: wider than any window, so it always shows as the whole width the chat
-    /// has, in this window and in a wider one.
+    /// What Full stores: wider than any window, so it always shows as the whole width the
+    /// conversation has, in this window and in a wider one.
     public static let full: Double = 100_000
     public static let defaultWidth = wide
     /// How close (in points) a dragged width must come to a snap point to land on it.
@@ -49,8 +65,8 @@ public enum ChatColumnWidth {
         min(sanitized(stored), max(0, available))
     }
 
-    /// `width` held between `minimum` and `available`. A chat narrower than the minimum is
-    /// shown whole.
+    /// `width` held between `minimum` and `available`. A conversation narrower than the minimum
+    /// is shown whole.
     public static func clamped(_ width: Double, available: Double) -> Double {
         min(max(0, available), max(minimum, width))
     }
@@ -81,7 +97,7 @@ public enum ChatColumnWidth {
         return snapped(clamped((start + 2 * outwards).rounded(), available: available), available: available)
     }
 
-    /// What to store for a width the reader chose in a chat `available` wide: Readable and
+    /// What to store for a width the reader chose in a conversation `available` wide: Readable and
     /// Wide as themselves, the whole width as `full` (so a wider window widens it too), any
     /// other width as it is.
     public static func stored(for width: Double, available: Double) -> Double {
@@ -91,7 +107,7 @@ public enum ChatColumnWidth {
         return width
     }
 
-    /// What a reset stores: Wide. A chat narrower than Wide shows it as Full.
+    /// What a reset stores: Wide. A conversation narrower than Wide shows it as Full.
     public static let resetWidth = wide
 
     /// The snap point `width` sits on, if any.

@@ -118,12 +118,12 @@ jobs:
       fail-fast: false
       matrix:
         shard: ${{ fromJSON(github.event.inputs.only_suite == '' && '["iphone-terminal","iphone-app","ipad","settings-gram"]' || '["focused"]') }}
-    # Worst test/build rounds (iPad), including Chat UX: 25 + 20 + 5 + 5 + 20,
-    # SwiftTerm build 10 + test 15, five 10-min diagnostic rounds + SwiftTerm's 15 = 165m.
-    # At most eight boot checks: first 10m, next seven 5m, each with 15s kill grace.
-    # That adds <47m, leaving >13m for setup/build/upload inside the 225m ceiling.
+    # Worst test/build rounds (iPad), including Chat UX and Gram column: 25 + 20 + 5 + 5 + 20 + 10,
+    # SwiftTerm build 10 + test 15, six 10-min diagnostic rounds + SwiftTerm's 15 = 185m.
+    # At most nine boot checks: first 10m, next eight 5m, each with 15s kill grace.
+    # That adds <53m, leaving >17m for setup/build/upload inside the 255m ceiling.
     # The deadline is a failure ceiling, not the expected green-run duration.
-    timeout-minutes: 225
+    timeout-minutes: 255
     env:
       SHARD: ${{ matrix.shard }}
       ONLY_SUITE: ${{ github.event.inputs.only_suite }}

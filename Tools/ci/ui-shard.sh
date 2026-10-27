@@ -324,6 +324,10 @@ case "$shard" in
     # 848 s of tests, past the old 15m once xcodebuild's own start-up was added.
     run_suite iPadChatUX "$IPAD_UDID" 20m -only-testing:HerdrUITests/ChatUXSmokeTests || failed=1
     check_classes_ran TestReceipts/iPadChatUX-first.xcresult ChatUXSmokeTests || failed=1
+    # Gram's column width (#541): handles, drag, snap, reset and relaunch on the iPad. The
+    # iPhone half (no handles) runs in the iPhone app round.
+    run_suite iPadGramColumn "$IPAD_UDID" 10m -only-testing:HerdrUITests/GramColumnTests || failed=1
+    check_classes_ran TestReceipts/iPadGramColumn-first.xcresult GramColumnTests || failed=1
     swiftterm_api iPad "$IPAD_UDID" || failed=1
     ;;
   settings-build)
