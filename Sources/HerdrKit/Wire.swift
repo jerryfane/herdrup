@@ -1157,6 +1157,8 @@ public struct ServerCapabilities: Decodable, Equatable, Sendable {
     /// `agent.avatar.set` / `agent.avatar.get` exist and `AgentInfo.avatar` is reported
     /// (herdrup#538). False hides the avatar editing UI; agents still show Herdy.
     public let agentAvatar: Bool
+    /// `agent.groups.get` / `agent.groups.set`: the owner's agent folders and stars (#552).
+    public let agentGroups: Bool
 
     enum CodingKeys: String, CodingKey {
         case liveHandoff = "live_handoff"
@@ -1171,6 +1173,7 @@ public struct ServerCapabilities: Decodable, Equatable, Sendable {
         case agentTranscript = "agent_transcript"
         case agentAnswer = "agent_answer"
         case agentAvatar = "agent_avatar"
+        case agentGroups = "agent_groups"
     }
 
     public init(from decoder: Decoder) throws {
@@ -1190,6 +1193,7 @@ public struct ServerCapabilities: Decodable, Equatable, Sendable {
         agentTranscript = try c.decodeIfPresent(Bool.self, forKey: .agentTranscript) ?? false
         agentAnswer = try c.decodeIfPresent(Bool.self, forKey: .agentAnswer) ?? false
         agentAvatar = try c.decodeIfPresent(Bool.self, forKey: .agentAvatar) ?? false
+        agentGroups = try c.decodeIfPresent(Bool.self, forKey: .agentGroups) ?? false
     }
 }
 
