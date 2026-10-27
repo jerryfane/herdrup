@@ -280,8 +280,11 @@ case "$shard" in
     run_suite iPhoneChat "$IPHONE_UDID" 10m -only-testing:HerdrUITests/ChatViewTests || failed=1
     check_classes_ran TestReceipts/iPhoneChat-first.xcresult ChatViewTests || failed=1
     # Chat UX owns a separate round so its keyboard/history checks cannot consume
-    # the general app suite's existing 30-minute deadline.
-    run_suite iPhoneChatUX "$IPHONE_UDID" 15m -only-testing:HerdrUITests/ChatUXSmokeTests || failed=1
+    # the general app suite's existing 30-minute deadline. 20m, as on iPad: round 4 added
+    # three cases (colours 82 s, thought 36 s, SVG 50 s in run 40537708095) to the 478 s
+    # the suite took in run 40470715282, and that run spent 874 s on 17 of its 19 cases,
+    # so 15m ran out while the last case was launching.
+    run_suite iPhoneChatUX "$IPHONE_UDID" 20m -only-testing:HerdrUITests/ChatUXSmokeTests || failed=1
     check_classes_ran TestReceipts/iPhoneChatUX-first.xcresult ChatUXSmokeTests || failed=1
     # PagingTests (~4.3 min) run here too: every class in the app round slowed together
     # from run to run (23.7, 26.9 and 29.0 min of tests in runs 39938860577, 39954390114
@@ -320,6 +323,12 @@ case "$shard" in
     run_suite iPadControl "$IPAD_UDID" 20m -only-testing:HerdrUITests/TerminalControlTests || failed=1
     run_suite iPadSelectAgent "$IPAD_UDID" 5m -only-testing:HerdrUITests/SelectAgentFieldTests || failed=1
     run_suite iPadAgentListChrome "$IPAD_UDID" 5m -only-testing:HerdrUITests/AgentListChromeTests || failed=1
+    # AgentListChromeTests leaves the app in a shrunk window on purpose, and iPadOS may
+    # restore that window on later launches. Run 40537708095 did: NeedsYouPill and the first
+    # ChatUX cases ran in a 722 pt window (1444 px screenshots, no chat-width handles, frames
+    # off the screenshots' pixels) and failed four ChatUX cases that pass full screen.
+    # Uninstalling discards the app's scenes, so the rounds below start full screen.
+    xcrun simctl uninstall "$IPAD_UDID" com.jerryfane.herdr 2>/dev/null || true
     # The needs-you pill pinned at the top of the sidebar (#551).
     run_suite iPadNeedsYouPill "$IPAD_UDID" 5m -only-testing:HerdrUITests/NeedsYouPillTests || failed=1
     # 20m: the chat-width tests (#523, ~100 s on iPad) took run 40289743354's slow runner to
