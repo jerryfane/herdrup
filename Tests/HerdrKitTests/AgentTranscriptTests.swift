@@ -229,7 +229,7 @@ final class TranscriptGroupingTests: XCTestCase {
             e("s1", 2_000, step("Reading the code")),
             e("t2", 3_000, .thinking(text: "  ")),
             e("r1", 4_000, .reply(text: "Found it, patching now.", final: false)),
-            e("s2", 5_000, step("Patching")),
+            e("s2", 5_000, .step(TranscriptStep(tool: "edit", intent: "Patching", status: .ok))),
             e("s3", 65_000, step("Testing")),
             e("r2", 125_000, .reply(text: "Done.", final: true)),
             e("end1", 126_000, .turnEnd(status: .done, error: nil)),
@@ -249,6 +249,8 @@ final class TranscriptGroupingTests: XCTestCase {
         XCTAssertEqual(first.thoughts, ["First idea"])
         XCTAssertEqual(first.steps.map(\.intent), ["Reading the code"])
         XCTAssertEqual(second.steps.map(\.intent), ["Patching", "Testing"])
+        // Each step row carries omp's tool name, which the chat draws before the intent.
+        XCTAssertEqual(second.steps.map(\.tool), ["edit", "bash"])
         // A group's work lasts until whatever follows it.
         XCTAssertEqual(second.startMs, 5_000)
         XCTAssertEqual(second.endMs, 125_000)

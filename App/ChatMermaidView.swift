@@ -167,7 +167,7 @@ struct ChatMermaidView: View {
     /// Mermaid could not draw it: the code block, as before diagrams existed, and why.
     private var fallback: some View {
         VStack(alignment: .leading, spacing: 4) {
-            GramCodeBlock(code: source, language: "mermaid", textScale: textScale)
+            GramCodeBlock(code: source, language: "mermaid", textScale: textScale, syntax: .current)
             Text("Diagram couldn't render")
                 .font(Typography.app(12 * textScale))
                 .foregroundStyle(Palette.textFaint)

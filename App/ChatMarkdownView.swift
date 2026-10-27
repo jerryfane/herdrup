@@ -32,7 +32,7 @@ struct ChatMarkdownView: View {
                 .fixedSize(horizontal: false, vertical: true)
         case .heading(let level, let text):
             Text(ChatInline.styled(text, size: (level == 1 ? 23 : level == 2 ? 20 : 17) * textScale, weight: .semibold))
-                .foregroundStyle(Palette.text)
+                .foregroundStyle(Color(hex: ChatPalette.current.heading))
                 .lineSpacing(2)
                 .padding(.top, 4)
                 .fixedSize(horizontal: false, vertical: true)
@@ -44,7 +44,7 @@ struct ChatMarkdownView: View {
             }
             .padding(.top, 2)
         case .code(let language, let code):
-            GramCodeBlock(code: code, language: language, textScale: textScale)
+            GramCodeBlock(code: code, language: language, textScale: textScale, syntax: .current)
         case .diagram(_, let source):
             ChatMermaidView(source: source)
         case .table(let header, let rows):
@@ -171,9 +171,15 @@ enum ChatMarkdownCache {
         mutating func value(for key: Key, make: () -> Value) -> Value {
             if let value = values[key] { return value }
             let value = make()
+            store(value, for: key)
+            return value
+        }
+
+        func cached(_ key: Key) -> Value? { values[key] }
+
+        mutating func store(_ value: Value, for key: Key) {
             if values.count >= limit { values.removeAll(keepingCapacity: true) }
             values[key] = value
-            return value
         }
     }
 }

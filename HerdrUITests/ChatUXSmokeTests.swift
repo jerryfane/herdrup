@@ -418,6 +418,113 @@ final class ChatUXSmokeTests: XCTestCase {
         XCTAssertEqual(app.state, .runningForeground)
     }
 
+    /// Scrolls the chat until `element` sits well inside the transcript: clear of the header,
+    /// and of the composer and the fade above it, so its pixels are the colours drawn.
+    private func bringIntoView(_ element: XCUIElement, in app: XCUIApplication, _ what: String,
+                               file: StaticString = #filePath, line: UInt = #line) {
+        let chat = app.descendants(matching: .any)["chat-view"].firstMatch
+        let composer = app.descendants(matching: .any)["composer-card"].firstMatch
+        for _ in 0..<8 {
+            let top = chat.frame.minY + 48
+            let bottom = (composer.exists ? composer.frame.minY : chat.frame.maxY) - 48
+            let frame = element.frame
+            if frame.minY >= top, frame.maxY <= bottom { return }
+            let middle = chat.coordinate(withNormalizedOffset: CGVector(dx: 0.5, dy: 0.45))
+            let step = min(180, max(60, frame.minY < top ? top - frame.minY : frame.maxY - bottom))
+            middle.press(forDuration: 0.05, thenDragTo: middle.withOffset(CGVector(dx: 0, dy: frame.minY < top ? step : -step)))
+            Thread.sleep(forTimeInterval: 0.8)
+        }
+        XCTFail("\(what) never came into view: \(element.frame)", file: file, line: line)
+    }
+
+    /// #550: the chat in omp's theme (dark-tokyo-night). Headings and each step's tool name
+    /// are in the accent; code in a known language is highlighted on the theme's code ground,
+    /// a language the highlighter does not know stays plain, and typing over all of it draws
+    /// no transcript row (#536).
+    func testChatDrawsTheThemesAccentAndSyntaxColours() throws {
+        let accent: UInt32 = 0xBB9AF7, codeText: UInt32 = 0xA9B1D6, codeBackground: UInt32 = 0x16161E
+        let string: UInt32 = 0x9ECE6A, comment: UInt32 = 0x51597D, function: UInt32 = 0x7AA2F7
+        let number: UInt32 = 0xFF9E64, type: UInt32 = 0x0DB9D7
+        let app = launch(longSession: true, environment: ["HERDR_CHAT_UX_COLOURS": "1"])
+        let heading = app.staticTexts["Why the list jumps"]
+        XCTAssertTrue(heading.waitForExistence(timeout: 12), app.debugDescription)
+        bringIntoView(heading, in: app, "the heading")
+
+        // The steps line just above the reply opens to rows that each name their tool.
+        let toggles = app.buttons.matching(identifier: "chat-steps").allElementsBoundByIndex
+        let toggle = try XCTUnwrap(toggles.filter { $0.frame.maxY <= heading.frame.minY }.max { $0.frame.minY < $1.frame.minY },
+                                   app.debugDescription)
+        toggle.tap()
+        let read = app.descendants(matching: .any).matching(NSPredicate(
+            format: "identifier == 'chat-step' AND label == %@", "read, Reading the sort in AgentList.swift")).firstMatch
+        XCTAssertTrue(read.waitForExistence(timeout: 5), app.debugDescription)
+        for label in ["search, Searching for scrollPosition", "edit, Anchoring the list on the visible row",
+                      "bash, Running the scroll tests"] {
+            XCTAssertTrue(app.descendants(matching: .any).matching(NSPredicate(
+                format: "identifier == 'chat-step' AND label == %@", label)).firstMatch.exists,
+                          "the step should read \(label): \(app.debugDescription)")
+        }
+        bringIntoView(read, in: app, "the read step")
+        var pixels = try XCTUnwrap(ScreenPixels(app.screenshot()))
+        XCTAssertGreaterThan(pixels.count(accent, in: read.frame), 15, "the step's tool name should be in the accent")
+
+        bringIntoView(heading, in: app, "the heading")
+        let swift = app.staticTexts.matching(NSPredicate(format: "identifier == 'gram-code-text' AND label CONTAINS 'resort'")).firstMatch
+        XCTAssertTrue(swift.waitForExistence(timeout: 5), app.debugDescription)
+        bringIntoView(swift, in: app, "the Swift block")
+        let window = app.windows.firstMatch.frame
+        // Highlighting runs off the main thread: give it a moment to land.
+        for _ in 0..<10 {
+            pixels = try XCTUnwrap(ScreenPixels(app.screenshot()))
+            if pixels.count(string, in: swift.frame.intersection(window)) > 0 { break }
+            Thread.sleep(forTimeInterval: 0.5)
+        }
+        record(app, "chat-colours")
+        XCTAssertGreaterThan(pixels.count(accent, in: heading.frame), 30, "the heading should be in the accent")
+        let paragraph = app.staticTexts["The re-sort moves the row under your finger."]
+        XCTAssertTrue(paragraph.exists, app.debugDescription)
+        XCTAssertEqual(pixels.count(accent, in: paragraph.frame), 0, "body text stays the text colour")
+        let swiftFrame = swift.frame.intersection(window)
+        for (colour, kind) in [(accent, "keywords"), (string, "strings"), (comment, "comments"), (function, "functions"),
+                               (number, "numbers"), (type, "types"), (codeText, "plain code")] {
+            XCTAssertGreaterThan(pixels.count(colour, in: swiftFrame), 8, "the Swift block should colour its \(kind)")
+        }
+        XCTAssertGreaterThan(pixels.count(codeBackground, in: swiftFrame), 500, "code sits on the theme's code ground")
+
+        let bash = app.staticTexts.matching(NSPredicate(format: "identifier == 'gram-code-text' AND label CONTAINS 'git status'")).firstMatch
+        let plain = app.staticTexts.matching(NSPredicate(format: "identifier == 'gram-code-text' AND label CONTAINS 'plain notes'")).firstMatch
+        XCTAssertTrue(plain.waitForExistence(timeout: 5), app.debugDescription)
+        bringIntoView(plain, in: app, "the plain block")
+        bringIntoView(bash, in: app, "the bash block")
+        for _ in 0..<10 {
+            pixels = try XCTUnwrap(ScreenPixels(app.screenshot()))
+            if pixels.count(string, in: bash.frame.intersection(window)) > 0 { break }
+            Thread.sleep(forTimeInterval: 0.5)
+        }
+        record(app, "chat-colours-code")
+        let bashFrame = bash.frame.intersection(window)
+        for (colour, kind) in [(comment, "comment"), (function, "commands"), (string, "string")] {
+            XCTAssertGreaterThan(pixels.count(colour, in: bashFrame), 8, "the bash block should colour its \(kind)")
+        }
+        let plainFrame = plain.frame.intersection(window)
+        XCTAssertGreaterThan(pixels.count(codeText, in: plainFrame), 8, "an unknown language is drawn in the code text colour")
+        for colour in [accent, string, number, function] {
+            XCTAssertEqual(pixels.count(colour, in: plainFrame), 0,
+                           String(format: "an unknown language stays plain, but #%06X shows", colour))
+        }
+
+        // Typing over highlighted code draws no transcript row.
+        let field = app.textViews["terminal-reply-input"]
+        XCTAssertTrue(field.waitForExistence(timeout: 5))
+        field.tap()
+        XCTAssertTrue(app.keyboards.firstMatch.waitForExistence(timeout: 5))
+        Thread.sleep(forTimeInterval: 2)
+        let before = rowRenders(app)
+        field.typeText("colours stay put while typing")
+        Thread.sleep(forTimeInterval: 1.5)
+        XCTAssertEqual(rowRenders(app) - before, 0, "typing re-rendered transcript rows")
+    }
+
     /// herdrup#523 item 8: a one-letter search on a long chat froze the app until it was
     /// killed. On the large fixture it must cap the count, draw only a window of results,
     /// step through matches, and narrow to an exact count as the term grows.

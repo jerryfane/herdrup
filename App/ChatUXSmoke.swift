@@ -46,6 +46,40 @@ enum ChatUXSmoke {
                             "text": "Copy **this** reply, then *paste* it.\n\n```swift\nlet copied = true\nprint(copied)\n```",
                             "ts_ms": timestamp + 2])
         }
+        // omp's theme colours (#550): steps with their tool names, headings, and code blocks
+        // in known languages and in one the highlighter does not know.
+        if ProcessInfo.processInfo.environment["HERDR_CHAT_UX_COLOURS"] == "1" {
+            for (n, step) in [("read", "Reading the sort in AgentList.swift"), ("search", "Searching for scrollPosition"),
+                              ("edit", "Anchoring the list on the visible row"), ("bash", "Running the scroll tests")].enumerated() {
+                entries.append(["id": "ux-colours-s\(n)", "kind": "step", "tool": step.0, "intent": step.1, "status": "ok",
+                                "ts_ms": timestamp + 2])
+            }
+            entries.append(["id": "ux-colours", "kind": "reply", "final": true, "ts_ms": timestamp + 2, "text": """
+                ## Why the list jumps
+
+                The re-sort moves the row under your finger.
+
+                ```swift
+                // Keep the visible row anchored
+                func resort(_ rows: [Row]) -> [Row] {
+                    let name = "herdr", limit = 42
+                    return rows.sorted { $0.rank < $1.rank }
+                }
+                ```
+
+                ### Check it
+
+                ```bash
+                # Run the scroll tests
+                git status --short | wc -l
+                echo "done"
+                ```
+
+                ```text
+                plain notes stay plain: "quoted" 42
+                ```
+                """])
+        }
         // A diagram reply (#523 item 1), only when a test asks for it: its row grows once the
         // offscreen renderer finishes, which the tail and history-position tests must not see.
         if ProcessInfo.processInfo.environment["HERDR_CHAT_UX_MERMAID"] == "1" {

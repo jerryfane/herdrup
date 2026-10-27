@@ -400,13 +400,33 @@ struct GramLoneMessage<Header: View, Card: View>: View {
 /// Copy WRITES the pasteboard only (never reads it: a programmatic read raises the system
 /// paste prompt), through the receipt `CopyableCommand` uses, so only the block whose code
 /// is actually on the clipboard says "Copied", and only for a moment.
+///
+/// With a `syntax` palette (the chat's, `ChatPalette`) the block takes the theme's code
+/// background, border and text, and a known language is highlighted off the main thread
+/// (`ChatCodeHighlights`); the plain code shows until then. Gram passes none.
 struct GramCodeBlock: View {
     let code: String
     let language: String?
     /// The chat's text-size scale (`chatTextScale`) for the code; Gram keeps 1.
     var textScale: CGFloat = 1
+    var syntax: ChatPalette?
 
     @State private var receipt = CopiedCommandReceipt.shared
+    /// The highlighted code, kept with its key: a streaming reply's block keeps its identity
+    /// while its code grows, and must not show an older highlight.
+    @State private var highlighted: Highlighted?
+
+    private struct Highlighted {
+        let key: ChatCodeHighlights.Key
+        let text: AttributedString
+    }
+
+    /// What to highlight, or nil to draw the code plain (Gram, or a language the
+    /// highlighter does not know).
+    private var highlightKey: ChatCodeHighlights.Key? {
+        guard let syntax, let known = CodeLanguage(fence: language) else { return nil }
+        return ChatCodeHighlights.Key(code: code, language: known, palette: syntax)
+    }
 
     private var copied: Bool { receipt.text == code }
     private var isOneLine: Bool { !code.contains("\n") }
@@ -456,18 +476,33 @@ struct GramCodeBlock: View {
             }
         }
         .frame(maxWidth: .infinity, alignment: .leading)
-        .background(Palette.groundMachine, in: Self.shape)
-        .overlay(Self.shape.strokeBorder(Palette.hairline, lineWidth: 1))
+        .background(syntax.map { Color(hex: $0.codeBackground) } ?? Palette.groundMachine, in: Self.shape)
+        .overlay(Self.shape.strokeBorder(syntax.map { Color(hex: $0.codeBorder) } ?? Palette.hairline, lineWidth: 1))
+        .task(id: highlightKey) {
+            guard let highlightKey, highlighted?.key != highlightKey else { return }
+            let text = await ChatCodeHighlights.highlight(highlightKey)
+            guard !Task.isCancelled else { return }
+            highlighted = Highlighted(key: highlightKey, text: text)
+        }
     }
 
     private var codeText: some View {
         ScrollView(.horizontal, showsIndicators: false) {
-            Text(code)
+            codeLine
                 .font(textScale == 1 ? GramType.code : Typography.machine(13 * textScale))
                 .lineSpacing(GramType.codeLineSpacing * textScale)
-                .foregroundStyle(Palette.text)
+                .foregroundStyle(syntax.map { Color(hex: $0.codeText) } ?? Palette.text)
                 .fixedSize()
+                .accessibilityIdentifier("gram-code-text")
         }
+    }
+
+    private var codeLine: Text {
+        guard let key = highlightKey else { return Text(code) }
+        if let highlighted, highlighted.key == key { return Text(highlighted.text) }
+        // A block drawn again reads its highlight at once, with no plain frame first.
+        if let cached = ChatCodeHighlights.cached(key) { return Text(cached) }
+        return Text(code)
     }
 
     private func copyGlyph(size: CGFloat, tint: Color) -> some View {
