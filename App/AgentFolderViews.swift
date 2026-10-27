@@ -71,27 +71,41 @@ struct AgentFolderRow: View {
     }
 }
 
-/// The folder picture: up to four of its agents' initials in a round tile.
+/// The folder picture: up to four of its agents' initials in a round tile, two to a line.
+///
+/// EAGER STACKS, NEVER A LAZY GRID. This sits in a row of the Agents list's LazyVStack, and a
+/// lazy container nested in a lazy, scrolling one re-decides its visible cells on every scroll
+/// frame: with a LazyVGrid here the list's first vertical scroll with a folder row on screen
+/// left the main thread busy for good (the app never went idle, every UI query timed out;
+/// CI runs 40477652920, 40510969880, 40523767393), whichever row gesture was in use.
 struct AgentFolderPicture: View {
     let names: [String]
     let diameter: CGFloat
 
     var body: some View {
         let cell = (diameter - 17) / 2
-        let columns = [GridItem(.fixed(cell), spacing: 3), GridItem(.fixed(cell), spacing: 3)]
-        LazyVGrid(columns: columns, spacing: 3) {
-            ForEach(Array(names.enumerated()), id: \.offset) { _, name in
-                Text(AgentIdentity.glyph(forName: name))
-                    .font(.system(size: cell * 0.5, weight: .bold))
-                    .foregroundStyle(.white)
-                    .frame(width: cell, height: cell)
-                    .background(Circle().fill(AgentIdentity.gradient(forName: name)))
+        let lines = stride(from: 0, to: names.count, by: 2).map { Array(names[$0..<min($0 + 2, names.count)]) }
+        VStack(spacing: 3) {
+            ForEach(lines.indices, id: \.self) { line in
+                HStack(spacing: 3) {
+                    ForEach(lines[line].indices, id: \.self) { index in
+                        initial(lines[line][index], cell: cell)
+                    }
+                }
             }
         }
         .frame(width: diameter, height: diameter)
         .background(Circle().fill(Palette.surfaceRaised))
         .overlay(Circle().stroke(Palette.hairline, lineWidth: 1))
         .accessibilityHidden(true)
+    }
+
+    private func initial(_ name: String, cell: CGFloat) -> some View {
+        Text(AgentIdentity.glyph(forName: name))
+            .font(.system(size: cell * 0.5, weight: .bold))
+            .foregroundStyle(.white)
+            .frame(width: cell, height: cell)
+            .background(Circle().fill(AgentIdentity.gradient(forName: name)))
     }
 }
 
