@@ -132,33 +132,6 @@ for node in data.get("testNodes", []):
 '
 }
 
-# TEMPORARY, REMOVE BEFORE MERGE (folders hang diagnosis, herdrup#552). When XCTest logs
-# that the app under test never went idle, take two 3 s samples of every thread of the app,
-# 10 s apart, into TestReceipts (uploaded with the job's receipts): where the main thread is
-# stuck, and whether it stays there. `sample` runs on the host against the simulator's app
-# process; sudo (passwordless on hosted runners) avoids a task_for_pid refusal.
-watch_for_hangs() {
-  local log="$1" prefix="$2" seen=0 count pid n=0
-  while sleep 5; do
-    count=$(grep -c "App event loop idle notification not received" "$log" 2>/dev/null) || true
-    [ "${count:-0}" -gt "$seen" ] || continue
-    seen=$count
-    n=$((n + 1))
-    pid=$(pgrep -nf '/Herdr\.app/Herdr( |$)') || { echo "no Herdr process" >"$prefix-$n.txt"; continue; }
-    {
-      echo "hang $n: pid $pid at $(date -u +%FT%TZ)"
-      grep -E "^Test Case '.*' started" "$log" | tail -1
-    } >"$prefix-$n.txt"
-    sudo -n sample "$pid" 3 -mayDie -file "$prefix-$n-a.txt" >>"$prefix-$n.txt" 2>&1 \
-      || sample "$pid" 3 -mayDie -file "$prefix-$n-a.txt" >>"$prefix-$n.txt" 2>&1
-    sleep 10
-    sudo -n sample "$pid" 3 -mayDie -file "$prefix-$n-b.txt" >>"$prefix-$n.txt" 2>&1 \
-      || sample "$pid" 3 -mayDie -file "$prefix-$n-b.txt" >>"$prefix-$n.txt" 2>&1
-    sudo -n chmod a+r "$prefix-$n"-*.txt 2>/dev/null || true
-    [ "$n" -ge 4 ] && return 0
-  done
-}
-
 run_suite() {
   local label="$1" udid="$2" budget="$3"
   shift 3
@@ -169,9 +142,6 @@ run_suite() {
   # A WALL-CLOCK BOUND PER INVOCATION, so one wedged case cannot eat the job budget
   # and take the receipt upload down with it. Per-case allowances make xcodebuild
   # fail a stuck test with diagnostics instead of blocking to the deadline.
-  : >"TestReceipts/$label-first.log"
-  watch_for_hangs "TestReceipts/$label-first.log" "TestReceipts/$label-hang" &
-  local hang_watcher=$!
   "$TIMEOUT_BIN" --signal=INT "$budget" xcodebuild test-without-building "${PROJECT[@]}" \
       -destination "platform=iOS Simulator,id=$udid" \
       -parallel-testing-enabled NO \
@@ -180,8 +150,6 @@ run_suite() {
       -maximum-test-execution-time-allowance 600 \
       -resultBundlePath "TestReceipts/$label-first.xcresult" \
       "$@" 2>&1 | tee "TestReceipts/$label-first.log" | xcbeautify || status=$?
-  kill "$hang_watcher" 2>/dev/null || true
-  wait "$hang_watcher" 2>/dev/null || true
   # The first case's result and time is the first real XCTest launch after install.
   grep -m1 -E "^Test Case '.*' (passed|failed|skipped) \(" "TestReceipts/$label-first.log" \
     | sed 's/^/first test after install: /' >>"TestReceipts/$label-install.log" || true
