@@ -280,8 +280,11 @@ case "$shard" in
     run_suite iPhoneChat "$IPHONE_UDID" 10m -only-testing:HerdrUITests/ChatViewTests || failed=1
     check_classes_ran TestReceipts/iPhoneChat-first.xcresult ChatViewTests || failed=1
     # Chat UX owns a separate round so its keyboard/history checks cannot consume
-    # the general app suite's existing 30-minute deadline.
-    run_suite iPhoneChatUX "$IPHONE_UDID" 15m -only-testing:HerdrUITests/ChatUXSmokeTests || failed=1
+    # the general app suite's existing 30-minute deadline. 20m, as on iPad: round 4 added
+    # three cases (colours 82 s, thought 36 s, SVG 50 s in run 40537708095) to the 478 s
+    # the suite took in run 40470715282, and that run spent 874 s on 17 of its 19 cases,
+    # so 15m ran out while the last case was launching.
+    run_suite iPhoneChatUX "$IPHONE_UDID" 20m -only-testing:HerdrUITests/ChatUXSmokeTests || failed=1
     check_classes_ran TestReceipts/iPhoneChatUX-first.xcresult ChatUXSmokeTests || failed=1
     # PagingTests (~4.3 min) run here too: every class in the app round slowed together
     # from run to run (23.7, 26.9 and 29.0 min of tests in runs 39938860577, 39954390114
@@ -319,7 +322,8 @@ case "$shard" in
     # Leave room for the remaining cases; individual test limits and failures are unchanged.
     run_suite iPadControl "$IPAD_UDID" 20m -only-testing:HerdrUITests/TerminalControlTests || failed=1
     run_suite iPadSelectAgent "$IPAD_UDID" 5m -only-testing:HerdrUITests/SelectAgentFieldTests || failed=1
-    run_suite iPadAgentListChrome "$IPAD_UDID" 5m -only-testing:HerdrUITests/AgentListChromeTests || failed=1
+    # The needs-you pill pinned at the top of the sidebar (#551).
+    run_suite iPadNeedsYouPill "$IPAD_UDID" 5m -only-testing:HerdrUITests/NeedsYouPillTests || failed=1
     # 20m: the chat-width tests (#523, ~100 s on iPad) took run 40289743354's slow runner to
     # 848 s of tests, past the old 15m once xcodebuild's own start-up was added.
     run_suite iPadChatUX "$IPAD_UDID" 20m -only-testing:HerdrUITests/ChatUXSmokeTests || failed=1
@@ -328,6 +332,12 @@ case "$shard" in
     # iPhone half (no handles) runs in the iPhone app round.
     run_suite iPadGramColumn "$IPAD_UDID" 10m -only-testing:HerdrUITests/GramColumnTests || failed=1
     check_classes_ran TestReceipts/iPadGramColumn-first.xcresult GramColumnTests || failed=1
+    # Last of the app rounds: AgentListChromeTests shrinks the app into a window on purpose,
+    # and iPadOS keeps that window for later launches, even across a reinstall. Run
+    # 40537708095 (and 40552658219, which uninstalled the app after this round) ran
+    # NeedsYouPill and the first ChatUX cases in a 715-722 pt window: no room for the chat
+    # column and pixel probes off the window, failing four ChatUX cases that pass full screen.
+    run_suite iPadAgentListChrome "$IPAD_UDID" 5m -only-testing:HerdrUITests/AgentListChromeTests || failed=1
     swiftterm_api iPad "$IPAD_UDID" || failed=1
     ;;
   settings-build)

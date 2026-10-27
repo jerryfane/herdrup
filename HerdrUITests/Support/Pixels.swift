@@ -42,3 +42,52 @@ extension XCTestCase {
         return data
     }
 }
+
+/// A screenshot's pixels in sRGB, so a colour can be looked up by the hex the app draws it in.
+struct ScreenPixels {
+    private let bytes: [UInt8]
+    private let width: Int
+    private let height: Int
+    /// Pixels per point.
+    private let scale: CGFloat
+
+    init?(_ shot: XCUIScreenshot) {
+        guard let image = shot.image.cgImage, shot.image.size.width > 0,
+              let space = CGColorSpace(name: CGColorSpace.sRGB) else { return nil }
+        let width = image.width, height = image.height
+        var bytes = [UInt8](repeating: 0, count: width * height * 4)
+        // CGContext's rows run top-down in memory, the screenshot's order.
+        let drawn = bytes.withUnsafeMutableBytes { buffer -> Bool in
+            guard let context = CGContext(data: buffer.baseAddress, width: width, height: height,
+                                          bitsPerComponent: 8, bytesPerRow: width * 4, space: space,
+                                          bitmapInfo: CGImageAlphaInfo.premultipliedLast.rawValue) else { return false }
+            context.draw(image, in: CGRect(x: 0, y: 0, width: width, height: height))
+            return true
+        }
+        guard drawn else { return nil }
+        self.bytes = bytes
+        self.width = width
+        self.height = height
+        scale = CGFloat(width) / shot.image.size.width
+    }
+
+    /// How many pixels inside `rect` (in points) are within `tolerance` per channel of `hex`.
+    func count(_ hex: UInt32, in rect: CGRect, tolerance: Int = 14) -> Int {
+        let r = Int((hex >> 16) & 0xFF), g = Int((hex >> 8) & 0xFF), b = Int(hex & 0xFF)
+        let x0 = max(0, Int(rect.minX * scale)), x1 = min(width, Int(rect.maxX * scale))
+        let y0 = max(0, Int(rect.minY * scale)), y1 = min(height, Int(rect.maxY * scale))
+        guard x1 > x0, y1 > y0 else { return 0 }
+        var hits = 0
+        for y in y0..<y1 {
+            var i = (y * width + x0) * 4
+            for _ in x0..<x1 {
+                if abs(Int(bytes[i]) - r) <= tolerance, abs(Int(bytes[i + 1]) - g) <= tolerance,
+                   abs(Int(bytes[i + 2]) - b) <= tolerance {
+                    hits += 1
+                }
+                i += 4
+            }
+        }
+        return hits
+    }
+}

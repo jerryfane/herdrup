@@ -333,6 +333,9 @@ struct RootView: View {
         case .archivedClose:
             TerminalHomeView(client: HerdrClient(transport: ForgetCapableMockTransport()), onDisconnect: {},
                              onTrustHostKey: { _ in false }, livePaneIDs: MockWireFixtures.demoLivePaneIDs)
+        case .needsYou:
+            TerminalHomeView(client: HerdrClient(transport: NeedsYouMockTransport()), onDisconnect: {},
+                             onTrustHostKey: { _ in false })
         case .sessions:
             SessionsMockHome()
         case .liveEvents, .liveEventsLegacy:
@@ -1741,6 +1744,9 @@ struct TerminalHomeView: View {
     @State private var pendingRoster = AgentRosterPendingBuffer()
     @State private var rosterLoadGate = AgentRosterLoadGateBuffer()
     @State private var rosterScroll = AgentRosterScrollBuffer()
+    /// Whether the waiting rows are scrolled out of sight. Held, not observed: only the
+    /// needs-you pill redraws when it flips (#551).
+    @State private var needsYouSight = NeedsYouSight()
     @State private var liveEvents = AgentRosterLiveEventsBuffer()
     /// The daemon advertises `events_v2` (from `agent.list` `origin_capabilities`, or
     /// `ping` on a daemon without that field). Observable because it keys the stream
@@ -3619,10 +3625,12 @@ struct TerminalHomeView: View {
     private var agentRosterScrollContent: some View {
         ScrollView {
             agentRosterStack
+                .coordinateSpace(name: agentRosterContentSpace)
                 .background {
                     ScrollActivityObserver(
                         isEnabled: agentRosterIsVisible,
-                        onChange: setAgentListScrolling
+                        onChange: setAgentListScrolling,
+                        onSample: needsYouSight.sample
                     )
                 }
         }
@@ -3636,6 +3644,20 @@ struct TerminalHomeView: View {
         // A covered or hidden roster keeps its rows built; their working rings must not
         // keep turning behind the pane or another tab.
         .environment(\.statusMotion, agentRosterIsVisible)
+        // Pinned under the top bar (the sidebar's top on iPad and Mac). An overlay, so it
+        // never takes part in the list's layout. Hidden while searching: the filtered list
+        // may not show the waiting rows at all.
+        .overlay(alignment: .top) {
+            NeedsYouPill(
+                sight: needsYouSight,
+                waiting: search.isEmpty ? fullList.rows.filter { $0.group == .needsYou } : [],
+                onScrollToTop: { needsYouSight.scrollToTop() },
+                onOpen: { row in
+                    open(PaneSlot(paneID: row.info.paneID, title: row.title, agent: row.info,
+                                  initialReply: "", siblings: orderedSiblings))
+                }
+            )
+        }
     }
 
     /// Compact layouts cover the roster when a terminal is fronted. Regular-width
@@ -3677,7 +3699,12 @@ struct TerminalHomeView: View {
         } else {
             let aboveOpen = itemAboveOpenRow(visibleSections)
             ForEach(visibleSections, id: \.group) { section in
-                sectionView(section.group, section.rows, aboveOpen: aboveOpen)
+                if section.group == .needsYou && search.isEmpty {
+                    sectionView(section.group, section.rows, aboveOpen: aboveOpen)
+                        .reportsWaitingRowsBottom(to: needsYouSight)
+                } else {
+                    sectionView(section.group, section.rows, aboveOpen: aboveOpen)
+                }
             }
         }
         // Archived agents sit below the live herd (above terminals) and only
@@ -9377,6 +9404,8 @@ enum ScreenshotMock {
     // The omp Chat view (#481): the Agents home over `ChatMockTransport`, and a guest's
     // shared omp agent with its Chat tab (#482).
     case chatView, guestChat
+    // The Agents home with a long roster and `HERDR_MOCK_WAITING` agents asking (#551).
+    case needsYou
 
     static var mode: ScreenshotMock? {
         let env = ProcessInfo.processInfo.environment["HERDR_SCREENSHOT_MOCK"]?.lowercased()
@@ -9392,6 +9421,7 @@ enum ScreenshotMock {
         case "liveevents": return .liveEvents
         case "archivedclose": return .archivedClose
         case "sessions": return .sessions
+        case "needsyou": return .needsYou
         case "liveevents-legacy": return .liveEventsLegacy
         case "pane": return .pane
         case "settings": return .settings

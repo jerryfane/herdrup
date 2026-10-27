@@ -1,8 +1,9 @@
+import UIKit
 import XCTest
 
 final class ChatUXSmokeTests: XCTestCase {
     private func launch(failingRefresh: Bool = false, pendingQuestion: Bool = false, large: Bool = false,
-                        copyFixture: Bool = false, plan: String = "", mermaid: Bool = false,
+                        copyFixture: Bool = false, plan: String = "", mermaid: Bool = false, svg: Bool = false,
                         longSession: Bool = false, subagents: Bool = false,
                         environment: [String: String] = [:]) -> XCUIApplication {
         continueAfterFailure = false
@@ -14,6 +15,7 @@ final class ChatUXSmokeTests: XCTestCase {
             "HERDR_CHAT_UX_COPY": copyFixture ? "1" : "0",
             "HERDR_CHAT_UX_PLAN": plan,
             "HERDR_CHAT_UX_MERMAID": mermaid ? "1" : "0",
+            "HERDR_CHAT_UX_SVG": svg ? "1" : "0",
             "HERDR_CHAT_UX_LONG_SESSION": longSession ? "1" : "0",
             "HERDR_CHAT_UX_SUBAGENTS": subagents ? "1" : "0"
         ].merging(environment) { _, new in new })
@@ -269,6 +271,135 @@ final class ChatUXSmokeTests: XCTestCase {
         record(relaunched, "Mermaid diagram from the disk cache after relaunch")
     }
 
+    /// The owner's ```svg block (round 4) is drawn as an image in the app's colours, opens full
+    /// screen, and shows its code on request; a broken SVG stays a code block.
+    func testSVGReplyRendersAnImageAndABrokenOneStaysCode() {
+        let app = launch(svg: true)
+        let image = app.buttons["chat-svg-image"].firstMatch
+        XCTAssertTrue(image.waitForExistence(timeout: 30),
+                      "The SVG must finish rendering offscreen: \(app.debugDescription)")
+        XCTAssertGreaterThan(image.frame.width, 100, "\(image.frame)")
+        // 900 × 360 drawn to the column: the aspect is the SVG's own.
+        XCTAssertEqual(image.frame.width / image.frame.height, 2.5, accuracy: 0.05, "\(image.frame)")
+        XCTAssertTrue((image.value as? String ?? "").hasPrefix("drawn "), String(describing: image.value))
+        XCTAssertEqual(app.buttons.matching(identifier: "chat-svg-image").count, 1,
+                       "Only the well-formed SVG is drawn")
+        let source = app.staticTexts.matching(NSPredicate(format: "label CONTAINS %@", "Clinic system (cloud)")).firstMatch
+        XCTAssertFalse(source.exists, "The SVG's source must not be drawn as code")
+
+        let broken = app.staticTexts["chat-svg-error"]
+        XCTAssertTrue(broken.waitForExistence(timeout: 10), app.debugDescription)
+        XCTAssertTrue(app.staticTexts.matching(NSPredicate(format: "label CONTAINS %@", "<rect width=\"4\">")).firstMatch.exists,
+                      "A malformed SVG falls back to its code")
+
+        let chat = app.descendants(matching: .any)["chat-view"].firstMatch
+        for _ in 0..<4 where !image.isHittable {
+            chat.swipeDown(velocity: .slow)
+        }
+        record(app, "SVG reply drawn as an image")
+        image.tap()
+        let viewer = app.descendants(matching: .any)["chat-svg-viewer"].firstMatch
+        XCTAssertTrue(viewer.waitForExistence(timeout: 10), app.debugDescription)
+        record(app, "SVG viewer full screen")
+        app.buttons["chat-svg-viewer-done"].tap()
+        XCTAssertTrue(viewer.waitForNonExistence(timeout: 10))
+
+        let toggle = app.buttons["chat-svg-toggle"].firstMatch
+        for _ in 0..<4 where !toggle.isHittable {
+            chat.swipeDown(velocity: .slow)
+        }
+        toggle.tap()
+        XCTAssertTrue(source.waitForExistence(timeout: 5), "Show code reveals the SVG's source")
+        XCTAssertFalse(app.buttons["chat-svg-image"].exists)
+    }
+
+    /// An expanded thought reads as an aside (round 4): its text, list items and inline code in
+    /// the secondary ink, a step smaller than the reply. Measured on the screen's pixels: the
+    /// brightest pixel of a thought line is the secondary ink, a reply line's is the primary.
+    func testExpandedThoughtIsDimmerAndSmallerThanTheReply() {
+        let app = launch()
+        let header = app.buttons.matching(NSPredicate(format: "identifier == %@ AND label CONTAINS %@",
+                                                      "chat-thought", "Check the table")).firstMatch
+        XCTAssertTrue(header.waitForExistence(timeout: 10), app.debugDescription)
+        let chat = app.descendants(matching: .any)["chat-view"].firstMatch
+        // The reply line, measured while the chat sits at its tail (it is on screen there),
+        // before the thought opens above it and pushes it down under the composer.
+        let reply = app.staticTexts["A complete fixture response."].firstMatch
+        XCTAssertTrue(reply.waitForExistence(timeout: 5), app.debugDescription)
+        for _ in 0..<4 where !reply.isHittable {
+            chat.swipeUp(velocity: .slow)
+        }
+        XCTAssertTrue(reply.isHittable, "\(reply.frame)")
+        let replyInk = Self.brightest(reply.frame, in: XCUIScreen.main.screenshot().image, app: app)
+        let replyHeight = reply.frame.height
+        XCTAssertGreaterThan(replyInk, 0.85, "A reply line is drawn in the primary ink")
+
+        for _ in 0..<4 where !header.isHittable {
+            chat.swipeDown(velocity: .slow)
+        }
+        header.tap()
+        let open = app.descendants(matching: .any)["chat-thought-open"].firstMatch
+        XCTAssertTrue(open.waitForExistence(timeout: 5), app.debugDescription)
+
+        let lead = app.staticTexts["Check the table"].firstMatch
+        let paragraph = app.staticTexts["Use wrapped cells and literal code."].firstMatch
+        let item = app.staticTexts["Preserve Unicode: café"].firstMatch
+        let code = app.staticTexts.matching(NSPredicate(format: "label BEGINSWITH %@", "Find literal")).firstMatch
+        for element in [lead, paragraph, item, code] {
+            XCTAssertTrue(element.waitForExistence(timeout: 5), app.debugDescription)
+        }
+        // The chat's top edge fades content out under the bar (26 pt), so bring the thought's
+        // first line well clear of it with one exact drag (no fling). The top is the chat's
+        // own, or the Chat/Terminal switch's bottom if lower.
+        let mode = app.buttons["Terminal"].firstMatch
+        let top = max(chat.frame.minY, mode.exists ? mode.frame.maxY : 0)
+        let clear = top + 70
+        if lead.frame.minY < clear {
+            let start = chat.coordinate(withNormalizedOffset: CGVector(dx: 0.5, dy: 0.45))
+            start.press(forDuration: 0.2, thenDragTo: start.withOffset(CGVector(dx: 0, dy: clear - lead.frame.minY + 10)))
+        }
+        for element in [lead, paragraph, item, code] {
+            XCTAssertTrue(element.isHittable && element.frame.minY >= top + 40,
+                          "\(element.label) must be on screen, clear of the top fade: \(element.frame) below \(top)")
+        }
+        record(app, "Expanded thought box")
+
+        let shot = XCUIScreen.main.screenshot().image
+        for (name, element) in [("bold lead", lead), ("text", paragraph), ("list item", item), ("inline code", code)] {
+            let value = Self.brightest(element.frame, in: shot, app: app)
+            XCTAssertLessThan(value, 0.75, "A thought's \(name) must be in the secondary ink, not white (\(value))")
+            XCTAssertGreaterThan(value, 0.5, "A thought's \(name) must stay readable (\(value))")
+        }
+        XCTAssertLessThan(item.frame.height, replyHeight,
+                          "A thought line is a type step smaller than a reply line")
+    }
+
+    /// The brightest pixel inside `frame` (points), as the mean of its RGB in 0…1.
+    private static func brightest(_ frame: CGRect, in shot: UIImage, app: XCUIApplication) -> Double {
+        guard let image = shot.cgImage else { return 0 }
+        let scale = CGFloat(image.width) / max(app.frame.width, 1)
+        let rect = CGRect(x: frame.minX * scale, y: frame.minY * scale,
+                          width: frame.width * scale, height: frame.height * scale)
+            .integral.intersection(CGRect(x: 0, y: 0, width: image.width, height: image.height))
+        guard !rect.isEmpty, let crop = image.cropping(to: rect) else { return 0 }
+        let width = crop.width, height = crop.height
+        var pixels = [UInt8](repeating: 0, count: width * height * 4)
+        let drew = pixels.withUnsafeMutableBytes { buffer -> Bool in
+            guard let context = CGContext(
+                data: buffer.baseAddress, width: width, height: height, bitsPerComponent: 8,
+                bytesPerRow: width * 4, space: CGColorSpaceCreateDeviceRGB(),
+                bitmapInfo: CGImageAlphaInfo.premultipliedLast.rawValue) else { return false }
+            context.draw(crop, in: CGRect(x: 0, y: 0, width: width, height: height))
+            return true
+        }
+        guard drew else { return 0 }
+        var best = 0
+        for offset in stride(from: 0, to: pixels.count, by: 4) {
+            best = max(best, Int(pixels[offset]) + Int(pixels[offset + 1]) + Int(pixels[offset + 2]))
+        }
+        return Double(best) / (3 * 255)
+    }
+
     /// Pixels per point of this device's screen, from a screenshot of it.
     private static func screenScale(_ app: XCUIApplication) -> Int {
         let shot = XCUIScreen.main.screenshot().image
@@ -416,6 +547,113 @@ final class ChatUXSmokeTests: XCTestCase {
         let spent = rowRenders(app) - before
         XCTAssertEqual(spent, 0, "typing 30 characters re-rendered \(spent) transcript rows")
         XCTAssertEqual(app.state, .runningForeground)
+    }
+
+    /// Scrolls the chat until `element` sits well inside the transcript: clear of the header,
+    /// and of the composer and the fade above it, so its pixels are the colours drawn.
+    private func bringIntoView(_ element: XCUIElement, in app: XCUIApplication, _ what: String,
+                               file: StaticString = #filePath, line: UInt = #line) {
+        let chat = app.descendants(matching: .any)["chat-view"].firstMatch
+        let composer = app.descendants(matching: .any)["composer-card"].firstMatch
+        for _ in 0..<8 {
+            let top = chat.frame.minY + 48
+            let bottom = (composer.exists ? composer.frame.minY : chat.frame.maxY) - 48
+            let frame = element.frame
+            if frame.minY >= top, frame.maxY <= bottom { return }
+            let middle = chat.coordinate(withNormalizedOffset: CGVector(dx: 0.5, dy: 0.45))
+            let step = min(180, max(60, frame.minY < top ? top - frame.minY : frame.maxY - bottom))
+            middle.press(forDuration: 0.05, thenDragTo: middle.withOffset(CGVector(dx: 0, dy: frame.minY < top ? step : -step)))
+            Thread.sleep(forTimeInterval: 0.8)
+        }
+        XCTFail("\(what) never came into view: \(element.frame)", file: file, line: line)
+    }
+
+    /// #550: the chat in omp's theme (dark-tokyo-night). Headings and each step's tool name
+    /// are in the accent; code in a known language is highlighted on the theme's code ground,
+    /// a language the highlighter does not know stays plain, and typing over all of it draws
+    /// no transcript row (#536).
+    func testChatDrawsTheThemesAccentAndSyntaxColours() throws {
+        let accent: UInt32 = 0xBB9AF7, codeText: UInt32 = 0xA9B1D6, codeBackground: UInt32 = 0x16161E
+        let string: UInt32 = 0x9ECE6A, comment: UInt32 = 0x51597D, function: UInt32 = 0x7AA2F7
+        let number: UInt32 = 0xFF9E64, type: UInt32 = 0x0DB9D7
+        let app = launch(longSession: true, environment: ["HERDR_CHAT_UX_COLOURS": "1"])
+        let heading = app.staticTexts["Why the list jumps"]
+        XCTAssertTrue(heading.waitForExistence(timeout: 12), app.debugDescription)
+        bringIntoView(heading, in: app, "the heading")
+
+        // The steps line just above the reply opens to rows that each name their tool.
+        let toggles = app.buttons.matching(identifier: "chat-steps").allElementsBoundByIndex
+        let toggle = try XCTUnwrap(toggles.filter { $0.frame.maxY <= heading.frame.minY }.max { $0.frame.minY < $1.frame.minY },
+                                   app.debugDescription)
+        toggle.tap()
+        let read = app.descendants(matching: .any).matching(NSPredicate(
+            format: "identifier == 'chat-step' AND label == %@", "read, Reading the sort in AgentList.swift")).firstMatch
+        XCTAssertTrue(read.waitForExistence(timeout: 5), app.debugDescription)
+        for label in ["search, Searching for scrollPosition", "edit, Anchoring the list on the visible row",
+                      "bash, Running the scroll tests"] {
+            XCTAssertTrue(app.descendants(matching: .any).matching(NSPredicate(
+                format: "identifier == 'chat-step' AND label == %@", label)).firstMatch.exists,
+                          "the step should read \(label): \(app.debugDescription)")
+        }
+        bringIntoView(read, in: app, "the read step")
+        var pixels = try XCTUnwrap(ScreenPixels(app.screenshot()))
+        XCTAssertGreaterThan(pixels.count(accent, in: read.frame), 15, "the step's tool name should be in the accent")
+
+        bringIntoView(heading, in: app, "the heading")
+        let swift = app.staticTexts.matching(NSPredicate(format: "identifier == 'gram-code-text' AND label CONTAINS 'resort'")).firstMatch
+        XCTAssertTrue(swift.waitForExistence(timeout: 5), app.debugDescription)
+        bringIntoView(swift, in: app, "the Swift block")
+        let window = app.windows.firstMatch.frame
+        // Highlighting runs off the main thread: give it a moment to land.
+        for _ in 0..<10 {
+            pixels = try XCTUnwrap(ScreenPixels(app.screenshot()))
+            if pixels.count(string, in: swift.frame.intersection(window)) > 0 { break }
+            Thread.sleep(forTimeInterval: 0.5)
+        }
+        record(app, "chat-colours")
+        XCTAssertGreaterThan(pixels.count(accent, in: heading.frame), 30, "the heading should be in the accent")
+        let paragraph = app.staticTexts["The re-sort moves the row under your finger."]
+        XCTAssertTrue(paragraph.exists, app.debugDescription)
+        XCTAssertEqual(pixels.count(accent, in: paragraph.frame), 0, "body text stays the text colour")
+        let swiftFrame = swift.frame.intersection(window)
+        for (colour, kind) in [(accent, "keywords"), (string, "strings"), (comment, "comments"), (function, "functions"),
+                               (number, "numbers"), (type, "types"), (codeText, "plain code")] {
+            XCTAssertGreaterThan(pixels.count(colour, in: swiftFrame), 8, "the Swift block should colour its \(kind)")
+        }
+        XCTAssertGreaterThan(pixels.count(codeBackground, in: swiftFrame), 500, "code sits on the theme's code ground")
+
+        let bash = app.staticTexts.matching(NSPredicate(format: "identifier == 'gram-code-text' AND label CONTAINS 'git status'")).firstMatch
+        let plain = app.staticTexts.matching(NSPredicate(format: "identifier == 'gram-code-text' AND label CONTAINS 'plain notes'")).firstMatch
+        XCTAssertTrue(plain.waitForExistence(timeout: 5), app.debugDescription)
+        bringIntoView(plain, in: app, "the plain block")
+        bringIntoView(bash, in: app, "the bash block")
+        for _ in 0..<10 {
+            pixels = try XCTUnwrap(ScreenPixels(app.screenshot()))
+            if pixels.count(string, in: bash.frame.intersection(window)) > 0 { break }
+            Thread.sleep(forTimeInterval: 0.5)
+        }
+        record(app, "chat-colours-code")
+        let bashFrame = bash.frame.intersection(window)
+        for (colour, kind) in [(comment, "comment"), (function, "commands"), (string, "string")] {
+            XCTAssertGreaterThan(pixels.count(colour, in: bashFrame), 8, "the bash block should colour its \(kind)")
+        }
+        let plainFrame = plain.frame.intersection(window)
+        XCTAssertGreaterThan(pixels.count(codeText, in: plainFrame), 8, "an unknown language is drawn in the code text colour")
+        for colour in [accent, string, number, function] {
+            XCTAssertEqual(pixels.count(colour, in: plainFrame), 0,
+                           String(format: "an unknown language stays plain, but #%06X shows", colour))
+        }
+
+        // Typing over highlighted code draws no transcript row.
+        let field = app.textViews["terminal-reply-input"]
+        XCTAssertTrue(field.waitForExistence(timeout: 5))
+        field.tap()
+        XCTAssertTrue(app.keyboards.firstMatch.waitForExistence(timeout: 5))
+        Thread.sleep(forTimeInterval: 2)
+        let before = rowRenders(app)
+        field.typeText("colours stay put while typing")
+        Thread.sleep(forTimeInterval: 1.5)
+        XCTAssertEqual(rowRenders(app) - before, 0, "typing re-rendered transcript rows")
     }
 
     /// herdrup#523 item 8: a one-letter search on a long chat froze the app until it was

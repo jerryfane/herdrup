@@ -46,11 +46,52 @@ enum ChatUXSmoke {
                             "text": "Copy **this** reply, then *paste* it.\n\n```swift\nlet copied = true\nprint(copied)\n```",
                             "ts_ms": timestamp + 2])
         }
+        // omp's theme colours (#550): steps with their tool names, headings, and code blocks
+        // in known languages and in one the highlighter does not know.
+        if ProcessInfo.processInfo.environment["HERDR_CHAT_UX_COLOURS"] == "1" {
+            for (n, step) in [("read", "Reading the sort in AgentList.swift"), ("search", "Searching for scrollPosition"),
+                              ("edit", "Anchoring the list on the visible row"), ("bash", "Running the scroll tests")].enumerated() {
+                entries.append(["id": "ux-colours-s\(n)", "kind": "step", "tool": step.0, "intent": step.1, "status": "ok",
+                                "ts_ms": timestamp + 2])
+            }
+            entries.append(["id": "ux-colours", "kind": "reply", "final": true, "ts_ms": timestamp + 2, "text": """
+                ## Why the list jumps
+
+                The re-sort moves the row under your finger.
+
+                ```swift
+                // Keep the visible row anchored
+                func resort(_ rows: [Row]) -> [Row] {
+                    let name = "herdr", limit = 42
+                    return rows.sorted { $0.rank < $1.rank }
+                }
+                ```
+
+                ### Check it
+
+                ```bash
+                # Run the scroll tests
+                git status --short | wc -l
+                echo "done"
+                ```
+
+                ```text
+                plain notes stay plain: "quoted" 42
+                ```
+                """])
+        }
         // A diagram reply (#523 item 1), only when a test asks for it: its row grows once the
         // offscreen renderer finishes, which the tail and history-position tests must not see.
         if ProcessInfo.processInfo.environment["HERDR_CHAT_UX_MERMAID"] == "1" {
             entries.append(["id": "ux-mermaid", "kind": "reply", "final": true,
                             "text": "Here is the flow:\n\n```mermaid\ngraph TD\n  A[Request] --> B{Cached?}\n  B -->|yes| C[Show image]\n  B -->|no| D[Render offscreen]\n  D --> C\n```\n\nThat is the whole pipeline.", "ts_ms": timestamp + 2])
+        }
+        // The owner's ```svg block (round 4), drawn as an image, then a broken one that must
+        // stay code. Only when a test asks: its row grows once the renderer finishes.
+        if ProcessInfo.processInfo.environment["HERDR_CHAT_UX_SVG"] == "1" {
+            entries.append(["id": "ux-svg", "kind": "reply", "final": true,
+                            "text": "The discovery board:\n\n```svg\n\(ownerSVG)\n```\n\nAnd a broken one:\n\n```svg\n<svg viewBox=\"0 0 10 10\"><rect width=\"4\"></svg>\n```",
+                            "ts_ms": timestamp + 2])
         }
         // A long session's refreshes bring nothing new, as an idle agent's polls do.
         if responses > 1, !longSession {
@@ -69,6 +110,37 @@ enum ChatUXSmoke {
         result["recap"] = ["turn_id": "ux-reply", "text": "Fixture recap only: typography is ready for inspection."]
         return ChatMockConversation.encode(id: id, result: result)
     }
+
+    /// The SVG in the owner's report (round 4): colours from the host page's CSS variables.
+    private static let ownerSVG = """
+    <svg viewBox="0 0 900 360" xmlns="http://www.w3.org/2000/svg" font-family="sans-serif" font-size="13">
+      <rect x="10" y="10" width="880" height="40" rx="6" fill="none" stroke="var(--border)"/>
+      <text x="26" y="35" fill="var(--fg)">▶ Play    ❚❚    1×   2×</text>
+      <text x="250" y="35" fill="var(--muted)">Business · People · Systems · Data flows · Money · Rules · Pain points</text>
+      <rect x="10" y="60" width="540" height="290" rx="6" fill="none" stroke="var(--border)"/>
+      <text x="26" y="88" fill="var(--muted)">Consultant</text>
+      <text x="26" y="106" fill="var(--fg)">How do insurers pay you: one transfer per claim, or batches?</text>
+      <text x="26" y="136" fill="var(--muted)">Finance manager · Up&amp;Running</text>
+      <text x="26" y="154" fill="var(--fg)">Batches. Dunebridge sends an Excel advice; Palmline only a PDF by email.</text>
+      <text x="26" y="184" fill="var(--muted)">Consultant · follow-up</text>
+      <text x="26" y="202" fill="var(--fg)">Does the advice carry your claim number, or theirs?</text>
+      <text x="26" y="232" fill="var(--muted)">Finance manager</text>
+      <text x="26" y="250" fill="var(--fg)">Ours for Dunebridge. Palmline uses its own reference… </text>
+      <rect x="560" y="60" width="330" height="290" rx="6" fill="none" stroke="var(--border)"/>
+      <text x="576" y="88" fill="var(--fg)" font-weight="600">What we know so far</text>
+      <rect x="576" y="102" width="298" height="50" rx="4" fill="none" stroke="var(--border)"/>
+      <text x="588" y="122" fill="var(--fg)">Clinic system (cloud)</text>
+      <text x="588" y="140" fill="var(--muted)">Excel export · daily · owner: Ops</text>
+      <rect x="576" y="160" width="298" height="50" rx="4" fill="none" stroke="var(--border)"/>
+      <text x="588" y="180" fill="var(--fg)">Insurer advices</text>
+      <text x="588" y="198" fill="var(--muted)">Excel (2) · PDF by email (1) · new</text>
+      <rect x="576" y="218" width="298" height="50" rx="4" fill="none" stroke="var(--border)"/>
+      <text x="588" y="238" fill="var(--fg)">Shared IDs</text>
+      <text x="588" y="256" fill="var(--muted)">file no. ↔ claim no. ↔ advice ref</text>
+      <text x="576" y="296" fill="var(--muted)">Open questions: 3</text>
+      <text x="576" y="316" fill="var(--muted)">Problems expected: 4</text>
+    </svg>
+    """
 
     /// Six turns × 80 reply paragraphs: the large fixture says "example" 480 times, once
     /// per reply paragraph and nowhere else in the mock conversation (under the search cap,
