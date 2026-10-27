@@ -108,22 +108,15 @@ enum GramDates {
 
 // MARK: - Avatars
 
-/// An agent's round avatar: its name's identity gradient and initial. A federated name
-/// (`<machine>/<name>`) shows its bare name, so one agent reads the same on every machine.
+/// An agent's round avatar in Gram: the picture of the roster agent its routing name
+/// denotes (`AgentAvatarView`, herdrup#538), so a sender looks the same here as in the agent
+/// list. A federated name finds the agent on that machine; an unknown sender wears Herdy.
 struct GramAvatar: View {
     let name: String
     let size: CGFloat
 
     var body: some View {
-        let bare = GramMessage.agentName(from: name)
-        Text(AgentIdentity.glyph(forName: bare))
-            .font(Typography.app((size * 0.45).rounded(), .bold))
-            .foregroundStyle(Palette.onAccent)
-            .lineLimit(1)
-            .minimumScaleFactor(0.5)
-            .frame(width: size, height: size)
-            .background(AgentIdentity.gradient(forName: bare), in: Circle())
-            .accessibilityHidden(true)
+        AgentAvatarView(gramSender: name, size: size)
     }
 }
 
@@ -135,14 +128,15 @@ private extension View {
     }
 }
 
-/// Distinct bare names, in order, at most `limit`.
+/// The first routing name of each distinct bare name, in order, at most `limit`. The full
+/// name is kept so the avatar can find a federated sender on its own machine.
 private func distinctAgentNames(_ names: [String], limit: Int) -> [String] {
     var seen = Set<String>()
     var result: [String] = []
     for name in names {
         let bare = GramMessage.agentName(from: name)
         guard seen.insert(bare).inserted else { continue }
-        result.append(bare)
+        result.append(name)
         if result.count == limit { break }
     }
     return result

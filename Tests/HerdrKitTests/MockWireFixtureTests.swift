@@ -80,6 +80,25 @@ final class MockWireFixtureTests: XCTestCase {
         }
     }
 
+    /// herdrup#538: the mock roster shows each avatar kind, and its photo resolves through
+    /// the real `agent.avatar.get` path to bytes with the advertised content address.
+    func testMockAgentListCarriesAvatars() async throws {
+        let client = HerdrClient(transport: FixtureTransport())
+        let agents = try await client.agentList()
+        let byName = Dictionary(uniqueKeysWithValues: agents.compactMap { a in a.name.map { ($0, a) } })
+        XCTAssertEqual(AgentAvatarAppearance.resolve(byName["clientloop"]?.avatar), .mascot(.tri))
+        XCTAssertEqual(AgentAvatarAppearance.resolve(byName["discovery"]?.avatar),
+                       .image(sha256: MockWireFixtures.avatarImageSHA256))
+        XCTAssertEqual(AgentAvatarAppearance.resolve(byName["jarvis"]?.avatar), .mascot(.herdy),
+                       "an agent without a choice wears the default")
+
+        let image = try await HerdrClient(transport: RecordingTransport(reply: MockWireFixtures.avatarImage))
+            .agentAvatarGet(target: "t-discovery", sha256: MockWireFixtures.avatarImageSHA256)
+        XCTAssertEqual(image.mime, "image/png")
+        XCTAssertEqual(AgentAvatarImage.sha256(of: image.data), MockWireFixtures.avatarImageSHA256)
+        XCTAssertEqual(AgentAvatarImage.mime(of: image.data), "image/png")
+    }
+
     /// The whole point of the fixture: rendered through the REAL grouping model
     /// with the mock census, it must produce the mockup's composition —
     /// NEEDS YOU 2, STOPPED 1 (from liveness, not a status string), WORKING 1,

@@ -410,9 +410,9 @@ struct ChatMockTransport: HerdrTransport {
         let params = request["params"] as? [String: Any] ?? [:]
         switch request["method"] as? String {
         case "ping":
-            return #"{"id":"\#(id)","result":{"type":"pong","version":"0.9.4","protocol":22,"capabilities":{"agent_transcript":true,"agent_answer":true}}}"#
+            return #"{"id":"\#(id)","result":{"type":"pong","version":"0.9.4","protocol":22,"capabilities":{"agent_transcript":true,"agent_answer":true,"agent_avatar":true}}}"#
         case "agent.list":
-            return #"{"id":"\#(id)","result":{"type":"agent_list","agents":[\#(Self.agentsJSON)]}}"#
+            return AgentAvatarMockServer.overlay(#"{"id":"\#(id)","result":{"type":"agent_list","agents":[\#(Self.agentsJSON)]}}"#)
         case "agent.transcript":
             let target = params["target"] as? String
             guard target == Self.paneID || target == "herdr-app" else {
@@ -443,7 +443,7 @@ struct ChatMockTransport: HerdrTransport {
         let status = ChatMockConversation.owner.isAnswered ? working : "blocked"
         return [
             #"{"pane_id":"\#(paneID)","name":"herdr-app","agent":"omp","agent_status":"\#(status)","cwd":"/root/herdr","terminal_title_stripped":"Merge #305 and update the servers?"}"#,
-            #"{"pane_id":"w9:p2","name":"keephair","agent":"claude","agent_status":"\#(working)","cwd":"/root/keephair-repo","terminal_title_stripped":"Running the iPad tests"}"#,
+            #"{"pane_id":"w9:p2","terminal_id":"t-keephair","name":"keephair","avatar":{"style":"mascot","mascot":"cub","sha256":null,"updated_unix_ms":1723041000000},"agent":"claude","agent_status":"\#(working)","cwd":"/root/keephair-repo","terminal_title_stripped":"Running the iPad tests"}"#,
             #"{"pane_id":"w9:p3","name":"llm-opt","agent":"omp","agent_status":"done","cwd":"/root/llm-opt","terminal_title_stripped":"Bench results posted"}"#,
         ].joined(separator: ",")
     }

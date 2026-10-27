@@ -1816,6 +1816,10 @@ struct TerminalHomeView: View {
         }
     }
     @State private var renameTarget: RenameTarget?
+    /// The roster's pictures for every avatar under this home, and the agent whose picture
+    /// the Avatar… sheet is editing (herdrup#538).
+    @State private var avatars = AgentAvatarDirectory()
+    @State private var avatarRow: AgentRow?
     @State private var activeCover: ActiveCover?
     /// The selected bottom tab (Agents / Gram / Settings). Terminal is NOT a tab — it
     /// fronts a keep-mounted pane OVER the tabs (see PaneKeepAliveContainer). Gram and
@@ -3275,6 +3279,11 @@ struct TerminalHomeView: View {
         }) {
             ForkNoticeView(onDismiss: { showForkNotice = false })
         }
+        .onChange(of: agents, initial: true) { _, roster in
+            avatars.client = client
+            avatars.update(agents: roster)
+        }
+        .environment(avatars)
     }
 
     /// The Agents tab: the app-drawn header plus the agents list (or the first-load
@@ -3332,6 +3341,11 @@ struct TerminalHomeView: View {
             }
             .sheet(item: $renameTarget) { target in
                 renameSheet(for: target)
+            }
+            .sheet(item: $avatarRow) { row in
+                AgentAvatarSheet(agent: row.info, name: row.title,
+                                 badge: row.info.isUnreachable ? .offline : AgentAvatarBadge(row.group),
+                                 badgeLabel: row.info.isUnreachable ? "offline" : row.group.label)
             }
             .sheet(item: $transferCandidate) { candidate in
                 AgentSessionTransferSheet(
@@ -3893,8 +3907,8 @@ struct TerminalHomeView: View {
     private func archivedCard(_ row: AgentRow) -> some View {
         HStack(spacing: 12) {
             ZStack {
-                RoundedRectangle(cornerRadius: 10).fill(AgentIdentity.gradient(forName: row.title))
-                    .frame(width: 40, height: 40).opacity(0.5)
+                AgentAvatarView(agent: row.info, name: row.title, size: 40, glyphSize: 17)
+                    .opacity(0.5)
                 Image(systemName: "archivebox.fill")
                     .font(.system(size: 15, weight: .semibold)).foregroundStyle(.white)
             }
@@ -4029,6 +4043,13 @@ struct TerminalHomeView: View {
                         StableMenuItem("Rename", systemImage: "pencil") {
                             renameTarget = .agent(row)
                         }
+                        // Avatar… = pick this agent's mascot or photo (herdrup#538). Owner
+                        // only, on a daemon that stores avatars.
+                        if avatars.canEdit {
+                            StableMenuItem("Avatar…", systemImage: "person.crop.circle") {
+                                avatarRow = row
+                            }
+                        }
                         // Restart = close the agent's session and reopen it with
                         // --resume in place (keeps the pane). It interrupts a busy
                         // agent's turn, so it routes through a confirmation.
@@ -4151,7 +4172,7 @@ struct TerminalHomeView: View {
             AgentAvatar(name: row.title,
                         badge: row.info.isUnreachable ? .offline : AgentAvatarBadge(row.group),
                         badgeLabel: row.info.isUnreachable ? "offline" : row.group.label,
-                        diameter: avatar, glyphSize: sidebar ? 19 : 22)
+                        diameter: avatar, glyphSize: sidebar ? 19 : 22, info: row.info)
             .padding(.trailing, 12)
             VStack(alignment: .leading, spacing: 2) {
                 HStack(spacing: 6) {
@@ -4453,6 +4474,7 @@ struct TerminalHomeView: View {
                     }
                     sessionTransferSupported = capabilities?.agentSessionTransfer == true
                     forgetSupported = capabilities?.agentForget == true
+                    avatars.canEdit = capabilities?.agentAvatar == true
                     // PARSED HERE, IN THE SAME BLOCK THAT MARKS THE CHECK DONE.
                     //
                     // My first conflict resolution kept BOTH this gated probe and the
@@ -5152,6 +5174,9 @@ struct TerminalPaneContent: View {
     @State private var replyAttachments: [ComposerAttachment] = []
     /// The ••• "Share with someone" sheet and the guests who hold this agent (the header chip).
     @StateObject private var guestShare = GuestSharePaneModel()
+    /// The roster's avatar directory: offers Avatar… in the ⋯ menu when it may edit.
+    @Environment(AgentAvatarDirectory.self) private var avatars: AgentAvatarDirectory?
+    @State private var editingAvatar = false
     @State private var loadingReplyAttachment = false
     /// The paperclip's attach sheet (`composerAttachPicker`), the third way in beside
     /// paste and drag-and-drop.
@@ -5791,6 +5816,9 @@ struct TerminalPaneContent: View {
                 } label: { Label("Share with someone", systemImage: "person.badge.plus") }
                 .accessibilityIdentifier("terminal-share")
             }
+            if agent != nil, avatars?.canEdit == true {
+                AgentAvatarMenuButton { editingAvatar = true }
+            }
             Button {
                 mute.toggle(paneID)
             } label: {
@@ -5809,6 +5837,13 @@ struct TerminalPaneContent: View {
             PaneActionsMenuLabel(notificationsOff: mute.isMuted(paneID))
         }
         .accessibilityIdentifier("terminal-actions")
+        .sheet(isPresented: $editingAvatar) {
+            if let agent {
+                AgentAvatarSheet(agent: agent, name: title,
+                                 badge: group.map(AgentAvatarBadge.init) ?? .none,
+                                 badgeLabel: group?.label ?? "")
+            }
+        }
     }
 
     private func refreshActivePane() {
@@ -9532,13 +9567,17 @@ struct MockTransport: HerdrTransport {
         // ccscroll receipt: any request may carry an SGR wheel event the app sent
         // (via sendText); the driver scrolls the stand-in Claude Code if so.
         ccDriver?.received(requestLine)
+        if let avatar = AgentAvatarMockServer.answer(requestLine) { return avatar }
+        if AgentAvatarMockServer.enabled, requestLine.contains(#""method":"ping""#) {
+            return #"{"id":"mock","result":{"type":"pong","version":"0.9.4","protocol":22,"capabilities":{"agent_avatar":true}}}"#
+        }
         if requestLine.contains("notifications.status") { return Self.notificationsStatus }
         if requestLine.contains("accounts.list") { return MockWireFixtures.accountsList }
         if requestLine.contains("agent.list") {
             if let rosterDriver {
                 return try await rosterDriver.nextAgentList()
             }
-            return MockWireFixtures.agentList
+            return AgentAvatarMockServer.overlay(MockWireFixtures.agentList)
         }
         if requestLine.contains("pane.history"), let historyPaging {
             return try await historyPaging.page(requestLine)
