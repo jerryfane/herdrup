@@ -7,8 +7,12 @@ import SwiftUI
 /// inline markdown so bold, italic, code and links stay inside one wrapping `Text`.
 struct ChatMarkdownView: View {
     let markdown: String
+    /// `.thought` draws an expanded thought: the same blocks, a step smaller and dimmer.
+    var tone: ChatMarkdownTone = .reply
 
-    @Environment(\.chatTextScale) private var textScale
+    @Environment(\.chatTextScale) private var chatTextScale
+    private var textScale: CGFloat { chatTextScale * tone.scale }
+    private var dim: Bool { tone == .thought }
     /// Parsed once per text (`ChatMarkdownCache`): a redraw of the same reply, or the same
     /// reply drawn again after it scrolled out of the drawn window, does not parse it again.
     private var blocks: [ChatMarkdownBlock] { ChatMarkdownCache.blocks(markdown) }
@@ -26,13 +30,13 @@ struct ChatMarkdownView: View {
     private func blockView(_ block: ChatMarkdownBlock) -> some View {
         switch block {
         case .paragraph(let text):
-            Text(ChatInline.styled(text, size: 16 * textScale))
-                .foregroundStyle(Palette.text)
+            Text(ChatInline.styled(text, size: 16 * textScale, dim: dim))
+                .foregroundStyle(tone.ink)
                 .lineSpacing(3 * textScale)
                 .fixedSize(horizontal: false, vertical: true)
         case .heading(let level, let text):
-            Text(ChatInline.styled(text, size: (level == 1 ? 23 : level == 2 ? 20 : 17) * textScale, weight: .semibold))
-                .foregroundStyle(Palette.text)
+            Text(ChatInline.styled(text, size: (level == 1 ? 23 : level == 2 ? 20 : 17) * textScale, weight: .semibold, dim: dim))
+                .foregroundStyle(tone.ink)
                 .lineSpacing(2)
                 .padding(.top, 4)
                 .fixedSize(horizontal: false, vertical: true)
@@ -48,9 +52,9 @@ struct ChatMarkdownView: View {
         case .diagram(let kind, let source):
             ChatMermaidView(source: source, kind: kind)
         case .table(let header, let rows):
-            ChatMarkdownTable(header: header, rows: rows)
+            ChatMarkdownTable(header: header, rows: rows, tone: tone)
         case .quote(let text):
-            Text(ChatInline.styled(text, size: 15.5 * textScale))
+            Text(ChatInline.styled(text, size: 15.5 * textScale, dim: dim))
                 .foregroundStyle(Palette.textDim)
                 .lineSpacing(3)
                 .fixedSize(horizontal: false, vertical: true)
@@ -73,10 +77,10 @@ struct ChatMarkdownView: View {
                     Text(marker).font(Typography.app(16 * textScale))
                 }
             }
-            .foregroundStyle(Palette.textDim)
+            .foregroundStyle(tone.marker)
             .frame(minWidth: 10, alignment: .leading)
-            Text(ChatInline.styled(item.text, size: 16 * textScale))
-                .foregroundStyle(Palette.text)
+            Text(ChatInline.styled(item.text, size: 16 * textScale, dim: dim))
+                .foregroundStyle(tone.ink)
                 .lineSpacing(3)
                 .fixedSize(horizontal: false, vertical: true)
         }
@@ -84,17 +88,33 @@ struct ChatMarkdownView: View {
     }
 }
 
+/// How a markdown body is drawn: a reply in the chat's ink, or an expanded thought, which
+/// must read as the agent's aside and not as its answer: the secondary ink and one type step
+/// smaller (16 pt body → 15 pt), inline code and lists included.
+enum ChatMarkdownTone: Equatable {
+    case reply
+    case thought
+
+    var ink: Color { self == .thought ? Palette.textDim : Palette.text }
+    /// List markers and checkboxes: one tier under the text.
+    var marker: Color { self == .thought ? Palette.textFaint : Palette.textDim }
+    var scale: CGFloat { self == .thought ? 15.0 / 16.0 : 1 }
+}
+
 /// Fit ordinary tables to the chat width; scroll only when readable columns cannot fit.
 private struct ChatMarkdownTable: View {
     let header: [String]
     let rows: [[String]]
+    let tone: ChatMarkdownTone
     private let columns: Int
-    @Environment(\.chatTextScale) private var textScale
+    @Environment(\.chatTextScale) private var chatTextScale
+    private var textScale: CGFloat { chatTextScale * tone.scale }
     @State private var viewportWidth: CGFloat = 0
 
-    init(header: [String], rows: [[String]]) {
+    init(header: [String], rows: [[String]], tone: ChatMarkdownTone) {
         self.header = header
         self.rows = rows
+        self.tone = tone
         columns = max(1, rows.reduce(header.count) { max($0, $1.count) })
     }
 
@@ -105,7 +125,7 @@ private struct ChatMarkdownTable: View {
                 GridRow {
                     ForEach(0..<columns, id: \.self) { column in
                         Text(ChatInline.styled(column < header.count ? header[column] : "",
-                                               size: 13 * textScale, weight: .semibold))
+                                               size: 13 * textScale, weight: .semibold, dim: tone == .thought))
                             .foregroundStyle(Palette.textDim)
                             .fixedSize(horizontal: false, vertical: true)
                             .frame(width: cellWidth - 24, alignment: .leading)
@@ -137,10 +157,10 @@ private struct ChatMarkdownTable: View {
             && trimmed.contains(where: \.isNumber)
         return Group {
             if numeric {
-                Text(ChatInline.styled(trimmed, size: 13.5 * textScale)).monospacedDigit()
-                    .foregroundColor(trimmed.hasPrefix("+") ? ChatStyle.ok : Palette.text)
+                Text(ChatInline.styled(trimmed, size: 13.5 * textScale, dim: tone == .thought)).monospacedDigit()
+                    .foregroundColor(trimmed.hasPrefix("+") ? ChatStyle.ok : tone.ink)
             } else {
-                Text(ChatInline.styled(value, size: 14.5 * textScale)).foregroundColor(Palette.text)
+                Text(ChatInline.styled(value, size: 14.5 * textScale, dim: tone == .thought)).foregroundColor(tone.ink)
             }
         }
         .multilineTextAlignment(numeric ? .trailing : .leading)
@@ -184,19 +204,21 @@ enum ChatInline {
         let markdown: String
         let size: CGFloat
         let weight: Font.Weight
+        let dim: Bool
     }
     private static var cache = ChatMarkdownCache.BoundedCache<Key, AttributedString>(limit: 2000)
 
     /// Inline markdown (bold, italic, `code`, links, strikethrough) as one attributed string
     /// in the app's fonts. Anything it cannot parse shows as the literal text. Kept per text,
-    /// size and weight (`ChatMarkdownCache`).
-    static func styled(_ markdown: String, size: CGFloat, weight: Font.Weight = .regular) -> AttributedString {
-        cache.value(for: Key(markdown: markdown, size: size, weight: weight)) {
-            parse(markdown, size: size, weight: weight)
+    /// size, weight and tone (`ChatMarkdownCache`). `dim` (an expanded thought) draws inline
+    /// code in the secondary ink like the text around it.
+    static func styled(_ markdown: String, size: CGFloat, weight: Font.Weight = .regular, dim: Bool = false) -> AttributedString {
+        cache.value(for: Key(markdown: markdown, size: size, weight: weight, dim: dim)) {
+            parse(markdown, size: size, weight: weight, dim: dim)
         }
     }
 
-    private static func parse(_ markdown: String, size: CGFloat, weight: Font.Weight) -> AttributedString {
+    private static func parse(_ markdown: String, size: CGFloat, weight: Font.Weight, dim: Bool) -> AttributedString {
         let options = AttributedString.MarkdownParsingOptions(
             interpretedSyntax: .inlineOnlyPreservingWhitespace,
             failurePolicy: .returnPartiallyParsedIfPossible)
@@ -206,7 +228,7 @@ enum ChatInline {
             if intent.contains(.code) {
                 styled[run.range].font = Typography.machine(max(size - 2.5, 10))
                 styled[run.range].backgroundColor = Palette.surface
-                styled[run.range].foregroundColor = Palette.text
+                styled[run.range].foregroundColor = dim ? Palette.textDim : Palette.text
                 continue
             }
             var font = Typography.app(size, intent.contains(.stronglyEmphasized) ? .semibold : weight)
