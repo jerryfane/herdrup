@@ -72,13 +72,14 @@ private struct ConversationColumnFrame: ViewModifier {
                    ? ConversationColumnLayout.width(stored: stored, available: available,
                                                     regular: sizeClass == .regular, compact: cap)
                    : cap)
-            .background(alignment: .top) { widthProbe(probe) }
+            // At the bottom: Chat and Gram open at their newest rows, so it is on screen.
+            .background(alignment: .bottom) { widthProbe(probe) }
             .frame(maxWidth: .infinity)
             .onGeometryChange(for: CGFloat.self) { $0.size.width } action: { available = $0 }
     }
 }
 
-/// A UI-test probe (mock runs only) naming a width: a 1 pt strip along the top of what it
+/// A UI-test probe (mock runs only) naming a width: a 1 pt strip along an edge of what it
 /// backs, so its frame gives the width and edges without an accessibility element over the
 /// rows (which would stand between a test's press and a bubble).
 @ViewBuilder private func widthProbe(_ identifier: String?) -> some View {
