@@ -383,7 +383,9 @@ final class GramTests: XCTestCase {
         Thread.sleep(forTimeInterval: 2)
         XCTAssertFalse(onScreen(newest), "the newest message is off screen at the top")
 
-        app.buttons["Gram"].firstMatch.tap()
+        // The tab bar's Gram on iPhone, not the first "Gram" button: on iOS 27 that is the
+        // page's "Gram ›" pill, which opens its sheet instead.
+        (hasSidebar ? app.buttons["Gram"].firstMatch : app.tabBars.firstMatch.buttons["Gram"]).tap()
         XCTAssertTrue(poll(5, every: 0.25) { onScreen(newest) },
                       "tapping the selected Gram tab should go to the newest message")
         // Past any late scroll (the system's to the top would land after ours).

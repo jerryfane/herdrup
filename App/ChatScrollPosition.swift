@@ -22,6 +22,23 @@ final class ChatScrollPosition {
         view.setContentOffset(CGPoint(x: view.contentOffset.x, y: bottomOffset), animated: false)
     }
 
+    /// Centres `rect` (window coordinates, as SwiftUI's `.global` frames are) in the visible
+    /// part of the scroll view, clamped to its scrollable range. The search reveal: on iOS 27
+    /// `ScrollViewProxy.scrollTo` no longer moves the chat to a result's id inside a row.
+    /// False when there is no scroll view yet.
+    @discardableResult
+    func reveal(_ rect: CGRect) -> Bool {
+        guard let view, view.window != nil, let bottomOffset else { return false }
+        let target = view.convert(rect, from: nil)
+        let inset = view.adjustedContentInset
+        let visibleHeight = view.bounds.height - inset.top - inset.bottom
+        let centred = target.midY - inset.top - visibleHeight / 2
+        let offset = min(max(centred, -inset.top), bottomOffset)
+        guard abs(view.contentOffset.y - offset) > 0.5 else { return true }
+        view.setContentOffset(CGPoint(x: view.contentOffset.x, y: offset), animated: false)
+        return true
+    }
+
     /// The jump button's glide to the tail. From more than two screens away it first snaps to
     /// one screen above the tail, so the glide is always one screen long. The model offset is
     /// final at once, so `isAtBottom` holds immediately and the per-tick `jumpToLatest` finds

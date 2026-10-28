@@ -5768,6 +5768,9 @@ struct TerminalPaneContent: View {
                 // prompt path for agent messages.
                 LiveTerminalView(client: client, paneID: paneID,
                                  onNavigate: onNavigate, isForeground: isForeground,
+                                 // Chat covers the terminal: its UIKit views leave
+                                 // accessibility too (see `accessibilityCovered`).
+                                 accessibilityCovered: showingChat,
                                  // Releases the width claim while the scene is in the
                                  // background; cleared with the remount decision below.
                                  sceneBackgrounded: wasBackgrounded,
@@ -5819,7 +5822,9 @@ struct TerminalPaneContent: View {
                     // only the button itself hit-tests, taps elsewhere reach the terminal.
                     .overlay(alignment: .bottom) {
                         ZStack {
-                            if !terminalAtTail {
+                            // Not under Chat: there it is invisible, and on iOS 27 still an
+                            // accessibility element over the chat.
+                            if !terminalAtTail && !showingChat {
                                 JumpToLatestButton(label: "Jump to latest output", identifier: "terminal-jump-latest",
                                                    regularGlass: true) { jumpToTailToken += 1 }
                                     .padding(.bottom, 16)

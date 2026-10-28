@@ -88,6 +88,11 @@ struct LiveTerminalView: UIViewRepresentable {
     /// desktop to this device's width while nobody's looking; it re-takes the lock when fronted
     /// again. Only the lock lifecycle changes — the stream and the SwiftTerm view stay warm.
     var isForeground: Bool = true
+    /// Another surface (the Chat view) is drawn over this terminal, which stays mounted and
+    /// sized under it. Its UIKit views then leave accessibility entirely: SwiftUI's
+    /// `.accessibilityHidden` on the representable does not reach them on iOS 27, where the
+    /// invisible terminal answered accessibility hit tests over the chat drawn above it.
+    var accessibilityCovered: Bool = false
     /// Inactive or background (another app in front on Mac, Control Center, app switcher):
     /// the front pane's caret holds still too, like the status dot (#427).
     @Environment(\.scenePhase) private var scenePhase
@@ -250,6 +255,9 @@ struct LiveTerminalView: UIViewRepresentable {
         // while the scene is not active, holds its caret steady: the blink is a repeating
         // animation that keeps the window compositing (#427).
         terminalView.caretBlinkPaused = !isForeground || scenePhase != .active || Self.steadyCaret
+        uiView.accessibilityElementsHidden = accessibilityCovered
+        terminalView.isAccessibilityElement = !accessibilityCovered
+        terminalView.accessibilityElementsHidden = accessibilityCovered
         context.coordinator.directFocusIntended = wantsTerminalKeyFocus && !viewOnly
         context.coordinator.performJumpToTail(ifTokenChanged: jumpToTailToken)
         context.coordinator.loadEarlierHistory(ifTokenChanged: loadEarlierHistoryToken)
