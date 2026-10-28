@@ -1,0 +1,28 @@
+{
+  "type": "agent_list",
+  "agents": [
+    {"pane_id": "w1:p1", "terminal_id": "t1", "workspace_id": "w1", "tab_id": "w1:t1", "focused": false, "revision": 4,
+     "name": "api-review", "agent": "claude", "agent_status": "blocked", "cwd": "/home/dev/api",
+     "terminal_title_stripped": "asking to run the migration"},
+    {"pane_id": "w1:p2", "terminal_id": "t2", "workspace_id": "w1", "tab_id": "w1:t1", "focused": false, "revision": 9,
+     "name": "docs", "agent": "omp", "agent_status": "working", "input_pending": true, "cwd": "/home/dev/docs",
+     "terminal_title_stripped": "π > choose a layout"},
+    {"pane_id": "w1:p3", "terminal_id": "t3", "workspace_id": "w1", "tab_id": "w1:t2", "focused": true, "revision": 12,
+     "name": "web", "agent": "codex", "agent_status": "working", "cwd": "/home/dev/web",
+     "terminal_title_stripped": "⠋ running the test suite"},
+    {"pane_id": "w2:p1", "terminal_id": "t4", "workspace_id": "w2", "tab_id": "w2:t1", "focused": false, "revision": 3,
+     "name": "infra", "agent": "omp", "agent_status": "working", "cwd": "/home/dev/infra",
+     "terminal_title_stripped": "π > applying terraform plan"},
+    {"pane_id": "studio/w1:p4", "terminal_id": "t5", "workspace_id": "studio/w1", "tab_id": "studio/w1:t1", "focused": false, "revision": 7,
+     "name": "studio/render", "agent": "claude", "agent_status": "unknown", "last_known_status": "working",
+     "machine_id": "studio", "machine_label": "mac-studio", "reachability": "unreachable", "cwd": "/Users/dev/render"},
+    {"pane_id": "w2:p2", "terminal_id": "t6", "workspace_id": "w2", "tab_id": "w2:t1", "focused": false, "revision": 21,
+     "name": "release", "agent": "claude", "agent_status": "done", "cwd": "/home/dev/release",
+     "last_completed_turn": {"completed_unix_ms": 1793170000000}},
+    {"pane_id": "w2:p3", "terminal_id": "t7", "workspace_id": "w2", "tab_id": "w2:t2", "focused": false, "revision": 2,
+     "name": "notes", "agent": "codex", "agent_status": "idle", "cwd": "/home/dev/notes"},
+    {"pane_id": "w3:p1", "terminal_id": "t8", "workspace_id": "w3", "tab_id": "w3:t1", "focused": false, "revision": 1,
+     "name": "old-spike", "agent": "omp", "agent_status": "idle", "cwd": "/home/dev/spike",
+     "archived": {"at": "2026-10-20T10:00:00Z", "by": "user", "reason": "done"}}
+  ]
+}

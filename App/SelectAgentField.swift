@@ -256,14 +256,15 @@ final class TerminalGlyphFieldView: UIView {
 
         let n = cols * rows
         let scrambleCount = UInt8(Self.scrambleCharacters.count)
-        restChr = (0..<n).map { _ in UInt8.random(in: 0..<scrambleCount) }
+        var dice = FieldDice(seed: Self.restFieldSeed)
+        restChr = (0..<n).map { _ in UInt8.random(in: 0..<scrambleCount, using: &dice) }
         restAlpha = (0..<n).map { i in
             let x = CGFloat(i % cols) * Self.cellW + Self.cellW / 2
             let y = CGFloat(i / cols) * Self.cellH + Self.cellH / 2
             let edge = min(x, y, size.width - x, size.height - y)
             let vignette = min(max(edge / 120, 0.25), 1)
             let noise = 0.55 + 0.45 * sin(x * 0.021 + sin(y * 0.013) * 2.1) * cos(y * 0.017)
-            let keep: CGFloat = Double.random(in: 0..<1) < 0.12 ? 0 : 1
+            let keep: CGFloat = Double.random(in: 0..<1, using: &dice) < 0.12 ? 0 : 1
             return Float(keep * vignette * quietFactor(x, y) * (0.5 + 0.5 * noise))
         }
         chr = Array(repeating: 0, count: n)
@@ -421,7 +422,9 @@ final class TerminalGlyphFieldView: UIView {
     // MARK: Frame
 
     fileprivate func update(_ currentTime: TimeInterval) {
-        guard cols > 0 else { return }
+        // Held still, the field is its first resting picture: no autopilot, no twinkle, no
+        // typing. Only the DEBUG reference screenshots ask for that.
+        guard cols > 0, !Self.holdsStill else { return }
         let dt = lastTime == 0 ? 1.0 / 60 : min(0.05, currentTime - lastTime)
         lastTime = currentTime
         clock += dt
@@ -696,6 +699,45 @@ final class TerminalGlyphFieldView: UIView {
         let ex = (x - quiet.cx) / (quiet.rx * 1.1)
         let ey = (y - quiet.cy) / (quiet.ry * 1.05)
         return min(max((ex * ex + ey * ey - 0.55) / 0.9, 0), 1)
+    }
+
+    /// The resting field's seed: nil (the system's randomness) except in the DEBUG
+    /// `desktopref` mock, whose reference screenshots need the same field every run.
+    private static var restFieldSeed: UInt64? {
+        #if DEBUG
+        return DesktopReferenceMock.glyphFieldSeed
+        #else
+        return nil
+        #endif
+    }
+
+    /// Whether the field keeps its first resting picture. Only the DEBUG `desktopref` mock.
+    private static var holdsStill: Bool {
+        #if DEBUG
+        return DesktopReferenceMock.holdsStill
+        #else
+        return false
+        #endif
+    }
+}
+
+/// The resting field's dice. Without a seed they are the system's; with one they are
+/// SplitMix64, so the same seed draws the same field.
+private struct FieldDice: RandomNumberGenerator {
+    private var state: UInt64?
+
+    init(seed: UInt64?) { state = seed }
+
+    mutating func next() -> UInt64 {
+        guard var z = state else {
+            var system = SystemRandomNumberGenerator()
+            return system.next()
+        }
+        z &+= 0x9E37_79B9_7F4A_7C15
+        state = z
+        z = (z ^ (z >> 30)) &* 0xBF58_476D_1CE4_E5B9
+        z = (z ^ (z >> 27)) &* 0x94D0_49BB_1331_11EB
+        return z ^ (z >> 31)
     }
 }
 
