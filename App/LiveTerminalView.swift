@@ -900,7 +900,10 @@ struct LiveTerminalView: UIViewRepresentable {
         /// Whether a keyboard sweep keeps the terminal live instead of covering it. iPhone
         /// only: its keyboard is always full-width and bottom-docked, so the pane shrinks
         /// from the bottom. iPad's floating/split keyboards can move without resizing the
-        /// pane, and its sweeps stay layout-driven and covered.
+        /// pane, and its sweeps stay layout-driven and covered. The idiom stands for that
+        /// KEYBOARD capability, not for a layout: size class cannot replace it, because an
+        /// iPhone in landscape and iPhone Duo's inner display are regular width yet keep the
+        /// docked keyboard, and a narrow iPad window is compact yet can float its keyboard.
         static var keyboardAnchorsLive: Bool { UIDevice.current.userInterfaceIdiom == .phone }
 
         /// A software-keyboard transition is animating this pane's height. UIKit reports

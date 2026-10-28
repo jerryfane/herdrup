@@ -6577,6 +6577,10 @@ struct TerminalPaneContent: View {
                     Button {
                         sendTapped()
                         terminalInputFocused = false
+                        // A device behaviour, not layout: only the iPhone keyboard is always
+                        // docked full-width over the pane, hiding the reply just sent and the
+                        // agent's answer, so Send puts it away there. iPad's can float or be
+                        // hardware and stays up. Holds on both iPhone Duo displays (idiom .phone).
                         if UIDevice.current.userInterfaceIdiom == .phone {
                             terminalCollapseToken += 1
                             replyFocused = false
