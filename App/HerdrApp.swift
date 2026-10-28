@@ -11018,35 +11018,43 @@ final class CCScrollDriver: @unchecked Sendable {
 /// Sets the hosting split view's minimum width for its secondary (detail) column.
 /// SwiftUI's `navigationSplitViewColumnWidth` governs the sidebar here; the detail column's
 /// floor is otherwise UIKit's automatic default, which on a 669 pt window did not fit beside
-/// a 320 pt sidebar and turned the split into an overlay. Placed in the detail column, it
-/// reaches the `UISplitViewController` that SwiftUI's `NavigationSplitView` is built on.
-private struct SplitDetailMinimumWidth: UIViewControllerRepresentable {
+/// a 320 pt sidebar and turned the split into an overlay. Placed in the detail column, its
+/// view finds the `UISplitViewController` that SwiftUI's `NavigationSplitView` is built on
+/// through the responder chain (the view is not inside a child view controller of its own).
+private struct SplitDetailMinimumWidth: UIViewRepresentable {
     let width: CGFloat
 
-    final class Controller: UIViewController {
-        var width: CGFloat = 0
+    final class Probe: UIView {
+        var width: CGFloat = 0 { didSet { apply() } }
 
-        override func viewWillLayoutSubviews() {
-            super.viewWillLayoutSubviews()
+        override func didMoveToWindow() {
+            super.didMoveToWindow()
             apply()
         }
 
-        func apply() {
-            guard #available(iOS 26.0, *), let split = splitViewController,
+        override func layoutSubviews() {
+            super.layoutSubviews()
+            apply()
+        }
+
+        private func apply() {
+            guard #available(iOS 26.0, *), window != nil else { return }
+            var responder: UIResponder? = self
+            while let current = responder, !(current is UISplitViewController) { responder = current.next }
+            guard let split = responder as? UISplitViewController,
                   split.minimumSecondaryColumnWidth != width else { return }
             split.minimumSecondaryColumnWidth = width
         }
     }
 
-    func makeUIViewController(context: Context) -> Controller {
-        let controller = Controller()
-        controller.width = width
-        controller.view.isUserInteractionEnabled = false
-        return controller
+    func makeUIView(context: Context) -> Probe {
+        let view = Probe()
+        view.isUserInteractionEnabled = false
+        view.width = width
+        return view
     }
 
-    func updateUIViewController(_ controller: Controller, context: Context) {
-        controller.width = width
-        controller.apply()
+    func updateUIView(_ view: Probe, context: Context) {
+        view.width = width
     }
 }
