@@ -14,6 +14,10 @@ import HerdrKit
 ///   with `downloaded_restart_required`.
 /// - `old`: herdr 0.9.3 without `server_update`.
 /// - `guest`: the connection is not the owner's; `update_check` answers `guest_forbidden`.
+/// - `failedcheck`: like `failed`, but after the failure the check can't reach the manifest
+///   (`update_manifest_unreachable`), so Try again has nothing to install.
+/// - `lostapply`: the status file holds yesterday's failed attempt for the same build, and
+///   `update_apply` drops the connection without starting anything.
 ///
 /// Every update drops the connection while it switches over: two `update_status` polls fail.
 /// Everything else is the plain mock daemon.
@@ -21,6 +25,7 @@ enum ServerUpdateMock {
     enum Scenario: String {
         case available, updating, failed, rolledBack = "rolledback", needsAttention = "needsattention"
         case restart, old, guest
+        case failedCheck = "failedcheck", lostApply = "lostapply"
     }
 
     static let host = "mac-mini"
@@ -31,7 +36,8 @@ enum ServerUpdateMock {
     }
 
     /// Fast polls, so a whole update takes a few seconds in the simulator.
-    static let follower = ServerUpdateFollower(intervalNanoseconds: 400_000_000, maxSilentPolls: 20)
+    static let follower = ServerUpdateFollower(intervalNanoseconds: 400_000_000, maxSilentPolls: 20,
+                                               maxForeignPolls: 10)
 }
 
 struct ServerUpdateMockTransport: HerdrTransport {
@@ -80,6 +86,9 @@ final class ServerUpdateMockServer: @unchecked Sendable {
 
     init(scenario: ServerUpdateMock.Scenario) {
         self.scenario = scenario
+        if scenario == .lostApply {
+            attemptJSON = #"{"attempt_id":"upd-old","build_id":"\#(Self.newBuild)","from":"0.9.3-preview.2026-10-06-4c1e9a2b5d10 (4c1e9a2b)","to":"0.9.5-preview.2026-10-28-8a02b8349f3c (8a02b834)","phase":"downloading","bytes_done":\#(9 * Self.mb),"bytes_total":\#(Self.totalMB * Self.mb),"restart_later":false,"outcome":"failed_no_change","message":"connection reset while downloading"}"#
+        }
     }
 
     func answer(id: String, method: String, params: [String: Any]) throws -> String? {
@@ -94,8 +103,13 @@ final class ServerUpdateMockServer: @unchecked Sendable {
         case "server.update_check":
             if scenario == .old { return unknownMethod(id) }
             if scenario == .guest { return error(id, "guest_forbidden", "guests cannot update herdr") }
+            if scenario == .failedCheck && attempts > 0 {
+                return error(id, "update_manifest_unreachable", "could not fetch the manifest")
+            }
             return ok(id, check)
         case "server.update_apply":
+            // The connection drops before the answer, and nothing starts.
+            if scenario == .lostApply { throw Dropped() }
             return apply(id: id, params: params)
         case "server.update_status":
             if scenario == .old { return unknownMethod(id) }
@@ -155,7 +169,7 @@ final class ServerUpdateMockServer: @unchecked Sendable {
         switch scenario {
         case .updating:
             return [Step(phase: "downloading", mb: 4), Step(phase: "downloading", mb: 12)]
-        case .failed where attempt == 1:
+        case .failed where attempt == 1, .failedCheck:
             return [6, 14, 21].map { Step(phase: "downloading", mb: $0) }
                 + [Step(phase: "downloading", mb: 21, outcome: "failed_no_change")]
         case .rolledBack:
@@ -165,7 +179,7 @@ final class ServerUpdateMockServer: @unchecked Sendable {
         case .restart:
             return download + checks + [Step(phase: "installing", mb: Self.totalMB),
                                         Step(phase: "installing", mb: Self.totalMB, outcome: "downloaded_restart_required")]
-        case .available, .failed, .old, .guest:
+        case .available, .failed, .old, .guest, .lostApply:
             return download + checks + switching + [ending("updated")]
         }
     }

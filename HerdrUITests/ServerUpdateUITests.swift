@@ -179,6 +179,38 @@ final class ServerUpdateUITests: XCTestCase {
         record(app, "old")
     }
 
+    /// Review of #566: Try again whose fresh check can't reach the manifest keeps the failed
+    /// card and says why, instead of the card vanishing.
+    func testTryAgainAfterTheCheckFailsKeepsTheFailedCard() {
+        let app = launch("failedcheck")
+        openMachines(app)
+        XCTAssertTrue(waitForTitle(app, "Update herdr on mac-mini"))
+        confirmUpdate(app)
+        XCTAssertTrue(waitForTitle(app, "Update didn't finish", timeout: 30))
+        app.buttons["server-update-retry"].tap()
+        let reason = app.staticTexts["mac-mini couldn't reach the update server."]
+        XCTAssertTrue(reason.waitForExistence(timeout: 15), "Try again should say why nothing was installed")
+        XCTAssertTrue(card(app).exists, "the card must stay")
+        XCTAssertTrue(waitForTitle(app, "Update didn't finish", timeout: 2))
+        record(app, "retry-check-failed")
+    }
+
+    /// Review of #566: update_apply drops the connection without starting, while the status file
+    /// holds yesterday's failed attempt for the same build. That old outcome must not be shown:
+    /// the update never started, so the card offers it again.
+    func testALostApplyDoesNotShowAnOlderAttempt() {
+        let app = launch("lostapply")
+        openMachines(app)
+        XCTAssertTrue(waitForTitle(app, "Update herdr on mac-mini"))
+        confirmUpdate(app)
+        XCTAssertTrue(waitForTitle(app, "Updating herdr", timeout: 10))
+        XCTAssertTrue(waitForTitle(app, "Update herdr on mac-mini", timeout: 30),
+                      "the card should offer the update again; title: \(title(app).label)")
+        XCTAssertFalse(app.buttons["server-update-retry"].exists)
+        XCTAssertTrue(app.buttons["server-update-button"].exists)
+        record(app, "lost-apply")
+    }
+
     /// A connection that is not the owner's is refused the check: no badge, no card.
     func testGuestSeesNothing() {
         let app = launch("guest")

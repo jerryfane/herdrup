@@ -42,7 +42,9 @@ final class ServerUpdateModel {
     private(set) var capabilitiesKnown = false
     private(set) var check: ServerUpdateCheckState = .unknown
     private(set) var flow: ServerUpdateFlow = .idle
-    /// A `restart_later` download the server is still waiting to restart into.
+    /// The server's last attempt when it is a `restart_later` download, as of the last refresh.
+    /// Whether it is still pending is decided against the build the server runs now
+    /// (`ServerUpdateCard.make`), so a restart into it clears the card and the badge.
     private(set) var pendingRestart: ServerUpdateAttempt?
     /// What the server lacked when the update started, so Done can say what is on now.
     private(set) var missingBefore: [ServerFeature] = []
@@ -53,6 +55,8 @@ final class ServerUpdateModel {
 
     @ObservationIgnored private var client: HerdrClient?
     @ObservationIgnored private var follow: Task<Void, Never>?
+    /// What the follow loop is following, for Look again.
+    @ObservationIgnored private var target: ServerUpdateTarget?
     @ObservationIgnored private let defaults: UserDefaults
     @ObservationIgnored var follower = ServerUpdateFollower()
 
@@ -95,35 +99,39 @@ final class ServerUpdateModel {
     }
 
     /// Asks the server what it runs and what it can update to. A server too old for
-    /// `server_update` stops at the ping; a non-owner stops at `guest_forbidden`.
-    func refresh() async {
-        guard let client else { return }
+    /// `server_update` stops at the ping; a non-owner stops at `guest_forbidden`. Returns false
+    /// when the server did not answer.
+    @discardableResult
+    func refresh() async -> Bool {
+        guard let client else { return false }
         do {
             let pong = try await client.serverVersionAndCapabilities()
             runningVersion = pong.version
             capabilities = pong.capabilities
             capabilitiesKnown = true
         } catch {
-            return
+            return false
         }
-        guard capabilities?.serverUpdate == true else { return }
+        guard capabilities?.serverUpdate == true else { return true }
         do {
             check = .loaded(try await client.updateCheck())
         } catch let error as APIError {
             check = error.code == ServerUpdateErrorCode.guestForbidden ? .forbidden : .failed(code: error.code)
-            if check == .forbidden { return }
+            if check == .forbidden { return true }
         } catch {
             // Transport trouble: keep what was known.
+            return false
         }
-        guard let attempt = try? await client.updateStatus() else { return }
-        if attempt.outcome == .downloadedRestartRequired {
-            pendingRestart = attempt
-        } else if attempt.outcome == nil, case .idle = flow {
+        let attempt: ServerUpdateAttempt?
+        do { attempt = try await client.updateStatus() } catch { return false }
+        pendingRestart = attempt?.outcome == .downloadedRestartRequired ? attempt : nil
+        if let attempt, attempt.outcome == nil, case .idle = flow {
             // An update is already running (started from another device, or before a relaunch).
             missingBefore = ServerRequirement.current.missingFeatures(capabilities)
             flow = .running(attempt, restartLater: attempt.restartLater)
-            startFollowing(attemptID: attempt.attemptID)
+            startFollowing(.attempt(attempt.attemptID))
         }
+        return true
     }
 
     /// The user confirmed: update to the build the card offered.
@@ -136,34 +144,51 @@ final class ServerUpdateModel {
 
     private func start(buildID: String, restartLater: Bool) async {
         guard let client else { return }
-        var attemptID: String?
+        // The attempt the server reports before this apply. If the apply's answer is lost, only
+        // a different attempt for this build can be the one it started.
+        let previous: ServerUpdateAttempt?
         do {
-            attemptID = try await client.updateApply(buildID: buildID, restartLater: restartLater)
+            previous = try await client.updateStatus()
         } catch let error as APIError {
             flow = .refused(code: error.code, message: error.message)
             return
         } catch {
-            // The connection dropped before the answer. The attempt may have started: follow
-            // whichever the server reports.
+            flow = .refused(code: ServerUpdateErrorCode.noAnswer,
+                            message: ServerUpdateErrorCode.describe(ServerUpdateErrorCode.noAnswer, host: host))
+            return
         }
-        startFollowing(attemptID: attemptID)
+        do {
+            let attemptID = try await client.updateApply(buildID: buildID, restartLater: restartLater)
+            startFollowing(.attempt(attemptID))
+        } catch let error as APIError {
+            flow = .refused(code: error.code, message: error.message)
+        } catch {
+            // The connection dropped before the answer. The attempt may have started.
+            startFollowing(.started(buildID: buildID, previous: previous?.attemptID))
+        }
     }
 
-    /// Try again after a failure: check afresh, then update to what the check offers.
+    /// Try again after a failure: check afresh, then update to what the check offers. A check
+    /// that fails (or a server that doesn't answer) keeps the failed card, with the reason.
     func retry() {
         follow?.cancel()
         flow = .idle
         Task {
-            await refresh()
-            apply()
+            let reached = await refresh()
+            if case .available = card {
+                apply()
+            } else if let refusal = ServerUpdateFlow.retryRefusal(check: check, reached: reached, host: host) {
+                flow = refusal
+            }
         }
     }
 
     /// After the app lost track: look again without starting anything new.
     func lookAgain() {
         guard case .lostTrack(let attempt) = flow else { return }
+        guard let target = attempt.map({ ServerUpdateTarget.attempt($0.attemptID) }) ?? target else { return }
         flow = .running(attempt, restartLater: attempt?.restartLater ?? false)
-        startFollowing(attemptID: attempt?.attemptID)
+        startFollowing(target)
     }
 
     /// "Copy details": the attempt as the server reported it, or the refusal.
@@ -176,12 +201,13 @@ final class ServerUpdateModel {
         }
     }
 
-    private func startFollowing(attemptID: String?) {
+    private func startFollowing(_ target: ServerUpdateTarget) {
         follow?.cancel()
+        self.target = target
         let follower = follower
         follow = Task { [weak self] in
             let result = await follower.follow(
-                attemptID: attemptID,
+                target: target,
                 client: { [weak self] in await self?.client },
                 progress: { [weak self] attempt in
                     await self?.progressed(attempt)
@@ -197,15 +223,12 @@ final class ServerUpdateModel {
 
     private func followed(_ result: ServerUpdateFlow) async {
         if case .running = result { return }   // cancelled
+        // `.idle`: the apply's answer was lost and no attempt of ours appeared, so it never
+        // started. The refresh below shows what the server offers now.
         flow = result
-        guard case .finished(let attempt) = result else { return }
-        switch attempt.outcome {
-        case .downloadedRestartRequired:
-            pendingRestart = attempt
-        case .updated, .updatedDiskStale:
+        if case .finished(let attempt) = result,
+           attempt.outcome == .updated || attempt.outcome == .updatedDiskStale {
             completedUpdates += 1
-        default:
-            break
         }
         // What runs now, and what it can do: the Done card names what turned on.
         await refresh()

@@ -363,6 +363,24 @@ final class ServerUpdateTests: XCTestCase {
         XCTAssertEqual(card(caps, check: .loaded(try check(restarted)), pending: downloaded), .hidden)
     }
 
+    /// Review of #566: the app keeps the finished `restart_later` attempt in its flow across the
+    /// reconnect after herdr restarts. Once the server runs the downloaded build, the card and the
+    /// badge must go; while it still runs the old build, both stay.
+    func testARestartIntoTheDownloadedBuildClearsTheCardAndBadgeAfterTheFlowFinished() throws {
+        let caps = try current()
+        let downloaded = attempt(phase: .installing, outcome: .downloadedRestartRequired, restartLater: true)
+        let restarted = #"{"running":{"version":"0.9.5","build_id":"2026-10-28-8a02b8340000","commit_time":1793200000},"latest":null,"update_available":false,"mode":"live"}"#
+        let afterRestart = card(caps, check: .loaded(try check(restarted)), flow: .finished(downloaded), pending: downloaded)
+        XCTAssertEqual(afterRestart, .hidden)
+        XCTAssertFalse(afterRestart.showsBadge(seen: nil))
+
+        let json = Self.availableJSON.replacingOccurrences(of: #""mode":"live""#,
+                                                           with: #""mode":"restart_required","reason":"systemd_main_process""#)
+        let sameOld = card(caps, check: .loaded(try check(json)), flow: .finished(downloaded), pending: downloaded)
+        XCTAssertEqual(sameOld, .restartPending(new: "0.9.5", reason: .systemdMainProcess))
+        XCTAssertTrue(sameOld.showsBadge(seen: sameOld.badgeKey))
+    }
+
     // MARK: Badge
 
     func testTheBadgeClearsOnceSeenAndReturnsForANewerVersion() {
@@ -448,7 +466,7 @@ final class ServerUpdateTests: XCTestCase {
         let client = HerdrClient(transport: RecordingTransport { _, _ in try script.next() })
         let seen = Seen()
         let result = await ServerUpdateFollower(intervalNanoseconds: 0, maxSilentPolls: 5)
-            .follow(attemptID: "u-1", client: { client }, sleep: { _ in }, progress: { seen.add($0.phase) })
+            .follow(target: .attempt("u-1"), client: { client }, sleep: { _ in }, progress: { seen.add($0.phase) })
         guard case .finished(let attempt) = result else { return XCTFail("expected an outcome, got \(result)") }
         XCTAssertEqual(attempt.outcome, .updated)
         XCTAssertEqual(attempt.panes, 14)
@@ -464,7 +482,7 @@ final class ServerUpdateTests: XCTestCase {
         })
         let polls = Script([.success("dead"), .success("dead"), .success("fresh")])
         let result = await ServerUpdateFollower(intervalNanoseconds: 0, maxSilentPolls: 5)
-            .follow(attemptID: "u-1", client: { (try? polls.next()) == "fresh" ? fresh : dead },
+            .follow(target: .attempt("u-1"), client: { (try? polls.next()) == "fresh" ? fresh : dead },
                     sleep: { _ in }, progress: { _ in })
         guard case .finished(let attempt) = result else { return XCTFail("expected an outcome, got \(result)") }
         XCTAssertEqual(attempt.outcome, .updated)
@@ -474,10 +492,79 @@ final class ServerUpdateTests: XCTestCase {
         let script = Script([Self.status("switching"), .failure(Dropped())])
         let client = HerdrClient(transport: RecordingTransport { _, _ in try script.next() })
         let result = await ServerUpdateFollower(intervalNanoseconds: 0, maxSilentPolls: 3)
-            .follow(attemptID: "u-1", client: { client }, sleep: { _ in }, progress: { _ in })
+            .follow(target: .attempt("u-1"), client: { client }, sleep: { _ in }, progress: { _ in })
         guard case .lostTrack(let last) = result else { return XCTFail("expected lostTrack, got \(result)") }
         XCTAssertEqual(last?.phase, .switching)
         XCTAssertEqual(script.asked, 4)
+    }
+
+    /// Review of #566: an apply whose answer was lost must not adopt the attempt that was already
+    /// in the server's status file (here yesterday's failure for the same build). It concludes
+    /// the update never started.
+    func testALostApplyDoesNotAdoptAnOlderFinishedAttempt() async throws {
+        let script = Script([.success(#"{"id":"x","result":{"type":"update_status","attempt":{"attempt_id":"upd-old","build_id":"b","from":"0.9.3 (4c1e9a2b)","to":"0.9.5 (8a02b834)","phase":"downloading","bytes_done":1,"bytes_total":2,"outcome":"failed_no_change"}}}"#)])
+        let client = HerdrClient(transport: RecordingTransport { _, _ in try script.next() })
+        let seen = Seen()
+        let result = await ServerUpdateFollower(intervalNanoseconds: 0, maxSilentPolls: 50, maxForeignPolls: 4)
+            .follow(target: .started(buildID: "b", previous: "upd-old"), client: { client }, sleep: { _ in },
+                    progress: { seen.add($0.phase) })
+        XCTAssertEqual(result, .idle)
+        XCTAssertEqual(seen.all, [])
+        XCTAssertEqual(script.asked, 4)
+    }
+
+    /// An older attempt for another build is not ours either, even with no attempt recorded
+    /// before the apply.
+    func testALostApplyDoesNotAdoptAnAttemptForAnotherBuild() async throws {
+        let script = Script([Self.status("confirming", outcome: "updated", id: "upd-x")])
+        let client = HerdrClient(transport: RecordingTransport { _, _ in try script.next() })
+        let result = await ServerUpdateFollower(intervalNanoseconds: 0, maxSilentPolls: 50, maxForeignPolls: 3)
+            .follow(target: .started(buildID: "other-build", previous: nil), client: { client }, sleep: { _ in },
+                    progress: { _ in })
+        XCTAssertEqual(result, .idle)
+    }
+
+    /// The attempt a lost apply did start: a new id for the confirmed build, followed to the end.
+    func testALostApplyFollowsTheNewAttemptForItsBuild() async throws {
+        let script = Script([.failure(Dropped()), Self.status("confirming", outcome: "rolled_back", id: "upd-old"),
+                             Self.status("downloading", id: "upd-new"),
+                             Self.status("confirming", outcome: "updated", id: "upd-new")])
+        let client = HerdrClient(transport: RecordingTransport { _, _ in try script.next() })
+        let result = await ServerUpdateFollower(intervalNanoseconds: 0, maxSilentPolls: 5, maxForeignPolls: 5)
+            .follow(target: .started(buildID: "b", previous: "upd-old"), client: { client }, sleep: { _ in },
+                    progress: { _ in })
+        guard case .finished(let attempt) = result else { return XCTFail("expected an outcome, got \(result)") }
+        XCTAssertEqual(attempt.attemptID, "upd-new")
+        XCTAssertEqual(attempt.outcome, .updated)
+    }
+
+    // MARK: Try again
+
+    /// Review of #566: Try again whose fresh check fails keeps a failed card with the reason,
+    /// instead of the card vanishing.
+    func testTryAgainAfterAFailedCheckShowsTheCheckFailure() throws {
+        let refusal = ServerUpdateFlow.retryRefusal(check: .failed(code: ServerUpdateErrorCode.manifestUnreachable),
+                                                    reached: true, host: "mac-mini")
+        XCTAssertEqual(refusal, .refused(code: "update_manifest_unreachable",
+                                         message: "mac-mini couldn't reach the update server."))
+        let shown = card(try current(), check: .failed(code: ServerUpdateErrorCode.manifestUnreachable),
+                         flow: try XCTUnwrap(refusal))
+        guard case .failed(_, .refused("update_manifest_unreachable", _), true) = shown else {
+            return XCTFail("expected a failed card that can be retried, got \(shown)")
+        }
+    }
+
+    func testTryAgainOnASilentServerSaysNothingStarted() {
+        XCTAssertEqual(ServerUpdateFlow.retryRefusal(check: .unknown, reached: false, host: "mac-mini"),
+                       .refused(code: ServerUpdateErrorCode.noAnswer,
+                                message: "mac-mini didn't answer, so nothing was started."))
+    }
+
+    /// The check answered with nothing to install (say another device already updated it):
+    /// the card shows what the server says, no failure.
+    func testTryAgainWhenTheCheckAnsweredLeavesTheCardToTheServer() throws {
+        let upToDate = try check(#"{"running":{"version":"0.9.5","commit_time":1793200000},"latest":null,"update_available":false,"mode":"live"}"#)
+        XCTAssertNil(ServerUpdateFlow.retryRefusal(check: .loaded(upToDate), reached: true, host: "mac-mini"))
     }
 
     /// Another attempt's status is not this one's progress.
@@ -485,7 +572,7 @@ final class ServerUpdateTests: XCTestCase {
         let script = Script([Self.status("confirming", outcome: "updated", id: "other")])
         let client = HerdrClient(transport: RecordingTransport { _, _ in try script.next() })
         let result = await ServerUpdateFollower(intervalNanoseconds: 0, maxSilentPolls: 3)
-            .follow(attemptID: "u-1", client: { client }, sleep: { _ in }, progress: { _ in })
+            .follow(target: .attempt("u-1"), client: { client }, sleep: { _ in }, progress: { _ in })
         guard case .lostTrack(let last) = result else { return XCTFail("expected lostTrack, got \(result)") }
         XCTAssertNil(last)
     }

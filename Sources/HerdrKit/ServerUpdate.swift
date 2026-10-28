@@ -305,6 +305,19 @@ public enum ServerUpdateErrorCode {
     public static let preflightFailed = "update_preflight_failed"
     /// A guest (or any non-owner) asked: the server's guest gate answers this.
     public static let guestForbidden = "guest_forbidden"
+    /// App-side, never sent by herdr: the server did not answer, so nothing was started.
+    public static let noAnswer = "no_answer"
+
+    /// The failed card's explanation for a check or apply that failed with `code`.
+    public static func describe(_ code: String, host: String) -> String {
+        switch code {
+        case manifestUnreachable: return "\(host) couldn't reach the update server."
+        case signatureInvalid: return "The new version isn't signed yet, so it can't be installed."
+        case manifestInvalid: return "The published update looks wrong, so it wasn't installed."
+        case noAnswer: return "\(host) didn't answer, so nothing was started."
+        default: return code
+        }
+    }
 }
 
 // MARK: - What this app needs from the server
@@ -501,18 +514,20 @@ extension ServerUpdateCard {
                             missingBefore: [ServerFeature],
                             requirement: ServerRequirement = .current) -> ServerUpdateCard {
         if check == .forbidden { return .hidden }
-        let loadedCheck: ServerUpdateCheck? = {
-            if case .loaded(let loaded) = check { return loaded }
+        let runningVersion: String? = {
+            if case .loaded(let loaded) = check { return loaded.running.version }
             return nil
         }()
-        let runningVersion = loadedCheck?.running.version
 
         switch flow {
         case .running(let attempt, let restartLater):
             return updating(attempt, restartLater: restartLater)
         case .finished(let attempt):
-            return finished(attempt, capabilities: capabilities, missingBefore: missingBefore,
-                            reason: loadedCheck?.reason)
+            // A download for the next restart is pending only while the server still runs
+            // another build: that is decided below, from what the server reports now.
+            if let card = finished(attempt, capabilities: capabilities, missingBefore: missingBefore) {
+                return card
+            }
         case .refused(let code, let message):
             let old = runningVersion.map(ServerUpdateVersion.base) ?? ""
             // A build that changed under the user, or one already running, is re-checked
@@ -532,7 +547,9 @@ extension ServerUpdateCard {
         guard ServerFeature.serverUpdate.isAdvertised(by: capabilities) else { return .tooOld }
         guard case .loaded(let loaded) = check else { return .hidden }
 
-        if let pending = pendingRestart, pending.outcome == .downloadedRestartRequired,
+        var pending = pendingRestart
+        if case .finished(let attempt) = flow, attempt.outcome == .downloadedRestartRequired { pending = attempt }
+        if let pending, pending.outcome == .downloadedRestartRequired,
            loaded.running.buildID != pending.buildID {
             return .restartPending(new: ServerUpdateVersion.labels(old: pending.from, new: pending.to).new,
                                    reason: loaded.reason)
@@ -579,8 +596,9 @@ extension ServerUpdateCard {
                          restartLater: attempt.restartLater || restartLater)
     }
 
+    /// The card for a finished attempt; nil for a download waiting for the next restart.
     static func finished(_ attempt: ServerUpdateAttempt, capabilities: ServerCapabilities?,
-                         missingBefore: [ServerFeature], reason: ServerUpdateCheck.Reason?) -> ServerUpdateCard {
+                         missingBefore: [ServerFeature]) -> ServerUpdateCard? {
         let labels = ServerUpdateVersion.labels(old: attempt.from, new: attempt.to)
         switch attempt.outcome {
         case .updated, .updatedDiskStale:
@@ -588,7 +606,7 @@ extension ServerUpdateCard {
             return .done(new: labels.new, panes: attempt.panes, nowOn: nowOn,
                          diskStale: attempt.outcome == .updatedDiskStale)
         case .downloadedRestartRequired:
-            return .restartPending(new: labels.new, reason: reason)
+            return nil
         case .rolledBack:
             // The server does not offer a build that rolled back here again.
             return .failed(old: labels.old, failure: .rolledBack(message: attempt.message), canRetry: false)
@@ -605,6 +623,27 @@ extension ServerUpdateCard {
 
 // MARK: - Following an attempt across the handoff
 
+/// Which attempt the app follows. An attempt the server reports is never adopted unless it is
+/// the one this app started (or found running): an older attempt in the server's status file,
+/// finished or not, is not this update's progress.
+public enum ServerUpdateTarget: Sendable, Equatable {
+    /// The attempt `update_apply` answered with, or one found running on connect.
+    case attempt(String)
+    /// An `update_apply` whose answer was lost with the connection. Its attempt, if it started,
+    /// is for `buildID` and is not `previous`, the attempt the server reported just before the
+    /// apply (nil: none). herdr mints a fresh `attempt_id` for every apply that passes preflight.
+    case started(buildID: String, previous: String?)
+
+    public func matches(_ attempt: ServerUpdateAttempt) -> Bool {
+        switch self {
+        case .attempt(let id):
+            return attempt.attemptID == id
+        case .started(let buildID, let previous):
+            return attempt.buildID == buildID && attempt.attemptID != previous
+        }
+    }
+}
+
 /// Polls `server.update_status` until the attempt has an outcome. The handoff drops every
 /// client, so failed polls are expected for a few seconds: they are counted, not fatal. Each
 /// poll asks `client()` for the connection to use, so a reconnect that replaces the client
@@ -612,47 +651,76 @@ extension ServerUpdateCard {
 public struct ServerUpdateFollower: Sendable {
     /// Between polls.
     public var intervalNanoseconds: UInt64
-    /// Consecutive polls without an answer about the attempt before the app stops waiting. At the default
-    /// interval, two minutes: longer than any handoff, shorter than forever.
+    /// Consecutive polls without an answer about the attempt before the app stops waiting. At the
+    /// default interval, two minutes: longer than any handoff, shorter than forever.
     public var maxSilentPolls: Int
+    /// For an apply whose answer was lost: consecutive answers that report no new attempt before
+    /// the app concludes the update never started.
+    public var maxForeignPolls: Int
 
-    public init(intervalNanoseconds: UInt64 = 1_000_000_000, maxSilentPolls: Int = 120) {
+    public init(intervalNanoseconds: UInt64 = 1_000_000_000, maxSilentPolls: Int = 120,
+                maxForeignPolls: Int = 10) {
         self.intervalNanoseconds = intervalNanoseconds
         self.maxSilentPolls = maxSilentPolls
+        self.maxForeignPolls = maxForeignPolls
     }
 
-    /// Follows `attemptID` (nil: whichever attempt the server reports) and returns how it
-    /// ended: `.finished` with the outcome, `.lostTrack` when the server stayed silent, or
+    /// Follows `target` and returns how it ended: `.finished` with the outcome, `.lostTrack` when
+    /// the server stayed silent, `.idle` when an apply whose answer was lost never started, or
     /// `.running` if the task was cancelled first. `progress` sees every answer on the way.
     public func follow(
-        attemptID: String?,
+        target: ServerUpdateTarget,
         client: @Sendable () async -> HerdrClient?,
         sleep: @Sendable (UInt64) async throws -> Void = { try await Task.sleep(nanoseconds: $0) },
         progress: @Sendable (ServerUpdateAttempt) async -> Void
     ) async -> ServerUpdateFlow {
         var last: ServerUpdateAttempt?
         var silent = 0
+        var foreign = 0
         while !Task.isCancelled {
             var answered = false
+            var reportedOther = false
             if let connection = await client() {
                 do {
-                    // Only this attempt counts as an answer: a server that keeps reporting
-                    // another one (or none) has lost it, and is given up on like silence.
-                    if let attempt = try await connection.updateStatus(),
-                       attemptID == nil || attempt.attemptID == attemptID {
+                    let attempt = try await connection.updateStatus()
+                    if let attempt, target.matches(attempt) {
                         answered = true
                         last = attempt
                         await progress(attempt)
                         if attempt.outcome != nil { return .finished(attempt) }
+                    } else {
+                        reportedOther = true
                     }
                 } catch {
                     // The handoff closed the connection, or the new server is not up yet.
                 }
             }
+            // A server that answers about another attempt (or none) has not started this one,
+            // or has lost it once it had: given up on like silence.
             silent = answered ? 0 : silent + 1
+            if case .started = target, last == nil {
+                foreign = reportedOther ? foreign + 1 : 0
+                if foreign >= maxForeignPolls { return .idle }
+            }
             if silent >= maxSilentPolls { return .lostTrack(last) }
             do { try await sleep(intervalNanoseconds) } catch { break }
         }
         return .running(last, restartLater: last?.restartLater ?? false)
+    }
+}
+
+extension ServerUpdateFlow {
+    /// What Try again shows when the fresh check offers nothing to install: the check's failure,
+    /// or the server not answering. Nil when the check answered: the card then shows what the
+    /// server says (for example that it is up to date).
+    public static func retryRefusal(check: ServerUpdateCheckState, reached: Bool, host: String) -> ServerUpdateFlow? {
+        if case .failed(let code) = check {
+            return .refused(code: code, message: ServerUpdateErrorCode.describe(code, host: host))
+        }
+        guard reached else {
+            return .refused(code: ServerUpdateErrorCode.noAnswer,
+                            message: ServerUpdateErrorCode.describe(ServerUpdateErrorCode.noAnswer, host: host))
+        }
+        return nil
     }
 }
