@@ -80,9 +80,11 @@ final class AgentFoldersTests: XCTestCase {
         let vetrina = row(app, "w1:p2"), jarvis = row(app, "w1:p1")
         XCTAssertTrue(vetrina.label.contains("starred"), "vetrina shows its star, got \(vetrina.label)")
         XCTAssertLessThan(vetrina.frame.minY, jarvis.frame.minY, "the starred agent is first")
-        // Folders follow the loose agents of the state they sit in.
-        XCTAssertLessThan(jarvis.frame.minY, enyo.frame.minY)
+        // Folders sit after the starred agents of their state and before the others
+        // (owner report 2026-10-28: they had sunk to the bottom of the section).
+        XCTAssertLessThan(vetrina.frame.minY, enyo.frame.minY, "starred agents come before the folders")
         XCTAssertLessThan(enyo.frame.minY, herdr.frame.minY, "folders in their order")
+        XCTAssertLessThan(herdr.frame.minY, jarvis.frame.minY, "folders come before the unstarred agents")
 
         // Tap opens it in place: its agents, most urgent first, under it and indented.
         toggle(enyo, toExpanded: true)
@@ -111,6 +113,41 @@ final class AgentFoldersTests: XCTestCase {
         _ = waitForFolders(app)
         XCTAssertTrue(row(app, "w1:p4").waitForExistence(timeout: 5), "Herdr is still open after a relaunch")
         XCTAssertFalse(row(app, "w1:p3").exists, "Enyo is still closed")
+    }
+
+    /// Owner report 2026-10-28: the folder picture showed every agent's initial even when it
+    /// wears a mascot. Each cell is the agent's own avatar, as its row draws it.
+    func testFolderPictureShowsItsAgentsAvatars() {
+        let app = launch()
+        let enyo = waitForFolders(app)
+        let herdr = folder(app, "herdr")
+        XCTAssertTrue(herdr.waitForExistence(timeout: 5))
+        XCTAssertFalse(row(app, "w1:p3").exists, "Enyo is closed: only its picture shows its agents")
+
+        func cell(_ name: String) -> XCUIElement {
+            app.descendants(matching: .any).matching(identifier: "folder-avatar-\(name)").firstMatch
+        }
+        let expected: [(String, XCUIElement, String, String)] = [
+            ("enyo-review", enyo, "mascot:bot", "Bot"),
+            ("enyo-efm", enyo, "initial", "Initial E"),
+            ("enyo", enyo, "mascot:tri", "Tri"),
+            ("enyo-scout", enyo, "mascot:drop", "Drop"),
+            ("herdr-ios", herdr, "initial", "Initial H"),
+            ("herdr-app", herdr, "mascot:cub", "Cub"),
+        ]
+        for (name, owner, kind, label) in expected {
+            let picture = cell(name)
+            XCTAssertTrue(picture.waitForExistence(timeout: 5), "\(owner) has no picture cell for \(name)")
+            XCTAssertTrue(poll(5, every: 0.1) { (picture.value as? String) == kind },
+                          "\(name)'s cell should show \(kind), got \(String(describing: picture.value))")
+            XCTAssertEqual(picture.label, label, "\(name)'s cell reads as its avatar")
+            let center = CGPoint(x: picture.frame.midX, y: picture.frame.midY)
+            XCTAssertTrue(owner.frame.contains(center), "\(name)'s cell sits in its folder's row")
+        }
+
+        enyo.waitForSettledFrame()
+        attach(enyo.screenshot(), "agent-folder-avatars-row")
+        attach(app, "agent-folder-avatars")
     }
 
     func testNeedsYouPillCountsAgentsInClosedFolders() {

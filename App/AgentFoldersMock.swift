@@ -11,7 +11,8 @@ import HerdrKit
 /// folders that each hold someone waiting:
 /// - Enyo: enyo-review (waiting), enyo-efm (stopped), enyo (working), enyo-scout (idle)
 /// - Herdr: herdr-ios (waiting), herdr-app (working)
-/// and vetrina starred.
+/// and vetrina starred. Some agents wear a mascot (`mascots`), the way the owner's do, and the
+/// rest their initial tile, so a folder picture shows both.
 struct AgentFoldersMockTransport: HerdrTransport {
     private let base = MockTransport()
 
@@ -55,10 +56,17 @@ struct AgentFoldersMockTransport: HerdrTransport {
         stars: ["vetrina"]
     )
 
+    /// The `avatar` an agent wears in `agent.list`, by name: enyo-review Bot, enyo Tri,
+    /// enyo-scout Drop, herdr-app Cub. enyo-efm keeps its initial tile.
+    static let mascots: [String: String] = [
+        "enyo-review": "bot", "enyo": "tri", "enyo-scout": "drop", "herdr-app": "cub",
+    ]
+
     static let agentList: String = {
         let agents = roster.map { pane, name, status in
             let wire = status == "stopped" ? "idle" : status
-            return #"{"pane_id":"\#(pane)","name":"\#(name)","agent":"claude","agent_status":"\#(wire)","cwd":"/root/\#(name)","terminal_title_stripped":"\#(status == "blocked" ? "asking to run tests" : "editing the build")"}"#
+            let avatar = mascots[name].map { #","avatar":{"style":"mascot","mascot":"\#($0)","sha256":null,"updated_unix_ms":1723041000000}"# } ?? ""
+            return #"{"pane_id":"\#(pane)","name":"\#(name)"\#(avatar),"agent":"claude","agent_status":"\#(wire)","cwd":"/root/\#(name)","terminal_title_stripped":"\#(status == "blocked" ? "asking to run tests" : "editing the build")"}"#
         }
         return #"{"id":"mock","result":{"type":"agent_list","agents":[\#(agents.joined(separator: ","))]}}"#
     }()
