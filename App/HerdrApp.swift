@@ -7623,10 +7623,6 @@ struct SettingsView: View {
         // Fetch the daemon version + any staged self-update. `try?` so an older daemon without
         // `server.staged_update` leaves it nil (version line + update callout simply absent).
         .task { stagedUpdate = try? await client.stagedUpdate() }
-        // After a herdr update the Connection line names the new build.
-        .onChange(of: serverUpdate?.completedUpdates ?? 0) { _, _ in
-            Task { stagedUpdate = try? await client.stagedUpdate() }
-        }
         // The Shared access row's summary; `try?`-style degrade lives in the model.
         .task { await loadGuestAccess() }
         // "How to set up accounts" — a step-by-step guide for adding another
@@ -8260,6 +8256,11 @@ struct SettingsView: View {
             } else {
                 daemonUpdateCallout
             }
+        }
+        // After a herdr update the Connection line names the new build. Here, not on the
+        // body's long modifier chain, which is at the type checker's limit.
+        .onChange(of: serverUpdate?.completedUpdates ?? 0) { _, _ in
+            Task { stagedUpdate = try? await client.stagedUpdate() }
         }
     }
 
