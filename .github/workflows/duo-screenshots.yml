@@ -5,9 +5,6 @@ name: Duo screenshots
 
 on:
   workflow_dispatch:
-  # TEMPORARY: registers the workflow so it can be dispatched from this branch.
-  push:
-    branches: [duo-screenshots]
 
 concurrency:
   group: duo-screenshots-${{ github.ref }}
