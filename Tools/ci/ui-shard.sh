@@ -214,21 +214,26 @@ sys.exit(1 if missing else 0)
 # Herdrup Desktop's reference screenshots (DesktopReferenceShots, herdrup-desktop#16) on
 # one reference iPad. The pictures must be the same on every run, so the app starts from a
 # fresh install (no UserDefaults left by earlier rounds), the device is dark, and the status
-# bar is pinned: 9:41 on 28 Oct 2026 (an ISO --time also pins the date iPadOS shows beside
-# the time), full battery, charged, no cellular, three Wi-Fi bars. The override is listed
-# into the receipts, which design/reference/agent-list/manifest.json records, and cleared
-# afterwards so later rounds on the device see the real status bar.
-DESKTOP_REFERENCE_STATUS_BAR=(--time 2026-10-28T09:41:00Z --batteryLevel 100 --batteryState charged
-  --cellularMode notSupported --wifiBars 3)
+# bar is pinned: 9:41, full battery, charged, no cellular, three Wi-Fi bars. The time is
+# first given as an ISO date-time, which also pins the date iPadOS shows beside it; simctl
+# rejected `2026-10-28T09:41:00Z` as "non-ISO" (run 40681584968), so the offset form is tried
+# and a plain `9:41` is the fallback. The override actually used is listed into the
+# receipts, which design/reference/agent-list/manifest.json records, and cleared afterwards
+# so later rounds on the device see the real status bar.
+DESKTOP_REFERENCE_STATUS_BAR=(--batteryLevel 100 --batteryState charged --cellularMode notSupported --wifiBars 3)
 desktop_reference_round() {
-  local label="$1" udid="$2" bundle_id status=0
+  local label="$1" udid="$2" bundle_id status=0 time
   boot_simulator "$udid" "TestReceipts/$label-boot.log" || return 1
   bundle_id=$(/usr/libexec/PlistBuddy -c 'Print :CFBundleIdentifier' "$APP_UNDER_TEST/Info.plist") || return 1
   xcrun simctl uninstall "$udid" "$bundle_id" >/dev/null 2>&1 || true
   xcrun simctl ui "$udid" appearance dark || return 1
-  xcrun simctl status_bar "$udid" override "${DESKTOP_REFERENCE_STATUS_BAR[@]}" || return 1
+  time=2026-10-28T09:41:00+00:00
+  if ! xcrun simctl status_bar "$udid" override --time "$time" "${DESKTOP_REFERENCE_STATUS_BAR[@]}"; then
+    time=9:41
+    xcrun simctl status_bar "$udid" override --time "$time" "${DESKTOP_REFERENCE_STATUS_BAR[@]}" || return 1
+  fi
   {
-    echo "xcrun simctl status_bar <udid> override ${DESKTOP_REFERENCE_STATUS_BAR[*]}"
+    echo "xcrun simctl status_bar <udid> override --time $time ${DESKTOP_REFERENCE_STATUS_BAR[*]}"
     xcrun simctl status_bar "$udid" list
   } | tee "TestReceipts/$label-status-bar.txt"
   run_suite "$label" "$udid" 15m -only-testing:HerdrUITests/DesktopReferenceShots || status=1
