@@ -2427,10 +2427,13 @@ struct TerminalHomeView: View {
             }
             // A floor under the detail column, so a window just wider than two columns
             // (iPhone Duo's inner display held tall, 669 pt) shows them side by side. Without
-            // it UIKit's own default minimum for the secondary column did not fit beside the
-            // 320 pt sidebar, and the split laid the sidebar OVER the detail: the detail kept
-            // the full width from x = 0 and its centred content ran under the sidebar.
-            .background { SplitDetailMinimumWidth(width: DesignTokens.Size.sidebarMin) }
+            // it the split's automatic minimum for the detail did not fit beside the 320 pt
+            // sidebar, and it laid the sidebar OVER the detail: the detail kept the full
+            // width from x = 0 and its centred content ran under the sidebar. Setting
+            // UIKit's `minimumSecondaryColumnWidth` from inside the column did not hold
+            // (CI 40781118758 read it back unset); this is SwiftUI's own control for it.
+            .navigationSplitViewColumnWidth(min: DesignTokens.Size.sidebarMin,
+                                            ideal: DesignTokens.Size.sidebarMin)
             .duoProbe("detail")
             // NO SIZE CONTRACT IS ADDED HERE, AND THE ONE I TRIED IS WITHDRAWN.
             //
@@ -11015,46 +11018,3 @@ final class CCScrollDriver: @unchecked Sendable {
 }
 #endif
 
-/// Sets the hosting split view's minimum width for its secondary (detail) column.
-/// SwiftUI's `navigationSplitViewColumnWidth` governs the sidebar here; the detail column's
-/// floor is otherwise UIKit's automatic default, which on a 669 pt window did not fit beside
-/// a 320 pt sidebar and turned the split into an overlay. Placed in the detail column, its
-/// view finds the `UISplitViewController` that SwiftUI's `NavigationSplitView` is built on
-/// through the responder chain (the view is not inside a child view controller of its own).
-private struct SplitDetailMinimumWidth: UIViewRepresentable {
-    let width: CGFloat
-
-    final class Probe: UIView {
-        var width: CGFloat = 0 { didSet { apply() } }
-
-        override func didMoveToWindow() {
-            super.didMoveToWindow()
-            apply()
-        }
-
-        override func layoutSubviews() {
-            super.layoutSubviews()
-            apply()
-        }
-
-        private func apply() {
-            guard #available(iOS 26.0, *), window != nil else { return }
-            var responder: UIResponder? = self
-            while let current = responder, !(current is UISplitViewController) { responder = current.next }
-            guard let split = responder as? UISplitViewController,
-                  split.minimumSecondaryColumnWidth != width else { return }
-            split.minimumSecondaryColumnWidth = width
-        }
-    }
-
-    func makeUIView(context: Context) -> Probe {
-        let view = Probe()
-        view.isUserInteractionEnabled = false
-        view.width = width
-        return view
-    }
-
-    func updateUIView(_ view: Probe, context: Context) {
-        view.width = width
-    }
-}
