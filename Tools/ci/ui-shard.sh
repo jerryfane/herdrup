@@ -45,10 +45,25 @@ SETTINGS_PROJECT=(-project Herdr.xcodeproj -scheme Herdr -configuration Distribu
   ONLY_ACTIVE_ARCH=YES CODE_SIGNING_ALLOWED=NO)
 
 recorder=
+# BOUNDED: SIGINT asks the recorder to finish the video; one that never exits is killed
+# after 60 s. Run 40728450580's iPad shard (Xcode 27.1) logged "simulator ... failed to
+# become ready within 5m" for iPadResize while recordVideo ran, then nothing for four hours
+# until the 255m job timeout: its receipts hold a 0-byte terminal-resize-iPad.mp4 next to
+# an unfinished terminal-resize-iPad.mp4.sb-* temp file, so the recorder never exited and
+# the old bare `wait` here never returned.
 stop_recording() {
   if [ -n "$recorder" ]; then
     kill -INT "$recorder" 2>/dev/null || true
-    wait "$recorder" || true
+    local waited=0
+    while kill -0 "$recorder" 2>/dev/null && [ "$waited" -lt 60 ]; do
+      sleep 1
+      waited=$((waited + 1))
+    done
+    if kill -0 "$recorder" 2>/dev/null; then
+      echo "::warning::screen recorder $recorder did not stop within 60 s of SIGINT; killed (video incomplete)"
+      kill -KILL "$recorder" 2>/dev/null || true
+    fi
+    wait "$recorder" 2>/dev/null || true
     recorder=
   fi
 }
