@@ -118,10 +118,14 @@ install_app_under_test() {
   echo "$(date -u +%FT%TZ) installed in $(( $(date +%s) - start )) s" | tee -a "$log"
 }
 
-# Prints one -only-testing argument per failed test case in an .xcresult.
+# Prints one -only-testing argument per failed test case in an .xcresult. A runner that
+# crashes while bootstrapping is recorded as a failed "Test Case" named like
+# "HerdrUITests-Runner (21391) encountered an error" (run 40728450580, iPhoneStatusMotion);
+# passed to xcodebuild, it failed with "Unknown build action '(21391)'". Only Class/method
+# identifiers are tests to rerun.
 failed_tests() {
   xcrun xcresulttool get test-results tests --path "$1" 2>/dev/null | python3 -c '
-import json, sys
+import json, re, sys
 try:
     data = json.load(sys.stdin)
 except ValueError:
@@ -130,7 +134,9 @@ def walk(node, bundle):
     if node.get("nodeType") in ("UI test bundle", "Unit test bundle"):
         bundle = node.get("name")
     if node.get("nodeType") == "Test Case" and node.get("result") == "Failed" and bundle:
-        print("-only-testing:%s/%s" % (bundle, node["nodeIdentifier"].removesuffix("()")))
+        identifier = node["nodeIdentifier"].removesuffix("()")
+        if re.fullmatch(r"\w+/\w+", identifier):
+            print("-only-testing:%s/%s" % (bundle, identifier))
     for child in node.get("children", []):
         walk(child, bundle)
 for node in data.get("testNodes", []):
