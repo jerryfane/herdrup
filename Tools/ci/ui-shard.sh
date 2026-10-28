@@ -103,8 +103,14 @@ install_app_under_test() {
     echo "::error::installing $bundle_id on $udid failed or timed out; see $log"
     return 1
   fi
+  echo "$(date -u +%FT%TZ) simctl install returned after $(( $(date +%s) - start )) s" >>"$log"
   # simctl install returns when installd is done; the container proves the system has it.
-  if ! "$TIMEOUT_BIN" --signal=TERM --kill-after=15s 1m \
+  # 5m, as the install. Run 40728450580 (Xcode 27.1, first install after a cold boot) logged
+  # only the install line on two iPhones before "no app container ... (or the query timed
+  # out)", 169 s and 204 s after the install began. The query prints the path or an error,
+  # so an empty log means the old 1m bound killed it while the simulator was still busy;
+  # the same run's other cold-boot install took 186 s against 26-84 s on Xcode 26.
+  if ! "$TIMEOUT_BIN" --signal=TERM --kill-after=15s 5m \
       xcrun simctl get_app_container "$udid" "$bundle_id" app >>"$log" 2>&1; then
     echo "::error::$bundle_id has no app container on $udid after install (or the query timed out); see $log"
     return 1
