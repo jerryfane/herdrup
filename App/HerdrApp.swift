@@ -125,7 +125,7 @@ struct RootView: View {
         return Group {
             #if DEBUG
             if let mock = ScreenshotMock.mode {
-                mockView(mock)
+                mockView(mock).duoProbe("root")
             } else {
                 liveContent
             }
@@ -2346,6 +2346,7 @@ struct TerminalHomeView: View {
                 // can still scroll their last row into view.
                 .safeAreaInset(edge: .bottom, spacing: 0) { sidebarTabBar }
             }
+            .duoProbe("sidebar")
             // Remembered width. SwiftUI exposes no way to READ a divider drag, so the
             // column measures itself and feeds the settled value back as `ideal` on the
             // next launch. Clamped to the same min/max the modifier enforces, so a
@@ -2424,6 +2425,7 @@ struct TerminalHomeView: View {
                 if columnVisibility == .detailOnly { sidebarRail }
                 detailColumn
             }
+            .duoProbe("detail")
             // NO SIZE CONTRACT IS ADDED HERE, AND THE ONE I TRIED IS WITHDRAWN.
             //
             // It was `.frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)`,
@@ -2454,6 +2456,7 @@ struct TerminalHomeView: View {
             .toolbar(.hidden, for: .navigationBar)
         }
         .navigationSplitViewStyle(.balanced)
+        .duoProbe("split")
         // The split's own sidebar carries the FULL list; minimising hides that column and
         // hands its job to the rail.
         //
@@ -6040,6 +6043,7 @@ struct TerminalPaneContent: View {
                 if group != nil { agentActionsMenu }
             }
         }
+        .duoProbe("paneHeader")
         // Fixed across find / status / no-status states, but scaled with the app's text
         // size: at 140 % the title (16 pt) over the status line (11 pt) needs ~47 pt and
         // would overflow a plain 44 pt bar. The height then changes only when the user

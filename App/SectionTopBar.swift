@@ -124,6 +124,7 @@ struct SectionTopBar<Leading: View, Actions: View>: View {
             }
         }
         .frame(height: DesignTokens.Size.topBar)
+        .duoProbe("topBar \(title)")
         .padding(.horizontal, DesignTokens.Space.screenInset)
         .padding(.bottom, 8)
     }

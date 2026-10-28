@@ -623,6 +623,7 @@ struct GramView: View {
         .padding(.top, 8)
         .padding(.bottom, 6)
         .frame(maxWidth: .infinity)
+        .duoProbe("gramHeader")
     }
 
     /// The header's inline field, shared with the terminal pane (`InlineSearchField`).
@@ -711,6 +712,7 @@ struct GramView: View {
         .padding(.horizontal, 16)
         .padding(.top, 4)
         .padding(.bottom, 8)
+        .duoProbe("gramHeader")
     }
 
     /// The unread count, when there is one.

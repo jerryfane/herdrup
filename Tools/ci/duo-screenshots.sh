@@ -116,6 +116,9 @@ field() { python3 -c 'import json,sys; v=json.load(open(sys.argv[1])).get(sys.ar
 
 launch() { # <screen>
   t 60 xcrun simctl terminate "$UDID" "$BUNDLE_ID" 2>/dev/null || true
+  # The DEBUG geometry probe (App/DuoGeometryProbe.swift) writes here; start each screen clean.
+  data=$(t 60 xcrun simctl get_app_container "$UDID" "$BUNDLE_ID" data 2>/dev/null) &&
+    rm -f "$data/Documents/duo-probe.json"
   if [ "$1" = connect ]; then
     # A clean install, so no earlier mock run can leave state behind on the empty screen.
     t 120 xcrun simctl uninstall "$UDID" "$BUNDLE_ID" || true
@@ -240,6 +243,8 @@ for pose in $POSES; do
       fail "$pose/$screen: screenshot: ${err:-timed out after 300 s}"; continue
     fi
     log "saved $dir/$screen.png ($(stat -f %z "$dir/$screen.png") bytes)"
+    data=$(t 60 xcrun simctl get_app_container "$UDID" "$BUNDLE_ID" data 2>/dev/null) &&
+      cp "$data/Documents/duo-probe.json" "$dir/$screen.geometry.json" 2>/dev/null || true
   done
 done
 
