@@ -84,6 +84,9 @@ jobs:
   # ITS OWN JOB, on the plain runner, NOT a step in the Swift job: the `swift:6.1`
   # container carries no python3, so as a step there it exited 127 and turned the Linux
   # job red on this PR. Nothing here needs Swift, and nothing in Swift needs this.
+  #
+  # The design-token check rides on this job for the same reason: it needs python3 and
+  # git, not Swift, and this is the cheapest job that has them.
   symbol-font-subset:
     name: Symbol font is the upstream subset
     runs-on: ubuntu-latest
@@ -100,6 +103,20 @@ jobs:
           /tmp/fontenv/bin/pip install --quiet 'fonttools==4.65.0'
           /tmp/fontenv/bin/python Tools/subset-symbols-font.py \
             Tools/upstream/SymbolsNerdFontMono-Regular.ttf --check
+
+      # App/Generated/DesignTokens.swift is written from design/tokens.json (shared with
+      # Herdrup Desktop) by Tools/tokens/generate.py. Regenerate it and fail if the
+      # committed copy differs, so the JSON and the Swift the app builds cannot drift.
+      - name: Verify the design tokens are generated
+        run: |
+          set -euo pipefail
+          python3 Tools/tokens/generate.py
+          if ! git diff --exit-code -- App/Generated \
+            || [ -n "$(git status --porcelain --untracked-files=all -- App/Generated)" ]; then
+            git status --short -- App/Generated
+            echo "::error::App/Generated is stale: edit design/tokens.json, run python3 Tools/tokens/generate.py, commit both."
+            exit 1
+          fi
 
   # THE DEVICE SUITE, AS PARALLEL SIMULATOR JOBS. It used to be one serial job: the
   # iPhone suite (~45 min of tests), then the iPad rounds (~25 min) waiting behind it,

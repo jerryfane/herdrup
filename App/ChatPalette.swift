@@ -4,7 +4,8 @@ import SwiftUI
 /// The chat's colours from omp's theme (`theme.dark` in omp's config): headings and step
 /// tool names in the accent, as omp's terminal draws its titles, and code blocks with
 /// syntax colours on the theme's code background. Hex values, so a palette is a value a
-/// cache can key on; the views read `Color`s from it, never their own literals.
+/// cache can key on; the views read `Color`s from it, never their own literals. The values
+/// live in design/tokens.json (`chat.dark`, `chat.light`), read here through `DesignTokens`.
 struct ChatPalette: Hashable, Sendable {
     let heading: UInt32
     let toolTitle: UInt32
@@ -22,20 +23,26 @@ struct ChatPalette: Hashable, Sendable {
     let deleted: UInt32
 
     /// omp's dark-tokyo-night: the owner's theme.
-    static let darkTokyoNight = ChatPalette(
-        heading: 0xBB9AF7, toolTitle: 0xBB9AF7,
-        codeText: 0xA9B1D6, codeBackground: 0x16161E, codeBorder: 0x363B54,
-        keyword: 0xBB9AF7, string: 0x9ECE6A, comment: 0x51597D, function: 0x7AA2F7,
-        number: 0xFF9E64, type: 0x0DB9D7, op: 0xA9B1D6,
-        inserted: 0x9ECE6A, deleted: 0xF7768E)
+    static let darkTokyoNight: ChatPalette = {
+        typealias T = DesignTokens.Chat.Dark
+        return ChatPalette(
+            heading: T.heading, toolTitle: T.toolTitle,
+            codeText: T.codeText, codeBackground: T.codeBackground, codeBorder: T.codeBorder,
+            keyword: T.keyword, string: T.string, comment: T.comment, function: T.function,
+            number: T.number, type: T.type, op: T.op,
+            inserted: T.inserted, deleted: T.deleted)
+    }()
 
     /// omp's light-tokyo-night, for when the app has a light appearance.
-    static let lightTokyoNight = ChatPalette(
-        heading: 0xB15C00, toolTitle: 0x3760BF,
-        codeText: 0x6172B0, codeBackground: 0xE1E2E7, codeBorder: 0xB4B5B9,
-        keyword: 0x7847BD, string: 0x587539, comment: 0x848CB5, function: 0x2E7DE9,
-        number: 0xB15C00, type: 0x007197, op: 0x9854F1,
-        inserted: 0x587539, deleted: 0xC64343)
+    static let lightTokyoNight: ChatPalette = {
+        typealias T = DesignTokens.Chat.Light
+        return ChatPalette(
+            heading: T.heading, toolTitle: T.toolTitle,
+            codeText: T.codeText, codeBackground: T.codeBackground, codeBorder: T.codeBorder,
+            keyword: T.keyword, string: T.string, comment: T.comment, function: T.function,
+            number: T.number, type: T.type, op: T.op,
+            inserted: T.inserted, deleted: T.deleted)
+    }()
 
     /// The app is dark-only today.
     static let current = darkTokyoNight
