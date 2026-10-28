@@ -2,8 +2,11 @@
 // Edit design/tokens.json, run `python3 Tools/tokens/generate.py`, commit both.
 // CI regenerates this file and fails if it differs from the committed copy.
 
+import SwiftUI
+
 /// The shared design tokens (design/tokens.json), the source of truth for this app's
-/// colours and fonts and for Herdrup Desktop's. Colours are 0xRRGGBB.
+/// colours, fonts and shared layout numbers and for Herdrup Desktop's. Colours are
+/// 0xRRGGBB; space, radius, size and text sizes are points (text sizes at scale 1).
 enum DesignTokens {
     enum Color {
         enum Dark {
@@ -121,15 +124,180 @@ enum DesignTokens {
             }
             static let license: String = "App/Fonts/IBMPlexMono-OFL.txt"
         }
+        enum System {
+            static let family: String = "system"
+            static let fallback: [String] = ["-apple-system", "BlinkMacSystemFont", "Segoe UI", "Inter", "system-ui", "sans-serif"]
+        }
     }
     enum TypeRole {
         enum MicroLabel {
-            static let font: String = "machine"
-            static let size: Int = 11
-            static let weight: Int = 600
-            static let uppercase: Bool = true
+            static let font: String = "machine"  // {text.microLabel.font}
+            static let size: Int = 11  // {text.microLabel.size}
+            static let weight: Int = 600  // {text.microLabel.weight}
+            static let uppercase: Bool = true  // {text.microLabel.uppercase}
             /// Derived: font.machine.faces.600.postscript.
             static let postscript: String = "IBMPlexMono-SmBld"
+        }
+    }
+    enum Space {
+        static let rowLead: CGFloat = 20
+        static let rowLeadIndented: CGFloat = 44
+        static let avatarGap: CGFloat = 12
+        static let rowTrail: CGFloat = 16
+        static let screenInset: CGFloat = 16
+        static let stackTight: CGFloat = 2
+        static let stackSmall: CGFloat = 6
+        static let stackMedium: CGFloat = 8
+        static let stackLarge: CGFloat = 12
+    }
+    enum Radius {
+        static let selection: CGFloat = 12
+        static let card: CGFloat = 14
+        static let group: CGFloat = 18
+        static let tile: CGFloat = 10
+        static let badgeSquare: CGFloat = 6
+    }
+    enum Size {
+        static let agentRow: CGFloat = 80
+        static let agentRowPhone: CGFloat = 86
+        static let disclosureRow: CGFloat = 48
+        static let avatarSidebar: CGFloat = 44
+        static let avatarPhone: CGFloat = 52
+        static let avatarGlyphSidebar: CGFloat = 19
+        static let avatarGlyphPhone: CGFloat = 22
+        static let statusBadge: CGFloat = 22
+        static let statusBadgeStroke: CGFloat = 2.5
+        static let statusBadgeOffset: CGFloat = 4
+        static let selectionInset: CGFloat = 6
+        static let topBar: CGFloat = 50
+        static let topBarRow: CGFloat = 44
+        static let searchField: CGFloat = 42
+        static let needsYouPill: CGFloat = 44
+        static let needsYouAvatar: CGFloat = 32
+        static let tabBar: CGFloat = 62
+        static let tabBarMaxWidth: CGFloat = 320
+        static let sidebarMin: CGFloat = 320
+        static let sidebarMax: CGFloat = 460
+        static let rail: CGFloat = 64
+        static let hairline: CGFloat = 1
+    }
+    enum Text {
+        enum BarTitle {
+            static let font: String = "app"
+            static let size: CGFloat = 17
+            static let weight: SwiftUI.Font.Weight = .semibold  // 600
+        }
+        enum RowName {
+            static let font: String = "system"
+            static let size: CGFloat = 16
+            static let weight: SwiftUI.Font.Weight = .semibold  // 600
+        }
+        enum RowNamePhone {
+            static let font: String = "system"
+            static let size: CGFloat = 17
+            static let weight: SwiftUI.Font.Weight = .semibold  // 600
+        }
+        enum RowPreview {
+            static let font: String = "system"
+            static let size: CGFloat = 14
+            static let weight: SwiftUI.Font.Weight = .regular  // 400
+        }
+        enum RowPreviewPhone {
+            static let font: String = "system"
+            static let size: CGFloat = 15
+            static let weight: SwiftUI.Font.Weight = .regular  // 400
+        }
+        enum RowAge {
+            static let font: String = "app"
+            static let size: CGFloat = 14
+            static let weight: SwiftUI.Font.Weight = .regular  // 400
+            static let tabular: Bool = true
+        }
+        enum RowAgePhone {
+            static let font: String = "app"
+            static let size: CGFloat = 15
+            static let weight: SwiftUI.Font.Weight = .regular  // 400
+            static let tabular: Bool = true
+        }
+        enum AccountLabel {
+            static let font: String = "machine"
+            static let size: CGFloat = 11
+            static let weight: SwiftUI.Font.Weight = .regular  // 400
+        }
+        enum MarkerPill {
+            static let font: String = "app"
+            static let size: CGFloat = 11
+            static let weight: SwiftUI.Font.Weight = .semibold  // 600
+        }
+        enum DisclosureTitle {
+            static let font: String = "app"
+            static let size: CGFloat = 17
+            static let weight: SwiftUI.Font.Weight = .regular  // 400
+        }
+        enum DisclosureCount {
+            static let font: String = "app"
+            static let size: CGFloat = 15
+            static let weight: SwiftUI.Font.Weight = .regular  // 400
+            static let tabular: Bool = true
+        }
+        enum Search {
+            static let font: String = "app"
+            static let size: CGFloat = 16
+            static let weight: SwiftUI.Font.Weight = .regular  // 400
+        }
+        enum PillName {
+            static let font: String = "app"
+            static let size: CGFloat = 15
+            static let weight: SwiftUI.Font.Weight = .semibold  // 600
+        }
+        enum PillDetail {
+            static let font: String = "app"
+            static let size: CGFloat = 14
+            static let weight: SwiftUI.Font.Weight = .regular  // 400
+        }
+        enum CountPill {
+            static let font: String = "app"
+            static let size: CGFloat = 13
+            static let weight: SwiftUI.Font.Weight = .bold  // 700
+            static let tabular: Bool = true
+        }
+        enum CardTitle {
+            static let font: String = "app"
+            static let size: CGFloat = 16
+            static let weight: SwiftUI.Font.Weight = .semibold  // 600
+        }
+        enum CardSubtitle {
+            static let font: String = "machine"
+            static let size: CGFloat = 12
+            static let weight: SwiftUI.Font.Weight = .regular  // 400
+        }
+        enum TabLabel {
+            static let font: String = "system"
+            static let size: CGFloat = 10
+            static let weight: SwiftUI.Font.Weight = .semibold  // 600
+        }
+        enum BadgeCount {
+            static let font: String = "system"
+            static let size: CGFloat = 11
+            static let weight: SwiftUI.Font.Weight = .semibold  // 600
+            static let tabular: Bool = true
+        }
+        enum Placeholder {
+            static let font: String = "app"
+            static let size: CGFloat = 15
+            static let weight: SwiftUI.Font.Weight = .medium  // 500
+        }
+        enum Empty {
+            static let font: String = "app"
+            static let size: CGFloat = 15
+            static let weight: SwiftUI.Font.Weight = .regular  // 400
+        }
+        enum MicroLabel {
+            static let font: String = "machine"
+            static let size: CGFloat = 11
+            static let weight: SwiftUI.Font.Weight = .semibold  // 600
+            static let uppercase: Bool = true
+            static let tracking: CGFloat = 1.2
         }
     }
 }

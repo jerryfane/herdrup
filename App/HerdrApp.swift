@@ -1915,7 +1915,7 @@ struct TerminalHomeView: View {
     /// `navigationSplitViewColumnWidth` takes an `ideal` but reports nothing back, and
     /// there is no SwiftUI hook for "the user dragged the divider" — so the column
     /// measures itself (see `iPadLayout`) and the settled value is stored here.
-    @AppStorage("ui.sidebarWidth") private var sidebarWidth: Double = 320
+    @AppStorage("ui.sidebarWidth") private var sidebarWidth = Double(DesignTokens.Size.sidebarMin)
     /// The column's last MEASURED width, pre-persistence. Debounced into `sidebarWidth`
     /// so a transient layout value cannot become the stored preference (it would also
     /// become the new `ideal`, which is what makes a bad sample stick).
@@ -1938,7 +1938,8 @@ struct TerminalHomeView: View {
     private static let sidebarWidthSettle: UInt64 = 500_000_000
     /// Four 40 pt actions, the title and the system window corner must fit together.
     /// Keep the stored width, clamp and split-view modifier on the same bounds.
-    private static let sidebarWidthRange: ClosedRange<CGFloat> = 320...460
+    private static let sidebarWidthRange: ClosedRange<CGFloat> =
+        DesignTokens.Size.sidebarMin...DesignTokens.Size.sidebarMax
     /// iPad: which grouped detail the sidebar index has selected (rendered in the split's
     /// detail column). Defaults to Machines so the split opens on a section, not blank.
     @State private var settingsAnchor: SettingsSection? = .machines
@@ -2793,7 +2794,7 @@ struct TerminalHomeView: View {
         }
         .animation(.smooth(duration: 0.3), value: selectedTab)
         .padding(4)
-        .frame(height: 62)
+        .frame(height: DesignTokens.Size.tabBar)
         .modifier(SidebarTabBarMaterial())
         .frame(maxWidth: Self.sidebarTabBarMaxWidth)
         .frame(maxWidth: .infinity)
@@ -2801,7 +2802,7 @@ struct TerminalHomeView: View {
     }
 
     /// About three iPhone tab items wide; the sidebar ranges 250-460 pt.
-    private static let sidebarTabBarMaxWidth: CGFloat = 320
+    private static let sidebarTabBarMaxWidth: CGFloat = DesignTokens.Size.tabBarMaxWidth
 
     /// Selects a section. Gram tapped while it is already selected goes to its newest message
     /// (`gramNewestToken`): the feed is oldest-first, so "back to the start" is its BOTTOM.
@@ -2827,7 +2828,8 @@ struct TerminalHomeView: View {
                     .font(.system(size: 21, weight: .medium))
                     .frame(height: 28)
                     .overlay(alignment: .topTrailing) { tabBadge(badge).offset(x: 12, y: -3) }
-                Text(tab.label).font(.system(size: 10, weight: .semibold))
+                Text(tab.label).font(.system(size: DesignTokens.Text.TabLabel.size,
+                                             weight: DesignTokens.Text.TabLabel.weight))
             }
             .foregroundStyle(selected ? Palette.text : Palette.textDim)
             .frame(maxWidth: .infinity, maxHeight: .infinity)
@@ -2852,7 +2854,8 @@ struct TerminalHomeView: View {
     private func tabBadge(_ count: Int) -> some View {
         if count > 0 {
             Text(count > 99 ? "99+" : "\(count)")
-                .font(.system(size: 11, weight: .semibold)).monospacedDigit()
+                .font(.system(size: DesignTokens.Text.BadgeCount.size,
+                              weight: DesignTokens.Text.BadgeCount.weight)).monospacedDigit()
                 .foregroundStyle(.white)
                 .padding(.horizontal, 5)
                 .frame(minWidth: 18, minHeight: 18)
@@ -2978,7 +2981,7 @@ struct TerminalHomeView: View {
             railCount(activity.workingCount, tone: Palette.working, label: "working")
             Spacer()
         }
-        .frame(width: 64)
+        .frame(width: DesignTokens.Size.rail)
         .padding(.top, 12)
         .background(Palette.ground)
         .overlay(alignment: .trailing) {
@@ -3635,15 +3638,16 @@ struct TerminalHomeView: View {
     /// filter was useless, and the Gram composer below keeps dictation where it helps.
     /// `outlined` adds the 1 pt hairline the Gram design draws around its field.
     private func sidebarSearchField(text: Binding<String>, focus: FocusState<Bool>.Binding,
-                                    identifier: String, height: CGFloat = 42,
+                                    identifier: String, height: CGFloat = DesignTokens.Size.searchField,
                                     outlined: Bool = false) -> some View {
-        HStack(spacing: 6) {
+        HStack(spacing: DesignTokens.Space.stackSmall) {
             Image(systemName: "magnifyingglass")
                 .font(.system(size: 15, weight: .medium))
                 .foregroundStyle(Palette.textDim)
                 .accessibilityHidden(true)
             TextField("Search", text: text)
-                .font(Typography.app(16)).foregroundStyle(Palette.text)
+                .font(Typography.app(DesignTokens.Text.Search.size, DesignTokens.Text.Search.weight))
+                .foregroundStyle(Palette.text)
                 .textInputAutocapitalization(.never).autocorrectionDisabled()
                 .focused(focus)
                 .accessibilityIdentifier(identifier)
@@ -3663,9 +3667,9 @@ struct TerminalHomeView: View {
         .background(Palette.surface)
         .clipShape(Capsule())
         .overlay {
-            if outlined { Capsule().strokeBorder(Palette.hairline, lineWidth: 1) }
+            if outlined { Capsule().strokeBorder(Palette.hairline, lineWidth: DesignTokens.Size.hairline) }
         }
-        .padding(.horizontal, 16).padding(.bottom, 6)
+        .padding(.horizontal, DesignTokens.Space.screenInset).padding(.bottom, 6)
     }
 
     // MARK: list
@@ -3904,7 +3908,8 @@ struct TerminalHomeView: View {
     }
 
     private func emptyLine(_ text: String) -> some View {
-        Text(text).font(Typography.app(15)).foregroundStyle(Palette.textDim)
+        Text(text).font(Typography.app(DesignTokens.Text.Empty.size, DesignTokens.Text.Empty.weight))
+            .foregroundStyle(Palette.textDim)
             .frame(maxWidth: .infinity).padding(.top, 44)
     }
 
@@ -3923,14 +3928,15 @@ struct TerminalHomeView: View {
                     // expanded, the rows speak for themselves.
                     Text(terminalsCollapsed
                         ? "TERMINALS · \(terminalsStore.terminals(host: hostKey).count)" : "TERMINALS")
-                        .font(Typography.microLabel).tracking(1.2).foregroundStyle(Palette.textFaint)
+                        .font(Typography.microLabel).tracking(DesignTokens.Text.MicroLabel.tracking)
+                        .foregroundStyle(Palette.textFaint)
                     Image(systemName: terminalsCollapsed ? "chevron.right" : "chevron.down")
                         .font(.system(size: 9, weight: .semibold)).foregroundStyle(Palette.textFaint)
-                    Rectangle().fill(Palette.hairline).frame(height: 1)
+                    Rectangle().fill(Palette.hairline).frame(height: DesignTokens.Size.hairline)
                 }
             }
             .buttonStyle(.plain)
-            .padding(.horizontal, 16).padding(.top, 10)
+            .padding(.horizontal, DesignTokens.Space.screenInset).padding(.top, 10)
 
             if !terminalsCollapsed {
                 ForEach(terminalsStore.terminals(host: hostKey)) { terminal in
@@ -4022,7 +4028,7 @@ struct TerminalHomeView: View {
     /// glyph instead of the live status badge, and provenance ("archived by X · reason")
     /// as the subtitle.
     private func archivedCard(_ row: AgentRow) -> some View {
-        HStack(spacing: 12) {
+        HStack(spacing: DesignTokens.Space.stackLarge) {
             ZStack {
                 AgentAvatarView(agent: row.info, name: row.title, size: 40, glyphSize: 17)
                     .opacity(0.5)
@@ -4030,17 +4036,21 @@ struct TerminalHomeView: View {
                     .font(.system(size: 15, weight: .semibold)).foregroundStyle(.white)
             }
             VStack(alignment: .leading, spacing: 3) {
-                Text(row.title).font(Typography.app(16, .semibold)).foregroundStyle(Palette.textDim)
+                Text(row.title)
+                    .font(Typography.app(DesignTokens.Text.CardTitle.size, DesignTokens.Text.CardTitle.weight))
+                    .foregroundStyle(Palette.textDim)
                 Text(archivedSubtitle(row.info))
-                    .font(Typography.machine(12)).foregroundStyle(Palette.textFaint).lineLimit(1)
+                    .font(Typography.machine(DesignTokens.Text.CardSubtitle.size, DesignTokens.Text.CardSubtitle.weight))
+                    .foregroundStyle(Palette.textFaint).lineLimit(1)
             }
-            Spacer(minLength: 8)
+            Spacer(minLength: DesignTokens.Space.stackMedium)
         }
-        .padding(12)
+        .padding(DesignTokens.Space.stackLarge)
         .background(Palette.card)
-        .clipShape(RoundedRectangle(cornerRadius: 14))
-        .overlay(RoundedRectangle(cornerRadius: 14).stroke(Palette.hairline, lineWidth: 1))
-        .padding(.horizontal, 16).padding(.vertical, 4)
+        .clipShape(RoundedRectangle(cornerRadius: DesignTokens.Radius.card))
+        .overlay(RoundedRectangle(cornerRadius: DesignTokens.Radius.card)
+            .stroke(Palette.hairline, lineWidth: DesignTokens.Size.hairline))
+        .padding(.horizontal, DesignTokens.Space.screenInset).padding(.vertical, 4)
         .contentShape(Rectangle())
     }
 
@@ -4053,22 +4063,26 @@ struct TerminalHomeView: View {
     }
 
     private func terminalCard(_ terminal: SavedTerminal) -> some View {
-        HStack(spacing: 12) {
+        HStack(spacing: DesignTokens.Space.stackLarge) {
             ZStack {
-                RoundedRectangle(cornerRadius: 10).fill(Palette.surfaceRaised)
+                RoundedRectangle(cornerRadius: DesignTokens.Radius.tile).fill(Palette.surfaceRaised)
                     .frame(width: 40, height: 40)
                 Image(systemName: "terminal")
                     .font(.system(size: 17, weight: .semibold)).foregroundStyle(Palette.textDim)
             }
             VStack(alignment: .leading, spacing: 3) {
-                Text(terminal.label).font(Typography.app(16, .semibold)).foregroundStyle(Palette.text)
-                Text("shell").font(Typography.machine(12)).foregroundStyle(Palette.textFaint)
+                Text(terminal.label)
+                    .font(Typography.app(DesignTokens.Text.CardTitle.size, DesignTokens.Text.CardTitle.weight))
+                    .foregroundStyle(Palette.text)
+                Text("shell")
+                    .font(Typography.machine(DesignTokens.Text.CardSubtitle.size, DesignTokens.Text.CardSubtitle.weight))
+                    .foregroundStyle(Palette.textFaint)
             }
             Spacer()
             Image(systemName: "chevron.right")
                 .font(.system(size: 12, weight: .semibold)).foregroundStyle(Palette.textFaint)
         }
-        .padding(.horizontal, 16).padding(.vertical, 10)
+        .padding(.horizontal, DesignTokens.Space.screenInset).padding(.vertical, 10)
         .contentShape(Rectangle())
     }
 
@@ -4408,20 +4422,24 @@ struct TerminalHomeView: View {
     private func disclosureRow(_ title: String, count: Int, open: Bool, separator: Bool = true,
                                _ action: @escaping () -> Void) -> some View {
         Button(action: action) {
-            HStack(spacing: 8) {
-                Text(title).font(Typography.app(17)).foregroundStyle(Palette.text)
-                Spacer(minLength: 8)
-                Text("\(count)").font(Typography.app(15)).foregroundStyle(Palette.textDim)
+            HStack(spacing: DesignTokens.Space.stackMedium) {
+                Text(title)
+                    .font(Typography.app(DesignTokens.Text.DisclosureTitle.size, DesignTokens.Text.DisclosureTitle.weight))
+                    .foregroundStyle(Palette.text)
+                Spacer(minLength: DesignTokens.Space.stackMedium)
+                Text("\(count)")
+                    .font(Typography.app(DesignTokens.Text.DisclosureCount.size, DesignTokens.Text.DisclosureCount.weight))
+                    .foregroundStyle(Palette.textDim)
                     .monospacedDigit()
                 Image(systemName: open ? "chevron.down" : "chevron.right")
                     .font(.system(size: 12, weight: .semibold)).foregroundStyle(Palette.textFaint)
             }
-            .padding(.leading, 20).padding(.trailing, 16)
-            .frame(minHeight: 48)
+            .padding(.leading, DesignTokens.Space.rowLead).padding(.trailing, DesignTokens.Space.rowTrail)
+            .frame(minHeight: DesignTokens.Size.disclosureRow)
             .overlay(alignment: .bottom) {
                 if separator {
                     Rectangle().fill(Palette.hairlineQuiet).frame(height: 1 / displayScale)
-                        .padding(.leading, 20).padding(.trailing, 16)
+                        .padding(.leading, DesignTokens.Space.rowLead).padding(.trailing, DesignTokens.Space.rowTrail)
                 }
             }
             .contentShape(Rectangle())
@@ -4443,20 +4461,25 @@ struct TerminalHomeView: View {
         // Fixed two-line rows; scale the text area with the app's text-size setting.
         // The selected sidebar row retains its rounded highlight.
         let sidebar = hSizeClass == .regular
-        let avatar: CGFloat = sidebar ? 44 : 52
+        let avatar = sidebar ? DesignTokens.Size.avatarSidebar : DesignTokens.Size.avatarPhone
         let isOpen = sidebar && frontID == row.info.paneID
+        let nameSize = sidebar ? DesignTokens.Text.RowName.size : DesignTokens.Text.RowNamePhone.size
+        let nameWeight = sidebar ? DesignTokens.Text.RowName.weight : DesignTokens.Text.RowNamePhone.weight
         return HStack(alignment: .center, spacing: 0) {
             // The row's leading inset (where the needs-you dot used to sit).
             // An agent inside an open folder sits one step in, under the folder's picture.
-            Color.clear.frame(width: indented ? 44 : 20, height: 1)
+            Color.clear.frame(width: indented ? DesignTokens.Space.rowLeadIndented : DesignTokens.Space.rowLead,
+                              height: 1)
             AgentAvatar(name: row.title,
                         badge: row.info.isUnreachable ? .offline : AgentAvatarBadge(row.group),
                         badgeLabel: row.info.isUnreachable ? "offline" : row.group.label,
-                        diameter: avatar, glyphSize: sidebar ? 19 : 22, info: row.info)
-            .padding(.trailing, 12)
-            VStack(alignment: .leading, spacing: 2) {
-                HStack(spacing: 6) {
-                    Text(row.title).font(.system(size: (sidebar ? 16 : 17) * Typography.scale, weight: .semibold)).foregroundStyle(Palette.text)
+                        diameter: avatar,
+                        glyphSize: sidebar ? DesignTokens.Size.avatarGlyphSidebar : DesignTokens.Size.avatarGlyphPhone,
+                        info: row.info)
+            .padding(.trailing, DesignTokens.Space.avatarGap)
+            VStack(alignment: .leading, spacing: DesignTokens.Space.stackTight) {
+                HStack(spacing: DesignTokens.Space.stackSmall) {
+                    Text(row.title).font(.system(size: nameSize * Typography.scale, weight: nameWeight)).foregroundStyle(Palette.text)
                         .lineLimit(1)
                     if starred {
                         Image(systemName: "star.fill")
@@ -4465,7 +4488,7 @@ struct TerminalHomeView: View {
                             .accessibilityLabel("starred")
                     }
                     rowMarkers(row)
-                    Spacer(minLength: 6)
+                    Spacer(minLength: DesignTokens.Space.stackSmall)
                     // How long the agent has been in its current state ("5m/2h/3d"), derived
                     // from the daemon's status_since (#173). Absent on an older server / before
                     // the first transition — then nothing, never a wrong value. `rosterNow`
@@ -4476,7 +4499,7 @@ struct TerminalHomeView: View {
                         nowUnixMs: UInt64(rosterNow.timeIntervalSince1970 * 1000)
                     ) {
                         Text(age)
-                            .font(Typography.app(sidebar ? 14 : 15))
+                            .font(Typography.app(sidebar ? DesignTokens.Text.RowAge.size : DesignTokens.Text.RowAgePhone.size))
                             .foregroundStyle(Palette.textDim)
                             .monospacedDigit()
                     }
@@ -4488,7 +4511,8 @@ struct TerminalHomeView: View {
                 // The preview: what it is doing (folder · activity). A waiting agent's reads in
                 // the primary colour, like an unread message.
                 Text(subtitle(row.info))
-                    .font(.system(size: (sidebar ? 14 : 15) * Typography.scale))
+                    .font(.system(size: (sidebar ? DesignTokens.Text.RowPreview.size
+                                                 : DesignTokens.Text.RowPreviewPhone.size) * Typography.scale))
                     .foregroundStyle(row.group == .needsYou ? Palette.text : Palette.textDim)
                     .lineLimit(2)
                     .multilineTextAlignment(.leading)
@@ -4501,28 +4525,29 @@ struct TerminalHomeView: View {
                     accounts: accounts
                 ) {
                     Text(account)
-                        .font(Typography.machine(11))
+                        .font(Typography.machine(DesignTokens.Text.AccountLabel.size))
                         .foregroundStyle(row.info.hasUnresolvedAccount ? Palette.died : Palette.textFaint)
                         .lineLimit(1)
                 }
             }
-            .padding(.trailing, 16)
+            .padding(.trailing, DesignTokens.Space.rowTrail)
             .frame(maxWidth: .infinity)
-            .frame(height: (sidebar ? 80 : 86) * max(1, Typography.scale), alignment: .center)
+            .frame(height: (sidebar ? DesignTokens.Size.agentRow : DesignTokens.Size.agentRowPhone) * max(1, Typography.scale),
+                   alignment: .center)
             // The divider starts where the text starts, not under the avatar, and is one
             // device pixel. The open row's highlight replaces it, and the row above the open
             // row drops its own so no line touches the highlight.
             .overlay(alignment: .bottom) {
                 if !isOpen && separator {
                     Rectangle().fill(Palette.hairline).frame(height: 1 / displayScale)
-                        .padding(.trailing, 16)
+                        .padding(.trailing, DesignTokens.Space.rowTrail)
                 }
             }
         }
         .background {
             if isOpen {
-                RoundedRectangle(cornerRadius: 12).fill(Palette.surfaceRaised)
-                    .padding(.horizontal, 6)
+                RoundedRectangle(cornerRadius: DesignTokens.Radius.selection).fill(Palette.surfaceRaised)
+                    .padding(.horizontal, DesignTokens.Size.selectionInset)
             }
         }
         .contentShape(Rectangle())
@@ -4538,10 +4563,11 @@ struct TerminalHomeView: View {
             // text, not a colour cue: shape and colour, never colour alone.
             if row.info.hasUnresolvedAccount {
                 Text("no account")
-                    .font(Typography.app(11, .semibold)).foregroundStyle(Palette.died)
+                    .font(Typography.app(DesignTokens.Text.MarkerPill.size, DesignTokens.Text.MarkerPill.weight))
+                    .foregroundStyle(Palette.died)
                     .padding(.horizontal, 8).padding(.vertical, 3)
                     .background(Capsule().fill(Palette.died.opacity(0.12)))
-                    .overlay(Capsule().stroke(Palette.died.opacity(0.5), lineWidth: 1))
+                    .overlay(Capsule().stroke(Palette.died.opacity(0.5), lineWidth: DesignTokens.Size.hairline))
             }
             // A DEGRADED peer (the daemon's 1 to 2 missed polls) still renders a live
             // status badge, and `resolvedGroup` can surface a LAST-KNOWN blocked row into
@@ -4550,7 +4576,8 @@ struct TerminalHomeView: View {
             // needs-you signal would be the worse error of the two.
             if row.showsUnconfirmedMarker {
                 Text("stale")
-                    .font(Typography.app(11, .semibold)).foregroundStyle(Palette.textDim)
+                    .font(Typography.app(DesignTokens.Text.MarkerPill.size, DesignTokens.Text.MarkerPill.weight))
+                    .foregroundStyle(Palette.textDim)
                     .padding(.horizontal, 8).padding(.vertical, 3)
                     .background(Capsule().fill(Palette.textDim.opacity(0.12)))
                     // The LABEL is replaced for VoiceOver, so the visible word "stale" is no

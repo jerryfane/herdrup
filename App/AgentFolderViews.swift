@@ -16,20 +16,24 @@ struct AgentFolderRow: View {
 
     var body: some View {
         HStack(alignment: .center, spacing: 0) {
-            Color.clear.frame(width: 20, height: 1)
-            AgentFolderPicture(members: Array(summary.members.prefix(4)), diameter: sidebar ? 44 : 52)
-                .padding(.trailing, 12)
-            VStack(alignment: .leading, spacing: 2) {
-                HStack(spacing: 6) {
+            Color.clear.frame(width: DesignTokens.Space.rowLead, height: 1)
+            AgentFolderPicture(members: Array(summary.members.prefix(4)),
+                               diameter: sidebar ? DesignTokens.Size.avatarSidebar : DesignTokens.Size.avatarPhone)
+                .padding(.trailing, DesignTokens.Space.avatarGap)
+            VStack(alignment: .leading, spacing: DesignTokens.Space.stackTight) {
+                HStack(spacing: DesignTokens.Space.stackSmall) {
                     Text(summary.folder.name)
-                        .font(.system(size: (sidebar ? 16 : 17) * Typography.scale, weight: .semibold))
+                        .font(.system(size: (sidebar ? DesignTokens.Text.RowName.size
+                                                     : DesignTokens.Text.RowNamePhone.size) * Typography.scale,
+                                      weight: sidebar ? DesignTokens.Text.RowName.weight
+                                                      : DesignTokens.Text.RowNamePhone.weight))
                         .foregroundStyle(Palette.text)
                         .lineLimit(1)
                     Text(summary.agentCountText)
-                        .font(Typography.app(sidebar ? 14 : 15))
+                        .font(Typography.app(sidebar ? DesignTokens.Text.RowAge.size : DesignTokens.Text.RowAgePhone.size))
                         .foregroundStyle(Palette.textDim)
                         .lineLimit(1)
-                    Spacer(minLength: 6)
+                    Spacer(minLength: DesignTokens.Space.stackSmall)
                     if summary.waitingCount > 0 {
                         countPill(summary.waitingCount, Palette.waiting)
                     }
@@ -43,17 +47,19 @@ struct AgentFolderRow: View {
                         .accessibilityHidden(true)
                 }
                 Text(summary.summaryLine)
-                    .font(.system(size: (sidebar ? 14 : 15) * Typography.scale))
+                    .font(.system(size: (sidebar ? DesignTokens.Text.RowPreview.size
+                                                 : DesignTokens.Text.RowPreviewPhone.size) * Typography.scale))
                     .foregroundStyle(summary.waitingCount > 0 ? Palette.text : Palette.textDim)
                     .lineLimit(1)
             }
-            .padding(.trailing, 16)
+            .padding(.trailing, DesignTokens.Space.rowTrail)
             .frame(maxWidth: .infinity)
-            .frame(height: (sidebar ? 80 : 86) * max(1, Typography.scale), alignment: .center)
+            .frame(height: (sidebar ? DesignTokens.Size.agentRow : DesignTokens.Size.agentRowPhone) * max(1, Typography.scale),
+                   alignment: .center)
             .overlay(alignment: .bottom) {
                 if separator {
                     Rectangle().fill(Palette.hairline).frame(height: 1 / displayScale)
-                        .padding(.trailing, 16)
+                        .padding(.trailing, DesignTokens.Space.rowTrail)
                 }
             }
         }
@@ -62,7 +68,7 @@ struct AgentFolderRow: View {
 
     private func countPill(_ count: Int, _ fill: Color) -> some View {
         Text("\(count)")
-            .font(Typography.app(13, .bold))
+            .font(Typography.app(DesignTokens.Text.CountPill.size, DesignTokens.Text.CountPill.weight))
             .monospacedDigit()
             .foregroundStyle(Palette.ground)
             .padding(.horizontal, 7)

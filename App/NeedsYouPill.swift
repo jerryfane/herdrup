@@ -77,7 +77,7 @@ struct NeedsYouPill: View {
     let onScrollToTop: () -> Void
     let onOpen: (AgentRow) -> Void
 
-    private static let avatarDiameter: CGFloat = 32
+    private static let avatarDiameter: CGFloat = DesignTokens.Size.needsYouAvatar
     private static let maxAvatars = 3
     private static let fill = Palette.surfaceRaised
 
@@ -86,8 +86,8 @@ struct NeedsYouPill: View {
         ZStack(alignment: .top) {
             if shows {
                 pill
-                    .padding(.top, 8)
-                    .padding(.horizontal, 16)
+                    .padding(.top, DesignTokens.Space.stackMedium)
+                    .padding(.horizontal, DesignTokens.Space.screenInset)
                     .transition(.move(edge: .top).combined(with: .opacity))
             }
         }
@@ -112,9 +112,9 @@ struct NeedsYouPill: View {
             }
             .padding(.leading, 6)
             .padding(.trailing, 14)
-            .frame(height: 44)
+            .frame(height: DesignTokens.Size.needsYouPill)
             .background(Capsule().fill(Self.fill.opacity(0.96)))
-            .overlay(Capsule().strokeBorder(Palette.waiting.opacity(0.55), lineWidth: 1))
+            .overlay(Capsule().strokeBorder(Palette.waiting.opacity(0.55), lineWidth: DesignTokens.Size.hairline))
             .shadow(color: .black.opacity(0.45), radius: 12, y: 8)
             .contentShape(Capsule())
         }
@@ -145,14 +145,14 @@ struct NeedsYouPill: View {
     @ViewBuilder
     private var label: some View {
         if waiting.count == 1, let only = waiting.first {
-            HStack(spacing: 6) {
+            HStack(spacing: DesignTokens.Space.stackSmall) {
                 Text(only.title)
-                    .font(Typography.app(15, .semibold))
+                    .font(Typography.app(DesignTokens.Text.PillName.size, DesignTokens.Text.PillName.weight))
                     .foregroundStyle(Palette.waiting)
                     .lineLimit(1)
                 if let activity = only.info.activityText {
                     Text(activity)
-                        .font(Typography.app(14))
+                        .font(Typography.app(DesignTokens.Text.PillDetail.size, DesignTokens.Text.PillDetail.weight))
                         .foregroundStyle(Palette.textDim)
                         .lineLimit(1)
                         .truncationMode(.tail)
@@ -161,7 +161,7 @@ struct NeedsYouPill: View {
             }
         } else {
             Text(Self.countText(waiting.count))
-                .font(Typography.app(15, .semibold))
+                .font(Typography.app(DesignTokens.Text.PillName.size, DesignTokens.Text.PillName.weight))
                 .foregroundStyle(Palette.waiting)
                 .lineLimit(1)
         }

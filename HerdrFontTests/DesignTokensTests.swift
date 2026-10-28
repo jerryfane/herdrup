@@ -98,6 +98,107 @@ final class DesignTokensTests: XCTestCase {
         XCTAssertEqual(DesignTokens.TypeRole.MicroLabel.size, 11)
     }
 
+    /// The agent list and sidebar read space, radius and size from the tokens. Each value is
+    /// the literal its call site carried before (origin/main 42f8cf9), written out by hand.
+    func testLayoutIsUnchanged() {
+        let before: [(String, CGFloat, CGFloat)] = [
+            // HerdrApp card / disclosureRow, AgentFolderRow: leading inset and avatar gap.
+            ("space.rowLead", DesignTokens.Space.rowLead, 20),
+            ("space.rowLeadIndented", DesignTokens.Space.rowLeadIndented, 44),
+            ("space.avatarGap", DesignTokens.Space.avatarGap, 12),
+            ("space.rowTrail", DesignTokens.Space.rowTrail, 16),
+            // SectionTopBar, search field, needs-you pill, archived/terminal cards.
+            ("space.screenInset", DesignTokens.Space.screenInset, 16),
+            ("space.stackTight", DesignTokens.Space.stackTight, 2),
+            ("space.stackSmall", DesignTokens.Space.stackSmall, 6),
+            ("space.stackMedium", DesignTokens.Space.stackMedium, 8),
+            ("space.stackLarge", DesignTokens.Space.stackLarge, 12),
+            ("radius.selection", DesignTokens.Radius.selection, 12),
+            ("radius.card", DesignTokens.Radius.card, 14),
+            ("radius.group", DesignTokens.Radius.group, 18),
+            ("radius.tile", DesignTokens.Radius.tile, 10),
+            ("radius.badgeSquare", DesignTokens.Radius.badgeSquare, 6),
+            ("size.agentRow", DesignTokens.Size.agentRow, 80),
+            ("size.agentRowPhone", DesignTokens.Size.agentRowPhone, 86),
+            ("size.disclosureRow", DesignTokens.Size.disclosureRow, 48),
+            ("size.avatarSidebar", DesignTokens.Size.avatarSidebar, 44),
+            ("size.avatarPhone", DesignTokens.Size.avatarPhone, 52),
+            ("size.avatarGlyphSidebar", DesignTokens.Size.avatarGlyphSidebar, 19),
+            ("size.avatarGlyphPhone", DesignTokens.Size.avatarGlyphPhone, 22),
+            ("size.statusBadge", DesignTokens.Size.statusBadge, 22),
+            ("size.statusBadgeStroke", DesignTokens.Size.statusBadgeStroke, 2.5),
+            ("size.statusBadgeOffset", DesignTokens.Size.statusBadgeOffset, 4),
+            ("size.selectionInset", DesignTokens.Size.selectionInset, 6),
+            ("size.topBar", DesignTokens.Size.topBar, 50),
+            ("size.topBarRow", DesignTokens.Size.topBarRow, 44),
+            ("size.searchField", DesignTokens.Size.searchField, 42),
+            ("size.needsYouPill", DesignTokens.Size.needsYouPill, 44),
+            ("size.needsYouAvatar", DesignTokens.Size.needsYouAvatar, 32),
+            ("size.tabBar", DesignTokens.Size.tabBar, 62),
+            ("size.tabBarMaxWidth", DesignTokens.Size.tabBarMaxWidth, 320),
+            ("size.sidebarMin", DesignTokens.Size.sidebarMin, 320),
+            ("size.sidebarMax", DesignTokens.Size.sidebarMax, 460),
+            ("size.rail", DesignTokens.Size.rail, 64),
+            ("size.hairline", DesignTokens.Size.hairline, 1),
+        ]
+        for (name, now, was) in before {
+            XCTAssertEqual(now, was, name)
+        }
+        // AgentAvatar's defaults were `diameter: CGFloat = 52`, `glyphSize: CGFloat = 22`.
+        let avatar = AgentAvatar(name: "a", badge: .offline, badgeLabel: "offline")
+        XCTAssertEqual(avatar.diameter, 52)
+        XCTAssertEqual(avatar.glyphSize, 22)
+    }
+
+    /// The text roles the agent list and sidebar read: family (Typography.app = "app",
+    /// Typography.machine = "machine", `.system(size:)` = "system"), size at scale 1 and
+    /// weight, each the literal its call site carried before (origin/main 42f8cf9).
+    func testTextRolesAreUnchanged() {
+        typealias T = DesignTokens.Text
+        let before: [(String, String, CGFloat, Font.Weight, String, CGFloat, Font.Weight)] = [
+            ("barTitle", T.BarTitle.font, T.BarTitle.size, T.BarTitle.weight, "app", 17, .semibold),
+            ("rowName", T.RowName.font, T.RowName.size, T.RowName.weight, "system", 16, .semibold),
+            ("rowNamePhone", T.RowNamePhone.font, T.RowNamePhone.size, T.RowNamePhone.weight,
+             "system", 17, .semibold),
+            ("rowPreview", T.RowPreview.font, T.RowPreview.size, T.RowPreview.weight, "system", 14, .regular),
+            ("rowPreviewPhone", T.RowPreviewPhone.font, T.RowPreviewPhone.size, T.RowPreviewPhone.weight,
+             "system", 15, .regular),
+            ("rowAge", T.RowAge.font, T.RowAge.size, T.RowAge.weight, "app", 14, .regular),
+            ("rowAgePhone", T.RowAgePhone.font, T.RowAgePhone.size, T.RowAgePhone.weight, "app", 15, .regular),
+            ("accountLabel", T.AccountLabel.font, T.AccountLabel.size, T.AccountLabel.weight,
+             "machine", 11, .regular),
+            ("markerPill", T.MarkerPill.font, T.MarkerPill.size, T.MarkerPill.weight, "app", 11, .semibold),
+            ("disclosureTitle", T.DisclosureTitle.font, T.DisclosureTitle.size, T.DisclosureTitle.weight,
+             "app", 17, .regular),
+            ("disclosureCount", T.DisclosureCount.font, T.DisclosureCount.size, T.DisclosureCount.weight,
+             "app", 15, .regular),
+            ("search", T.Search.font, T.Search.size, T.Search.weight, "app", 16, .regular),
+            ("pillName", T.PillName.font, T.PillName.size, T.PillName.weight, "app", 15, .semibold),
+            ("pillDetail", T.PillDetail.font, T.PillDetail.size, T.PillDetail.weight, "app", 14, .regular),
+            ("countPill", T.CountPill.font, T.CountPill.size, T.CountPill.weight, "app", 13, .bold),
+            ("cardTitle", T.CardTitle.font, T.CardTitle.size, T.CardTitle.weight, "app", 16, .semibold),
+            ("cardSubtitle", T.CardSubtitle.font, T.CardSubtitle.size, T.CardSubtitle.weight,
+             "machine", 12, .regular),
+            ("tabLabel", T.TabLabel.font, T.TabLabel.size, T.TabLabel.weight, "system", 10, .semibold),
+            ("badgeCount", T.BadgeCount.font, T.BadgeCount.size, T.BadgeCount.weight, "system", 11, .semibold),
+            ("placeholder", T.Placeholder.font, T.Placeholder.size, T.Placeholder.weight, "app", 15, .medium),
+            ("empty", T.Empty.font, T.Empty.size, T.Empty.weight, "app", 15, .regular),
+            ("microLabel", T.MicroLabel.font, T.MicroLabel.size, T.MicroLabel.weight, "machine", 11, .semibold),
+        ]
+        for (name, font, size, weight, wasFont, wasSize, wasWeight) in before {
+            XCTAssertEqual(font, wasFont, "\(name).font")
+            XCTAssertEqual(size, wasSize, "\(name).size")
+            XCTAssertEqual(weight, wasWeight, "\(name).weight")
+        }
+        // The Terminals header and section labels carried `.tracking(1.2)`.
+        XCTAssertEqual(T.MicroLabel.tracking, 1.2)
+        // type.microLabel (Typography.microLabel) still reads the same values via text.microLabel.
+        XCTAssertEqual(DesignTokens.TypeRole.MicroLabel.font, T.MicroLabel.font)
+        XCTAssertEqual(CGFloat(DesignTokens.TypeRole.MicroLabel.size), T.MicroLabel.size)
+        // San Francisco stays the system font (owner decision 2026-10-28).
+        XCTAssertEqual(DesignTokens.Font.System.family, "system")
+    }
+
     /// Two colours are the same on screen when they resolve to the same components and opacity.
     private func assertSameColour(_ now: Color, _ was: Color, _ name: String,
                                   file: StaticString = #filePath, line: UInt = #line) {

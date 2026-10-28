@@ -19,7 +19,7 @@ struct SelectAgentPlaceholder: View {
             TerminalGlyphField(lines: lines, spotlight: spotlight)
                 .accessibilityHidden(true)
             Text("Select an agent")
-                .font(Typography.app(15, .medium))
+                .font(Typography.app(DesignTokens.Text.Placeholder.size, DesignTokens.Text.Placeholder.weight))
                 .foregroundStyle(Palette.textDim)
                 .allowsHitTesting(false)
         }

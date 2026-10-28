@@ -1,10 +1,11 @@
 #!/usr/bin/env python3
 """Generate App/Generated/DesignTokens.swift from design/tokens.json.
 
-design/tokens.json is the source of truth for the app's colours and fonts, shared with
-Herdrup Desktop (see design/README.md). This writes it out as `enum DesignTokens`, which
-Palette, ChatPalette, AgentGroup, AgentIdentity and Typography read. Edit the JSON, run
-`python3 Tools/tokens/generate.py`, commit both; CI reruns this and fails on a diff.
+design/tokens.json is the source of truth for the app's colours, fonts and shared layout
+numbers, shared with Herdrup Desktop (see design/README.md). This writes it out as
+`enum DesignTokens`, which Palette, ChatPalette, AgentGroup, AgentIdentity, Typography and
+the agent list read. Edit the JSON, run `python3 Tools/tokens/generate.py`, commit both;
+CI reruns this and fails on a diff.
 
 Values:
   "#RRGGBB"        a colour, written as a UInt32 (0xRRGGBB)
@@ -14,6 +15,12 @@ Values:
   arrays           all colours ([UInt32]) or all strings ([String])
   null             absent (color.light: the app is dark-only); nothing is written
 Keys starting with "_" and "schema_version" are not tokens.
+
+Layout groups (points):
+  space.*, radius.*, size.*   numbers, written as CGFloat
+  text.<role>                 a text role: `font` names a key of font, `size` and the
+                              optional `tracking` are CGFloat, `weight` is a CSS weight
+                              written as a SwiftUI Font.Weight; other keys as above
 
 Python 3, stdlib only.
 """
@@ -37,6 +44,15 @@ WEIGHT_NAMES = {
     "100": "Thin", "200": "ExtraLight", "300": "Light", "400": "Regular", "500": "Medium",
     "600": "Semibold", "700": "Bold", "800": "ExtraBold", "900": "Black",
 }
+# A text role's CSS weight, as the SwiftUI Font.Weight of the same rank.
+FONT_WEIGHTS = {
+    100: ".ultraLight", 200: ".thin", 300: ".light", 400: ".regular", 500: ".medium",
+    600: ".semibold", 700: ".bold", 800: ".heavy", 900: ".black",
+}
+# Groups whose numbers are layout points (CGFloat).
+LAYOUT_GROUPS = {"space", "radius", "size"}
+# Keys of a text role written as CGFloat.
+TEXT_POINTS = {"size", "tracking"}
 # Group names Swift cannot declare as a nested type (`X.Type` is the metatype).
 TYPE_RENAMES = {"Type": "TypeRole"}
 SWIFT_KEYWORDS = {
@@ -130,17 +146,58 @@ def swift_literal(value, where):
     raise TokenError(f"{where}: unsupported value {value!r}")
 
 
+def font_families(tokens):
+    return {k: v for k, v in tokens.get("font", {}).items() if is_token_key(k)}
+
+
 def derived_type_role(tokens, role, where):
     """A type role names a font and a weight; the PostScript name they pick is what
     Swift needs, so it is written alongside."""
-    font, weight = role.get("font"), role.get("weight")
-    families = {k: v for k, v in tokens.get("font", {}).items() if is_token_key(k)}
+    font = resolve(tokens, role.get("font"), f"{where}.font")
+    weight = resolve(tokens, role.get("weight"), f"{where}.weight")
+    families = font_families(tokens)
     if font not in families:
         raise TokenError(f"{where}.font: {font!r} is not a key of font")
     face = families[font].get("faces", {}).get(str(weight))
     if face is None:
         raise TokenError(f"{where}.weight: font.{font} has no {weight} face")
     return [("postscript", face["postscript"], f"font.{font}.faces.{weight}.postscript")]
+
+
+def check_text_role(tokens, role, where):
+    """A text role names a font and gives a size and a CSS weight. A font with bundled
+    faces must have that weight; the platform font ("system") draws every weight."""
+    for key in ("font", "size", "weight"):
+        if key not in role:
+            raise TokenError(f"{where}: a text role needs {key}")
+    font = resolve(tokens, role["font"], f"{where}.font")
+    families = font_families(tokens)
+    if font not in families:
+        raise TokenError(f"{where}.font: {font!r} is not a key of font")
+    weight = resolve(tokens, role["weight"], f"{where}.weight")
+    faces = families[font].get("faces")
+    if faces is not None and str(weight) not in faces:
+        raise TokenError(f"{where}.weight: font.{font} has no {weight} face")
+
+
+def points_literal(value, where):
+    if isinstance(value, bool) or not isinstance(value, (int, float)):
+        raise TokenError(f"{where}: {value!r} is not a number of points")
+    return "CGFloat", str(value) if isinstance(value, int) else repr(value)
+
+
+def leaf_literal(path, key, value, where):
+    """(Swift type, Swift literal, trailing comment) for a resolved leaf at path.key."""
+    if path and path[0] in LAYOUT_GROUPS:
+        return (*points_literal(value, where), None)
+    if len(path) == 2 and path[0] == "text":
+        if key in TEXT_POINTS:
+            return (*points_literal(value, where), None)
+        if key == "weight":
+            if isinstance(value, bool) or value not in FONT_WEIGHTS:
+                raise TokenError(f"{where}: {value!r} is not a CSS weight (100-900)")
+            return "SwiftUI.Font.Weight", FONT_WEIGHTS[value], str(value)
+    return (*swift_literal(value, where), None)
 
 
 def emit_group(tokens, node, path, indent, out):
@@ -150,6 +207,8 @@ def emit_group(tokens, node, path, indent, out):
             continue
         where = ".".join([*path, key])
         if isinstance(value, dict):
+            if path == ["text"]:
+                check_text_role(tokens, value, where)
             out.append(f"{pad}enum {type_name(key, where)} {{")
             emit_group(tokens, value, [*path, key], indent + 1, out)
             if path == ["type"]:
@@ -160,10 +219,12 @@ def emit_group(tokens, node, path, indent, out):
             out.append(f"{pad}}}")
             continue
         resolved = resolve(tokens, value, where)
-        kind, swift = swift_literal(resolved, where)
+        kind, swift, note = leaf_literal(path, key, resolved, where)
         line = f"{pad}static let {member_name(key, where)}: {kind} = {swift}"
         if isinstance(value, str) and REFERENCE.match(value):
             line += f"  // {value}"
+        elif note:
+            line += f"  // {note}"
         out.append(line)
 
 
@@ -175,8 +236,11 @@ def generate(tokens):
         "// Edit design/tokens.json, run `python3 Tools/tokens/generate.py`, commit both.",
         "// CI regenerates this file and fails if it differs from the committed copy.",
         "",
+        "import SwiftUI",
+        "",
         "/// The shared design tokens (design/tokens.json), the source of truth for this app's",
-        "/// colours and fonts and for Herdrup Desktop's. Colours are 0xRRGGBB.",
+        "/// colours, fonts and shared layout numbers and for Herdrup Desktop's. Colours are",
+        "/// 0xRRGGBB; space, radius, size and text sizes are points (text sizes at scale 1).",
         "enum DesignTokens {",
     ]
     emit_group(tokens, tokens, [], 1, out)
