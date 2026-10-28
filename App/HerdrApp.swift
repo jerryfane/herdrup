@@ -1071,10 +1071,13 @@ struct ConnectView: View {
         .buttonStyle(ConnectRowButtonStyle(held: busy))
         .disabled(connecting != nil)
         .accessibilityValue(busy ? "Connecting" : "")
-        // Hold to manage: Edit opens the editor pre-filled; Remove drops it. Never rebuilt
-        // while open (see StableContextMenu.swift).
+        // Hold to manage: Edit opens the editor pre-filled (as Reconnect when the secret is
+        // not on this phone, so it never claims one is saved); Remove drops it. Never
+        // rebuilt while open (see StableContextMenu.swift).
         .stableContextMenu {
-            StableMenuItem("Edit", systemImage: "pencil") { editorTarget = .edit(saved) }
+            StableMenuItem("Edit", systemImage: "pencil") {
+                editorTarget = storedSecret(saved) == nil ? .missingSecret(saved) : .edit(saved)
+            }
             StableMenuItem("Remove", systemImage: "trash", role: .destructive) { savedHosts.delete(saved) }
         }
     }
@@ -1086,31 +1089,37 @@ struct ConnectView: View {
         return hasNickname ? "\(saved.username)@\(saved.host)" : saved.username
     }
 
-    /// One-tap connect from a saved host. If the secret is not on this device (the host
-    /// list came from another phone, or it was deleted), open the editor in reconnect
-    /// mode, which says so and asks for it, rather than a silent dead tap.
+    /// The host's secret from this phone's Keychain, or nil when it is not here (the host
+    /// list came from another phone, or the secret was deleted). A key is trimmed; a
+    /// password is not, since its leading/trailing spaces can be significant.
+    private func storedSecret(_ saved: SavedHost) -> HostSecret? {
+        switch saved.auth {
+        case .key:
+            guard let key = savedHosts.key(for: saved)?.trimmingCharacters(in: .whitespacesAndNewlines),
+                  !key.isEmpty else { return nil }
+            return .key(key)
+        case .password:
+            guard let password = savedHosts.password(for: saved), !password.isEmpty else { return nil }
+            return .password(password)
+        }
+    }
+
+    /// One-tap connect from a saved host. If the secret is not on this device, open the
+    /// editor in reconnect mode, which says so and asks for it, rather than a silent dead tap.
     private func tapSavedHost(_ saved: SavedHost) {
         guard let ep = HostEndpoint.parse(saved.host) else {
             editorTarget = .edit(saved)
             return
         }
         let creds: SSHCredentials
-        switch saved.auth {
-        case .key:
-            // A missing secret asks for it rather than a silent dead tap.
-            guard let key = savedHosts.key(for: saved)?.trimmingCharacters(in: .whitespacesAndNewlines),
-                  !key.isEmpty else {
-                editorTarget = .missingSecret(saved)
-                return
-            }
+        switch storedSecret(saved) {
+        case nil:
+            editorTarget = .missingSecret(saved)
+            return
+        case .key(let key):
             creds = SSHCredentials(host: ep.host, port: ep.port, username: saved.username,
                                    privateKeyPEM: key, remoteSocketPath: "")
-        case .password:
-            // Not trimmed — a password's leading/trailing spaces can be significant.
-            guard let password = savedHosts.password(for: saved), !password.isEmpty else {
-                editorTarget = .missingSecret(saved)
-                return
-            }
+        case .password(let password):
             creds = SSHCredentials(host: ep.host, port: ep.port, username: saved.username,
                                    password: password, remoteSocketPath: "")
         }
