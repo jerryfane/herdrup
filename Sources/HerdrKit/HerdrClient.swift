@@ -1438,6 +1438,51 @@ public actor HerdrClient {
         return AgentAvatarImageData(mime: result.mime, data: data)
     }
 
+    // MARK: agent folders and stars (herdrup#552)
+
+    /// `groups_conflict` carries the server's current document beside the code and message.
+    private struct AgentGroupsErrorEnvelope: Decodable {
+        struct Body: Decodable {
+            let code: String
+            let message: String
+            let current: AgentGroupsDocument?
+        }
+        let error: Body
+    }
+
+    /// The owner's folders and stars.
+    public func agentGroupsGet() async throws -> AgentGroupsDocument {
+        try await agentGroupsCall("agent.groups.get", EmptyParams())
+    }
+
+    /// Replaces the whole document. `document.revision` must be the revision it was read at;
+    /// the reply carries the new one. A stale revision throws `.conflict` with the server's
+    /// current document, onto which the caller can replay its edit.
+    public func agentGroupsSet(_ document: AgentGroupsDocument) async throws -> AgentGroupsDocument {
+        try await agentGroupsCall("agent.groups.set", document)
+    }
+
+    private func agentGroupsCall<P: Encodable>(_ method: String, _ params: P) async throws -> AgentGroupsDocument {
+        let response = try await transport.roundTrip(try encodeRequest(method, params))
+        if let envelope = try? decoder.decode(AgentGroupsErrorEnvelope.self, from: Data(response.utf8)) {
+            let error = envelope.error
+            switch error.code {
+            case "groups_conflict":
+                if let current = error.current { throw AgentGroupsError.conflict(current: current) }
+            case "invalid_groups":
+                throw AgentGroupsError.invalid(error.message)
+            case "guest_forbidden":
+                throw AgentGroupsError.forbidden
+            default:
+                if Self.isUnknownMethod(APIError(code: error.code, message: error.message), method) {
+                    throw AgentGroupsError.unsupported
+                }
+            }
+            throw APIError(code: error.code, message: error.message)
+        }
+        return try decodeResult(response, as: AgentGroupsDocument.self)
+    }
+
     /// `agent.archive` params. `reason`/`by`/`force` are OMITTED when nil/false so a plain
     /// archive sends `{ target }` and matches the server's optional/skip-if-none.
     struct AgentArchiveParams: Encodable {

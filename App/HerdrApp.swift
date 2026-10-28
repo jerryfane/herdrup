@@ -336,6 +336,10 @@ struct RootView: View {
         case .needsYou:
             TerminalHomeView(client: HerdrClient(transport: NeedsYouMockTransport()), onDisconnect: {},
                              onTrustHostKey: { _ in false })
+        case .folders:
+            let _ = AgentFoldersMockTransport.prepared
+            TerminalHomeView(client: HerdrClient(transport: AgentFoldersMockTransport()), onDisconnect: {},
+                             onTrustHostKey: { _ in false }, livePaneIDs: AgentFoldersMockTransport.livePaneIDs)
         case .sessions:
             SessionsMockHome()
         case .liveEvents, .liveEventsLegacy:
@@ -1747,6 +1751,9 @@ struct TerminalHomeView: View {
     /// Whether the waiting rows are scrolled out of sight. Held, not observed: only the
     /// needs-you pill redraws when it flips (#551).
     @State private var needsYouSight = NeedsYouSight()
+    /// The agent rows' swipe-right actions (#552): one pan on the list's scroll view. Held,
+    /// never observed; each row observes only its own swipe.
+    @State private var rowSwipes = RowSwipeController()
     @State private var liveEvents = AgentRosterLiveEventsBuffer()
     /// The daemon advertises `events_v2` (from `agent.list` `origin_capabilities`, or
     /// `ping` on a daemon without that field). Observable because it keys the stream
@@ -1833,6 +1840,19 @@ struct TerminalHomeView: View {
     /// the Avatar… sheet is editing (herdrup#538).
     @State private var avatars = AgentAvatarDirectory()
     @State private var avatarRow: AgentRow?
+    /// Agent folders and stars (herdrup#552). Empty on a server without `agent_groups`, and
+    /// then the list shows no folder rows, no stars and no folder actions.
+    @State private var groups = AgentGroupsStore()
+    /// The folder-name prompt (a new folder, or a rename) and its text.
+    @State private var folderNaming: FolderNaming?
+    @State private var folderNameText = ""
+    /// The agent whose "Move to folder" choices are showing, from its swipe action.
+    @State private var moveCandidate: AgentRow?
+    private enum FolderNaming: Equatable {
+        /// A new folder, holding `member` (an agent name) when it was made from an agent row.
+        case new(member: String?)
+        case rename(AgentFolder)
+    }
     @State private var activeCover: ActiveCover?
     /// The selected bottom tab (Agents / Gram / Settings). Terminal is NOT a tab — it
     /// fronts a keep-mounted pane OVER the tabs (see PaneKeepAliveContainer). Gram and
@@ -2262,8 +2282,9 @@ struct TerminalHomeView: View {
 
     /// The on-screen item directly above the open sidebar row: its bottom separator would
     /// touch the open row's highlight, so it is hidden (Messages does the same). A row is
-    /// identified by its pane ID, a group's disclosure row ("Idle  4 ›") by `disclosureKey`.
-    private func itemAboveOpenRow(_ sections: [(group: AgentGroup, rows: [AgentRow])]) -> String? {
+    /// identified by its pane ID, a group's disclosure row ("Idle  4 ›") by `disclosureKey`,
+    /// a folder row by `folderKey`.
+    private func itemAboveOpenRow(_ sections: [AgentFolderLayout.Section]) -> String? {
         guard hSizeClass == .regular, let frontID else { return nil }
         var previous: String?
         for section in sections {
@@ -2272,9 +2293,14 @@ struct TerminalHomeView: View {
                 previous = Self.disclosureKey(section.group)
             }
             guard !isCollapsed else { continue }
-            for row in section.rows {
-                if row.info.paneID == frontID { return previous }
-                previous = row.info.paneID
+            for item in section.items {
+                switch item {
+                case .agent(let row, _, _):
+                    if row.info.paneID == frontID { return previous }
+                    previous = row.info.paneID
+                case .folder(let summary):
+                    previous = Self.folderKey(summary.folder.id)
+                }
             }
         }
         return nil
@@ -3295,6 +3321,7 @@ struct TerminalHomeView: View {
         .onChange(of: agents, initial: true) { _, roster in
             avatars.client = client
             avatars.update(agents: roster)
+            groups.attach(client: client, host: hostKey)
         }
         .environment(avatars)
     }
@@ -3310,7 +3337,7 @@ struct TerminalHomeView: View {
     /// nothing observed and rename/restart/swap were silent no-ops.
     @ViewBuilder
     private func agentActions<Content: View>(_ content: Content) -> some View {
-        content
+        folderActions(content)
             .confirmationDialog(
                 "Restart agent?",
                 isPresented: $restartCandidate.isPresent(),
@@ -3375,6 +3402,41 @@ struct TerminalHomeView: View {
             }
     }
 
+    /// The folder prompts (#552), on both layouts like `agentActions`: the swipe's "Move to
+    /// folder" choices, the folder-name field (a new folder, or a rename), and a save that
+    /// failed.
+    private func folderActions<Content: View>(_ content: Content) -> some View {
+        content
+            .confirmationDialog("Move to folder", isPresented: $moveCandidate.isPresent(),
+                                presenting: moveCandidate) { row in
+                moveDialogButtons(row)
+            } message: { row in
+                Text("Move \(row.title) to a folder")
+            }
+            .alert(folderNamingTitle, isPresented: $folderNaming.isPresent(), presenting: folderNaming) { naming in
+                TextField("Folder name", text: $folderNameText)
+                    .accessibilityIdentifier("folder-name-field")
+                Button("Cancel", role: .cancel) {}
+                Button(folderNamingConfirm(naming)) { commitFolderName(naming) }
+            }
+            .alert("Couldn't save folders", isPresented: $groups.error.isPresent(),
+                   presenting: groups.error) { _ in
+                Button("OK", role: .cancel) {}
+            } message: { message in
+                Text(message)
+            }
+    }
+
+    private var folderNamingTitle: String {
+        if case .rename = folderNaming { return "Rename folder" }
+        return "New folder"
+    }
+
+    private func folderNamingConfirm(_ naming: FolderNaming) -> String {
+        if case .rename = naming { return "Rename" }
+        return "Create"
+    }
+
     private var agentsTab: some View {
         agentActions(
             NavigationStack {
@@ -3425,6 +3487,8 @@ struct TerminalHomeView: View {
                     await perform(verb: "rename", title: title) {
                         try await client.renameAgent(target: paneID, name: newName)
                     }
+                    // The server moved its folder membership and star to the new name.
+                    await groups.refresh(force: true)
                 }
             }
         case .terminal(let terminal):
@@ -3630,7 +3694,10 @@ struct TerminalHomeView: View {
                     ScrollActivityObserver(
                         isEnabled: agentRosterIsVisible,
                         onChange: setAgentListScrolling,
-                        onSample: needsYouSight.sample
+                        onSample: { scrollView in
+                            needsYouSight.sample(scrollView)
+                            rowSwipes.attach(scrollView)
+                        }
                     )
                 }
         }
@@ -3672,9 +3739,17 @@ struct TerminalHomeView: View {
         return frontID == nil
     }
 
+    /// Eager on the Mac (see `agentRosterScroll`), and wherever the list shows folders (#552).
+    /// With folders, the lazy stack's first vertical scroll never settled: the main thread
+    /// spun in SwiftUI's lazy placement (LazySubviewPlacements / LazyStack.place) for good and
+    /// the app never went idle (CI runs 40538770025 and 40545816526, sampled). Run 40550430715
+    /// narrowed it: the folders list hung lazy with or without swipe actions, and answered in
+    /// 4 s eager. The stack's children are whole sections (each an eager VStack of its rows),
+    /// so being lazy only ever skipped building an off-screen section; RosterStress scrolls an
+    /// 80-agent roster eagerly.
     @ViewBuilder
     private var agentRosterStack: some View {
-        if ProcessInfo.processInfo.isiOSAppOnMac || forceEagerAgentRosterStack {
+        if ProcessInfo.processInfo.isiOSAppOnMac || forceEagerAgentRosterStack || groups.document != nil {
             VStack(alignment: .leading, spacing: 0) {
                 rosterTitleBlock
                 agentRosterRows
@@ -3697,14 +3772,22 @@ struct TerminalHomeView: View {
             // than leave a blank scroll that reads as "no agents".
             emptyLine("no matches")
         } else {
-            let aboveOpen = itemAboveOpenRow(visibleSections)
-            ForEach(visibleSections, id: \.group) { section in
+            let layout = rosterLayout
+            let aboveOpen = itemAboveOpenRow(layout.sections)
+            ForEach(layout.sections, id: \.group) { section in
+                // The needs-you pill (#551) counts every waiting agent, those inside a closed
+                // folder too; the folder row sits in this section, so the section's sight
+                // still says whether anything waiting is on screen.
                 if section.group == .needsYou && search.isEmpty {
-                    sectionView(section.group, section.rows, aboveOpen: aboveOpen)
+                    sectionView(section, aboveOpen: aboveOpen)
                         .reportsWaitingRowsBottom(to: needsYouSight)
                 } else {
-                    sectionView(section.group, section.rows, aboveOpen: aboveOpen)
+                    sectionView(section, aboveOpen: aboveOpen)
                 }
+            }
+            // Folders with none of their agents here, so they can still be renamed or deleted.
+            if search.isEmpty && !layout.emptyFolders.isEmpty {
+                emptyFoldersSection(layout.emptyFolders, aboveOpen: aboveOpen)
             }
         }
         // Archived agents sit below the live herd (above terminals) and only
@@ -4018,7 +4101,8 @@ struct TerminalHomeView: View {
         }
     }
 
-    private func sectionView(_ group: AgentGroup, _ rows: [AgentRow], aboveOpen: String?) -> some View {
+    private func sectionView(_ section: AgentFolderLayout.Section, aboveOpen: String?) -> some View {
+        let group = section.group
         // An active search overrides collapse — a match inside IDLE must not stay
         // hidden behind a shut section the user did not open.
         let isCollapsed = search.isEmpty && collapsed.contains(group)
@@ -4030,133 +4114,291 @@ struct TerminalHomeView: View {
             // #352: no section headers. Needs you, working and stopped rows follow each
             // other in that order; a collapsible group (Idle) is one plain row at the end
             // ("Idle  4 ›") that opens its rows underneath. An active search shows the rows
-            // without the disclosure, as before.
+            // without the disclosure, as before. The count includes the agents in its folders.
             if group.startsCollapsed && search.isEmpty {
-                disclosureRow(group.sectionTitle.capitalized, count: rows.count, open: !isCollapsed,
+                disclosureRow(group.sectionTitle.capitalized, count: section.agentCount, open: !isCollapsed,
                               separator: aboveOpen != Self.disclosureKey(group)) {
                     if isCollapsed { collapsed.remove(group) } else { collapsed.insert(group) }
                 }
             }
 
             if !isCollapsed {
-                ForEach(rows) { row in
-                    Button {
-                        open(PaneSlot(paneID: row.info.paneID, title: row.title,
-                                      agent: row.info, initialReply: "", siblings: siblings))
-                    } label: {
-                        card(row, separator: aboveOpen != row.info.paneID)
+                ForEach(section.items) { item in
+                    switch item {
+                    case let .agent(row, starred, folderID):
+                        agentRowButton(row, starred: starred, indented: folderID != nil,
+                                       aboveOpen: aboveOpen, siblings: siblings)
+                    case let .folder(summary):
+                        folderRow(summary, aboveOpen: aboveOpen)
                     }
-                    .buttonStyle(.plain)
-                    // Over the sidebar on iPad / Mac, the hovered agent speaks in the empty
-                    // detail column's glyph field. No state changes here.
-                    .onContinuousHover(coordinateSpace: .global) { phase in
-                        switch phase {
-                        case .active(let location):
-                            glyphFieldSpotlight.hover(glyphFieldLine(row), globalY: location.y)
-                        case .ended:
-                            glyphFieldSpotlight.end(row.id)
-                        }
-                    }
-                    // Bind UI receipts to the tappable row, not a Text child whose
-                    // `isHittable` is false because the parent Button owns the hit.
-                    .accessibilityIdentifier("agent-row-\(row.info.paneID)")
-                    // VoiceOver should expose the same status section that visually
-                    // classifies this agent. The scroll receipt also uses this value
-                    // to prove an existing row moved, independently of row count.
-                    .accessibilityValue(row.group.label)
-                    // Long-press an agent → quick actions. Items only write state (see
-                    // `menuAction`); never rebuilt while open (StableContextMenu.swift).
-                    .stableContextMenu {
-                        // Stop = close the pane (`pane.close`, the only stop RPC — its
-                        // inverse is start), then reload.
-                        StableMenuItem("Stop agent", systemImage: "stop.circle", role: .destructive) {
-                            menuAction = .stop(row)
-                        }
-                        // Rename = set the agent's daemon `name`, which becomes a resolvable
-                        // mention target (another agent can `herdr agent read <name>`).
-                        StableMenuItem("Rename", systemImage: "pencil") {
-                            renameTarget = .agent(row)
-                        }
-                        // Avatar… = pick this agent's mascot or photo (herdrup#538). Owner
-                        // only, on a daemon that stores avatars.
-                        if avatars.canEdit {
-                            StableMenuItem("Avatar…", systemImage: "person.crop.circle") {
-                                avatarRow = row
-                            }
-                        }
-                        // Restart = close the agent's session and reopen it with
-                        // --resume in place (keeps the pane). It interrupts a busy
-                        // agent's turn, so it routes through a confirmation.
-                        StableMenuItem("Restart agent", systemImage: "arrow.clockwise") {
-                            restartCandidate = row
-                        }
-                        // Harness transfer is deliberately not a restart shortcut. It
-                        // first builds and verifies a native destination transcript,
-                        // then opens a review sheet whose explicit confirm performs the
-                        // cutover. Local-only: the server denies filesystem-authority
-                        // transfer requests over federation.
-                        let transferTargets = sessionTransferTargets(for: row.info)
-                        let hasActiveTransfer = row.info.sessionTransfer
-                            .map { !$0.phase.isConclusive } ?? false
-                        if row.info.machineID == nil,
-                           (sessionTransferSupported || hasActiveTransfer),
-                           let source = sessionTransferSource(for: row.info),
-                           !transferTargets.isEmpty {
-                            StableMenuItem(
-                                submenu: transferTargets.count == 1
-                                    ? "Switch to \(transferTargets[0].displayName)"
-                                    : "Switch harness",
-                                systemImage: "arrow.left.arrow.right"
-                            ) {
-                                for target in transferTargets {
-                                    StableMenuItem(target.displayName, systemImage: "arrow.right") {
-                                        transferCandidate = PendingHarnessTransfer(
-                                            row: row,
-                                            source: source,
-                                            target: target
-                                        )
-                                    }
-                                }
-                            }
-                        }
-                        // Swap = restart the agent onto a DIFFERENT credential account
-                        // of the same kind (an agent runs only on its own kind's
-                        // subscriptions). Shown only when the daemon reported at least
-                        // one same-kind account. The list still INCLUDES the account the
-                        // agent is already on — swapping to it is a legitimate way to
-                        // restart — but that one is now marked, because the daemon reports
-                        // the current account (`account`) and the menu no longer has to
-                        // guess. Picking an account does NOT fire immediately: it stages a
-                        // confirmation (swapCandidate), because a swap is a full
-                        // turn-interrupting restart, and even swapping to the current
-                        // account restarts (interrupts) the agent rather than being a no-op.
-                        let swapTargets = accounts.filter { $0.kind == row.info.agent }
-                        if !swapTargets.isEmpty {
-                            StableMenuItem(submenu: "Swap subscription", systemImage: "arrow.left.arrow.right") {
-                                for acct in swapTargets {
-                                    StableMenuItem(
-                                        acct.label
-                                            + (acct.id == row.info.account ? " (current)" : "")
-                                            + (acct.active ? "" : " (exhausted)"),
-                                        systemImage: acct.id == row.info.account
-                                            ? "person.crop.circle.fill"
-                                            : "person.crop.circle"
-                                    ) {
-                                        swapCandidate = PendingSwap(row: row, account: acct)
-                                    }
-                                }
-                            }
-                        }
-                        // Archive = release the pane but PRESERVE the session so it can be
-                        // resumed later (`agent.archive`, issue #173). Reversible via the
-                        // Archived section's Unarchive, so it fires directly (no confirm).
-                        // The daemon REJECTS archiving a mid-turn agent unless forced, so a
-                        // working agent surfaces that error rather than being torn off a turn.
-                        StableMenuItem("Archive", systemImage: "archivebox") {
-                            menuAction = .archive(row)
+                }
+            }
+        }
+    }
+
+    /// One agent in the list: tap opens its pane, swipe right stars it or moves it to a
+    /// folder (#552), long-press offers every quick action.
+    private func agentRowButton(_ row: AgentRow, starred: Bool, indented: Bool,
+                                aboveOpen: String?, siblings: [AgentInfo]) -> some View {
+        Button {
+            open(PaneSlot(paneID: row.info.paneID, title: row.title,
+                          agent: row.info, initialReply: "", siblings: siblings))
+        } label: {
+            card(row, separator: aboveOpen != row.info.paneID, starred: starred, indented: indented)
+        }
+        .buttonStyle(.plain)
+        // Over the sidebar on iPad / Mac, the hovered agent speaks in the empty
+        // detail column's glyph field. No state changes here.
+        .onContinuousHover(coordinateSpace: .global) { phase in
+            switch phase {
+            case .active(let location):
+                glyphFieldSpotlight.hover(glyphFieldLine(row), globalY: location.y)
+            case .ended:
+                glyphFieldSpotlight.end(row.id)
+            }
+        }
+        // Bind UI receipts to the tappable row, not a Text child whose
+        // `isHittable` is false because the parent Button owns the hit.
+        .accessibilityIdentifier("agent-row-\(row.info.paneID)")
+        // VoiceOver should expose the same status section that visually
+        // classifies this agent. The scroll receipt also uses this value
+        // to prove an existing row moved, independently of row count.
+        .accessibilityValue(row.group.label)
+        // Long-press an agent → quick actions. Items only write state (see
+        // `menuAction`); never rebuilt while open (StableContextMenu.swift).
+        .stableContextMenu {
+            // Stop = close the pane (`pane.close`, the only stop RPC — its
+            // inverse is start), then reload.
+            StableMenuItem("Stop agent", systemImage: "stop.circle", role: .destructive) {
+                menuAction = .stop(row)
+            }
+            // Rename = set the agent's daemon `name`, which becomes a resolvable
+            // mention target (another agent can `herdr agent read <name>`).
+            StableMenuItem("Rename", systemImage: "pencil") {
+                renameTarget = .agent(row)
+            }
+            // Avatar… = pick this agent's mascot or photo (herdrup#538). Owner
+            // only, on a daemon that stores avatars.
+            if avatars.canEdit {
+                StableMenuItem("Avatar…", systemImage: "person.crop.circle") {
+                    avatarRow = row
+                }
+            }
+            // Star and Move to folder (#552): the swipe's choices, on a server
+            // with folders.
+            if let name = row.info.name, let document = groups.document {
+                StableMenuItem(starred ? "Unstar" : "Star", systemImage: starred ? "star.slash" : "star") {
+                    groups.apply(.setStar(name, !starred))
+                }
+                StableMenuItem(submenu: "Move to folder", systemImage: "folder") {
+                    folderMenuItems(for: name, in: document)
+                }
+            }
+            // Restart = close the agent's session and reopen it with
+            // --resume in place (keeps the pane). It interrupts a busy
+            // agent's turn, so it routes through a confirmation.
+            StableMenuItem("Restart agent", systemImage: "arrow.clockwise") {
+                restartCandidate = row
+            }
+            // Harness transfer is deliberately not a restart shortcut. It
+            // first builds and verifies a native destination transcript,
+            // then opens a review sheet whose explicit confirm performs the
+            // cutover. Local-only: the server denies filesystem-authority
+            // transfer requests over federation.
+            let transferTargets = sessionTransferTargets(for: row.info)
+            let hasActiveTransfer = row.info.sessionTransfer
+                .map { !$0.phase.isConclusive } ?? false
+            if row.info.machineID == nil,
+               (sessionTransferSupported || hasActiveTransfer),
+               let source = sessionTransferSource(for: row.info),
+               !transferTargets.isEmpty {
+                StableMenuItem(
+                    submenu: transferTargets.count == 1
+                        ? "Switch to \(transferTargets[0].displayName)"
+                        : "Switch harness",
+                    systemImage: "arrow.left.arrow.right"
+                ) {
+                    for target in transferTargets {
+                        StableMenuItem(target.displayName, systemImage: "arrow.right") {
+                            transferCandidate = PendingHarnessTransfer(
+                                row: row,
+                                source: source,
+                                target: target
+                            )
                         }
                     }
                 }
+            }
+            // Swap = restart the agent onto a DIFFERENT credential account
+            // of the same kind (an agent runs only on its own kind's
+            // subscriptions). Shown only when the daemon reported at least
+            // one same-kind account. The list still INCLUDES the account the
+            // agent is already on — swapping to it is a legitimate way to
+            // restart — but that one is now marked, because the daemon reports
+            // the current account (`account`) and the menu no longer has to
+            // guess. Picking an account does NOT fire immediately: it stages a
+            // confirmation (swapCandidate), because a swap is a full
+            // turn-interrupting restart, and even swapping to the current
+            // account restarts (interrupts) the agent rather than being a no-op.
+            let swapTargets = accounts.filter { $0.kind == row.info.agent }
+            if !swapTargets.isEmpty {
+                StableMenuItem(submenu: "Swap subscription", systemImage: "arrow.left.arrow.right") {
+                    for acct in swapTargets {
+                        StableMenuItem(
+                            acct.label
+                                + (acct.id == row.info.account ? " (current)" : "")
+                                + (acct.active ? "" : " (exhausted)"),
+                            systemImage: acct.id == row.info.account
+                                ? "person.crop.circle.fill"
+                                : "person.crop.circle"
+                        ) {
+                            swapCandidate = PendingSwap(row: row, account: acct)
+                        }
+                    }
+                }
+            }
+            // Archive = release the pane but PRESERVE the session so it can be
+            // resumed later (`agent.archive`, issue #173). Reversible via the
+            // Archived section's Unarchive, so it fires directly (no confirm).
+            // The daemon REJECTS archiving a mid-turn agent unless forced, so a
+            // working agent surfaces that error rather than being torn off a turn.
+            StableMenuItem("Archive", systemImage: "archivebox") {
+                menuAction = .archive(row)
+            }
+        }
+        // Swipe right: Star / Unstar and Move to folder, on a server with folders.
+        // Outermost, so the row's identifier and value stay on the row itself.
+        .leadingSwipeActions(folderSwipeActions(row, starred: starred), id: row.id, in: rowSwipes)
+    }
+
+    // MARK: folders and stars (#552)
+
+    /// The list's sections with folders and stars applied. With nothing from the server (an
+    /// older server, a guest, or before the first read) it is the plain list. An active search
+    /// shows a match inside a closed folder: every folder counts as open.
+    private var rosterLayout: AgentFolderLayout {
+        let open = search.isEmpty
+            ? groups.openFolders
+            : Set(groups.document?.folders.map(\.id) ?? [])
+        return AgentFolderLayout(sections: visibleSections, groups: groups.document, openFolders: open)
+    }
+
+    /// A folder: tap opens or closes it in place (kept on this device), long-press renames,
+    /// deletes or moves it.
+    private func folderRow(_ summary: AgentFolderSummary, aboveOpen: String?) -> some View {
+        let folder = summary.folder
+        return Button {
+            groups.toggleOpen(folder.id)
+        } label: {
+            AgentFolderRow(summary: summary, sidebar: hSizeClass == .regular,
+                           separator: aboveOpen != Self.folderKey(folder.id))
+        }
+        .buttonStyle(.plain)
+        .accessibilityIdentifier("agent-folder-\(folder.id)")
+        .accessibilityLabel("\(folder.name), \(summary.agentCountText), \(summary.summaryLine)")
+        .accessibilityValue("\(summary.isOpen ? "expanded" : "collapsed"), \(summary.waitingCount) waiting, \(summary.stoppedCount) stopped")
+        .stableContextMenu {
+            if let document = groups.document {
+                let ordered = document.orderedFolders
+                StableMenuItem("Rename", systemImage: "pencil") {
+                    folderNameText = folder.name
+                    folderNaming = .rename(folder)
+                }
+                if ordered.first?.id != folder.id {
+                    StableMenuItem("Move up", systemImage: "arrow.up") {
+                        groups.apply(.moveFolder(folder.id, by: -1))
+                    }
+                }
+                if ordered.last?.id != folder.id {
+                    StableMenuItem("Move down", systemImage: "arrow.down") {
+                        groups.apply(.moveFolder(folder.id, by: 1))
+                    }
+                }
+                // The agents go back to the list; nothing about them changes.
+                StableMenuItem("Delete folder", systemImage: "trash", role: .destructive) {
+                    groups.apply(.deleteFolder(folder.id))
+                }
+            }
+        }
+    }
+
+    /// Folders none of whose agents are in the list, after the live herd, so they can still be
+    /// renamed or deleted.
+    private func emptyFoldersSection(_ folders: [AgentFolderSummary], aboveOpen: String?) -> some View {
+        VStack(alignment: .leading, spacing: 0) {
+            ForEach(folders, id: \.folder.id) { summary in
+                folderRow(summary, aboveOpen: aboveOpen)
+            }
+        }
+    }
+
+    private static func folderKey(_ folderID: String) -> String { "folder:\(folderID)" }
+
+    /// The swipe-right actions of an agent row: Star or Unstar, and Move to folder. None on a
+    /// server without folders, and none for an agent with no name to file it under.
+    private func folderSwipeActions(_ row: AgentRow, starred: Bool) -> [RowSwipeAction] {
+        guard groups.document != nil, let name = row.info.name else { return [] }
+        return [
+            RowSwipeAction(title: starred ? "Unstar" : "Star",
+                           systemImage: starred ? "star.slash.fill" : "star.fill",
+                           tint: Palette.waiting, identifier: "agent-swipe-star") {
+                groups.apply(.setStar(name, !starred))
+            },
+            RowSwipeAction(title: "Move", systemImage: "folder.fill", tint: Palette.brand,
+                           identifier: "agent-swipe-move") {
+                moveCandidate = row
+            },
+        ]
+    }
+
+    /// The long-press "Move to folder" submenu: every other folder, a new one, and out of the
+    /// one it is in.
+    @StableMenuBuilder
+    private func folderMenuItems(for name: String, in document: AgentGroupsDocument) -> [StableMenuItem] {
+        let current = document.folder(containing: name)
+        for folder in document.orderedFolders.filter({ $0.id != current?.id }) {
+            StableMenuItem(folder.name, systemImage: "folder") {
+                groups.apply(.move(name, toFolder: folder.id))
+            }
+        }
+        StableMenuItem("New folder…", systemImage: "folder.badge.plus") {
+            beginNewFolder(member: name)
+        }
+        if let current {
+            StableMenuItem("Remove from \(current.name)", systemImage: "folder.badge.minus") {
+                groups.apply(.removeFromFolder(name))
+            }
+        }
+    }
+
+    /// The swipe's "Move" choices, as a confirmation dialog.
+    @ViewBuilder
+    private func moveDialogButtons(_ row: AgentRow) -> some View {
+        if let name = row.info.name, let document = groups.document {
+            let current = document.folder(containing: name)
+            ForEach(document.orderedFolders.filter { $0.id != current?.id }) { folder in
+                Button(folder.name) { groups.apply(.move(name, toFolder: folder.id)) }
+            }
+            Button("New folder…") { beginNewFolder(member: name) }
+            if let current {
+                Button("Remove from \(current.name)") { groups.apply(.removeFromFolder(name)) }
+            }
+        }
+        Button("Cancel", role: .cancel) {}
+    }
+
+    private func beginNewFolder(member: String?) {
+        folderNameText = ""
+        folderNaming = .new(member: member)
+    }
+
+    private func commitFolderName(_ naming: FolderNaming) {
+        switch naming {
+        case .new(let member):
+            groups.createFolder(named: folderNameText, member: member)
+        case .rename(let folder):
+            if let name = AgentGroupsDocument.folderName(folderNameText) {
+                groups.apply(.renameFolder(folder.id, to: name))
             }
         }
     }
@@ -4194,7 +4436,10 @@ struct TerminalHomeView: View {
     /// divider. A waiting agent is marked by its "!" badge and a bright preview only; the old
     /// amber dot left of the avatar duplicated the badge and was removed at the owner's request.
     /// Every marker the card had stays: account, time in state, no account, stale, offline.
-    private func card(_ row: AgentRow, separator: Bool = true) -> some View {
+    /// `starred` draws the star after the name (#552); `indented` is an agent shown under its
+    /// open folder.
+    private func card(_ row: AgentRow, separator: Bool = true, starred: Bool = false,
+                      indented: Bool = false) -> some View {
         // Fixed two-line rows; scale the text area with the app's text-size setting.
         // The selected sidebar row retains its rounded highlight.
         let sidebar = hSizeClass == .regular
@@ -4202,7 +4447,8 @@ struct TerminalHomeView: View {
         let isOpen = sidebar && frontID == row.info.paneID
         return HStack(alignment: .center, spacing: 0) {
             // The row's leading inset (where the needs-you dot used to sit).
-            Color.clear.frame(width: 20, height: 1)
+            // An agent inside an open folder sits one step in, under the folder's picture.
+            Color.clear.frame(width: indented ? 44 : 20, height: 1)
             AgentAvatar(name: row.title,
                         badge: row.info.isUnreachable ? .offline : AgentAvatarBadge(row.group),
                         badgeLabel: row.info.isUnreachable ? "offline" : row.group.label,
@@ -4212,6 +4458,12 @@ struct TerminalHomeView: View {
                 HStack(spacing: 6) {
                     Text(row.title).font(.system(size: (sidebar ? 16 : 17) * Typography.scale, weight: .semibold)).foregroundStyle(Palette.text)
                         .lineLimit(1)
+                    if starred {
+                        Image(systemName: "star.fill")
+                            .font(.system(size: 12, weight: .semibold))
+                            .foregroundStyle(Palette.waiting)
+                            .accessibilityLabel("starred")
+                    }
                     rowMarkers(row)
                     Spacer(minLength: 6)
                     // How long the agent has been in its current state ("5m/2h/3d"), derived
@@ -4509,6 +4761,7 @@ struct TerminalHomeView: View {
                     sessionTransferSupported = capabilities?.agentSessionTransfer == true
                     forgetSupported = capabilities?.agentForget == true
                     avatars.canEdit = capabilities?.agentAvatar == true
+                    groups.setSupported(capabilities?.agentGroups == true)
                     // PARSED HERE, IN THE SAME BLOCK THAT MARKS THE CHECK DONE.
                     //
                     // My first conflict resolution kept BOTH this gated probe and the
@@ -4544,6 +4797,10 @@ struct TerminalHomeView: View {
                     // transaction can always be reopened.
                 }
             }
+            // Folders and stars: the first load after the ping reads the document, later
+            // loads re-read it at most once a minute. Off the roster's path, so a slow
+            // answer never holds the list back.
+            Task { await groups.refresh() }
         } catch {
             // A stale failure must not replace a newer success, clear its deep link,
             // or turn a recovered connection back into an error screen.
@@ -9406,6 +9663,9 @@ enum ScreenshotMock {
     case chatView, guestChat
     // The Agents home with a long roster and `HERDR_MOCK_WAITING` agents asking (#551).
     case needsYou
+    // The Agents home with two agent folders and a star, over a daemon that keeps them in
+    // memory (#552); `HERDR_MOCK_GROUPS=off` is a server without folders.
+    case folders
 
     static var mode: ScreenshotMock? {
         let env = ProcessInfo.processInfo.environment["HERDR_SCREENSHOT_MOCK"]?.lowercased()
@@ -9422,6 +9682,7 @@ enum ScreenshotMock {
         case "archivedclose": return .archivedClose
         case "sessions": return .sessions
         case "needsyou": return .needsYou
+        case "folders": return .folders
         case "liveevents-legacy": return .liveEventsLegacy
         case "pane": return .pane
         case "settings": return .settings

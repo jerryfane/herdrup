@@ -12,20 +12,79 @@ import UniformTypeIdentifiers
 
 /// Sizes shared by the Gram cards.
 enum GramCardMetrics {
-    /// A card's width CAP (code, text + file, a lone file): phone, then iPad/Mac. Cards are
-    /// `min(this, available width)`, so a narrow column (split view, Slide Over, Display
-    /// Zoom) shrinks them instead of clipping them at the right edge.
+    /// A bubble's or card's width CAP on a phone, and its FLOOR on iPad/Mac (where the cap
+    /// grows with the column, `bubbleCap`).
     static let compactCardWidth: CGFloat = 295
     static let regularCardWidth: CGFloat = 520
+    /// On iPad/Mac, the share of the offered width an agent's bubble may take, and yours.
+    static let incomingColumnShare: CGFloat = 0.8
+    static let outgoingColumnShare: CGFloat = 0.66
 
-    static func cardWidth(_ sizeClass: UserInterfaceSizeClass?) -> CGFloat {
-        sizeClass == .regular ? regularCardWidth : compactCardWidth
+    /// The width CAP of a message's bubble or card (prose, code, text + file, a lone file).
+    /// `column` is the width the row offers the bubble: the feed's column, less the avatar
+    /// beside an agent's message. A phone keeps the fixed 295; iPad/Mac takes the sender's
+    /// share of the column (an agent's 80 %, yours 66 %), never under 520, so a wide column
+    /// is not left with an empty middle. The bubble is `min(this, column)`
+    /// (`GramBubbleWidthLayout`), so a narrow column (split view, Slide Over, Display Zoom)
+    /// shrinks it instead of clipping it at the edge. An unbounded column gets the floor.
+    static func bubbleCap(column: CGFloat, incoming: Bool, regular: Bool) -> CGFloat {
+        guard regular else { return compactCardWidth }
+        guard column.isFinite else { return regularCardWidth }
+        return max(regularCardWidth, column * (incoming ? incomingColumnShare : outgoingColumnShare))
     }
 
     /// An image card's size CAP: 295 x 124 on a phone, 440 x 236 on iPad/Mac. A narrower
     /// column scales it down at this aspect ratio.
     static func imageSize(_ sizeClass: UserInterfaceSizeClass?) -> CGSize {
         sizeClass == .regular ? CGSize(width: 440, height: 236) : CGSize(width: 295, height: 124)
+    }
+}
+
+/// A message's bubble or card at `GramCardMetrics.bubbleCap` of the width offered to it, on
+/// the sender's side (an agent's leading, yours trailing): `.frame(maxWidth:alignment:)`
+/// with a cap that follows the offered width. Layout, not a width read in a body: dragging
+/// the column re-runs this and never the rows' bodies (#536/#543).
+struct GramBubbleWidthLayout: Layout {
+    let incoming: Bool
+    let regular: Bool
+
+    /// The cap for the offered width and the proposal passed on to the bubble: the offer up
+    /// to the cap. An unspecified offer (a parent asking for the ideal size) passes on as
+    /// unspecified and the cap is the floor, as the fixed cap's frame did.
+    private func widths(_ proposal: ProposedViewSize) -> (cap: CGFloat, child: ProposedViewSize) {
+        let cap = GramCardMetrics.bubbleCap(column: proposal.width ?? .infinity,
+                                            incoming: incoming, regular: regular)
+        return (cap, ProposedViewSize(width: proposal.width.map { min($0, cap) }, height: proposal.height))
+    }
+
+    func sizeThatFits(proposal: ProposedViewSize, subviews: Subviews, cache: inout ()) -> CGSize {
+        let (cap, child) = widths(proposal)
+        var size = CGSize.zero
+        for subview in subviews {
+            let fit = subview.sizeThatFits(child)
+            size.width = max(size.width, fit.width)
+            size.height = max(size.height, fit.height)
+        }
+        // As a `maxWidth` frame: the offered width up to the cap, so the bubble's side of the
+        // row lines up whatever its length.
+        size.width = min(cap, max(size.width, proposal.width ?? 0))
+        return size
+    }
+
+    func placeSubviews(in bounds: CGRect, proposal: ProposedViewSize, subviews: Subviews,
+                       cache: inout ()) {
+        let child = widths(proposal).child
+        for subview in subviews {
+            subview.place(at: CGPoint(x: incoming ? bounds.minX : bounds.maxX, y: bounds.midY),
+                          anchor: incoming ? .leading : .trailing, proposal: child)
+        }
+    }
+}
+
+extension View {
+    /// This bubble or card at its sender's width cap (`GramBubbleWidthLayout`).
+    func gramBubbleWidth(incoming: Bool, sizeClass: UserInterfaceSizeClass?) -> some View {
+        GramBubbleWidthLayout(incoming: incoming, regular: sizeClass == .regular) { self }
     }
 }
 
@@ -267,18 +326,16 @@ extension View {
 }
 
 /// A message's text and its card file (a document, or a file the store expired), as every
-/// Gram page draws them: a plain bubble for prose alone, a card (the card width, or less in
-/// a narrower column) once there is code or a file, and the bare file card for a file with no
-/// text. Prose folds past eight lines (`GramFoldingText`); the caller holds the fold state,
-/// by segment index. `card` draws the file card, `embedded` when text sits above it.
+/// Gram page draws them: a plain bubble for prose alone, a card (the whole width the caller's
+/// `gramBubbleWidth` cap offers) once there is code or a file, and the bare file card for a
+/// file with no text. Prose folds past eight lines (`GramFoldingText`); the caller holds the
+/// fold state, by segment index. `card` draws the file card, `embedded` when text sits above it.
 struct GramTextPart<Card: View>: View {
     let segments: [GramTextSegment]
     let mine: Bool
     let hasCard: Bool
     let isExpanded: (Int) -> Binding<Bool>
     @ViewBuilder let card: (_ embedded: Bool) -> Card
-
-    @Environment(\.horizontalSizeClass) private var sizeClass
 
     private var fill: Color { mine ? GramBubble.outFill : GramBubble.inFill }
     private var bubbleShape: RoundedRectangle {
@@ -310,7 +367,7 @@ struct GramTextPart<Card: View>: View {
                     Color.clear.frame(height: 8)
                 }
             }
-            .frame(maxWidth: GramCardMetrics.cardWidth(sizeClass), alignment: .leading)
+            .frame(maxWidth: .infinity, alignment: .leading)
             .background(fill)
             .clipShape(bubbleShape)
         } else {
@@ -375,7 +432,7 @@ struct GramLoneMessage<Header: View, Card: View>: View {
                                  isExpanded: isExpanded, card: card)
                         .gramBubbleTail(mine: mine, shown: !segments.isEmpty && !hasCard)
                         .stableContextMenu(previewCornerRadius: GramBubble.radius, items: menu)
-                        .frame(maxWidth: GramCardMetrics.cardWidth(sizeClass), alignment: mine ? .trailing : .leading)
+                        .gramBubbleWidth(incoming: !mine, sizeClass: sizeClass)
                 }
             }
         }
@@ -721,9 +778,10 @@ enum GramThumbnails {
 /// "<kind> · <size>". The whole card is the Open button; Save to Files is in the message's
 /// context menu and the card's accessibility actions (none where the page cannot save: the
 /// guest's). A download the reader started draws as a ring on the icon. On its own it is an
-/// agent card (bubble fill, card radius, card width); `embedded` draws it inside a card that
-/// has text above it, so it has no background or corners of its own and opens with the
-/// hairline that divides the two (the caller leaves 9 pt between its text and this).
+/// agent card (bubble fill, card radius, the whole width its message's `gramBubbleWidth` cap
+/// offers); `embedded` draws it inside a card that has text above it, so it has no background
+/// or corners of its own and opens with the hairline that divides the two (the caller leaves
+/// 9 pt between its text and this).
 struct GramFileCard: View {
     let name: String
     let kind: String
@@ -742,14 +800,12 @@ struct GramFileCard: View {
         return type?.localizedDescription ?? ""
     }
 
-    @Environment(\.horizontalSizeClass) private var sizeClass
-
     var body: some View {
         if embedded {
             card
         } else {
             card
-                .frame(maxWidth: GramCardMetrics.cardWidth(sizeClass))
+                .frame(maxWidth: .infinity)
                 .background(GramBubble.inFill)
                 .clipShape(RoundedRectangle(cornerRadius: GramBubble.radius, style: .continuous))
         }
@@ -819,14 +875,12 @@ struct GramExpiredFileCard: View {
     var identifier = GramExpiredFileCard.ownerIdentifier
     static let ownerIdentifier = "gram-attachment-expired"
 
-    @Environment(\.horizontalSizeClass) private var sizeClass
-
     var body: some View {
         if embedded {
             card
         } else {
             card
-                .frame(maxWidth: GramCardMetrics.cardWidth(sizeClass))
+                .frame(maxWidth: .infinity)
                 .background(GramBubble.inFill)
                 .clipShape(RoundedRectangle(cornerRadius: GramBubble.radius, style: .continuous))
         }

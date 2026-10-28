@@ -299,8 +299,15 @@ case "$shard" in
     # a slow hosted runner): with them in the app round, #433's run 38703928881 ran out of
     # its 30 m on the last class.
     run_suite iPhoneStatusMotion "$IPHONE_UDID" 10m -only-testing:HerdrUITests/StatusMotionTests || failed=1
+    # Round 4's agent-list classes own a round (#551, #552): with them in the app round, run
+    # 40589424949 spent 1761 s on 84 cases (AgentFoldersTests 170 s, NeedsYouPillTests 122 s)
+    # and ran out of the 30 m on the last class, every case passing.
+    run_suite iPhoneAgentList "$IPHONE_UDID" 10m -only-testing:HerdrUITests/AgentFoldersTests \
+      -only-testing:HerdrUITests/NeedsYouPillTests || failed=1
+    check_classes_ran TestReceipts/iPhoneAgentList-first.xcresult AgentFoldersTests NeedsYouPillTests || failed=1
     skip=(-skip-testing:HerdrUITests/GramTests -skip-testing:HerdrUITests/StatusMotionTests
-      -skip-testing:HerdrUITests/ChatViewTests -skip-testing:HerdrUITests/ChatUXSmokeTests -skip-testing:HerdrUITests/PagingTests)
+      -skip-testing:HerdrUITests/ChatViewTests -skip-testing:HerdrUITests/ChatUXSmokeTests -skip-testing:HerdrUITests/PagingTests
+      -skip-testing:HerdrUITests/AgentFoldersTests -skip-testing:HerdrUITests/NeedsYouPillTests)
     for class in "${TERMINAL_CLASSES[@]}"; do skip+=("-skip-testing:HerdrUITests/$class"); done
     run_suite iPhoneApp "$IPHONE_UDID" 30m -only-testing:HerdrUITests "${skip[@]}" || failed=1
     swiftterm_api iPhone "$IPHONE_UDID" || failed=1
@@ -324,6 +331,9 @@ case "$shard" in
     run_suite iPadSelectAgent "$IPAD_UDID" 5m -only-testing:HerdrUITests/SelectAgentFieldTests || failed=1
     # The needs-you pill pinned at the top of the sidebar (#551).
     run_suite iPadNeedsYouPill "$IPAD_UDID" 5m -only-testing:HerdrUITests/NeedsYouPillTests || failed=1
+    # Agent folders in the sidebar (#552): a closed folder's counts, open in place, kept open.
+    run_suite iPadAgentFolders "$IPAD_UDID" 5m \
+      -only-testing:HerdrUITests/AgentFoldersTests/testClosedFolderShowsWaitingCountAndOpensOnTap || failed=1
     # 20m: the chat-width tests (#523, ~100 s on iPad) took run 40289743354's slow runner to
     # 848 s of tests, past the old 15m once xcodebuild's own start-up was added.
     run_suite iPadChatUX "$IPAD_UDID" 20m -only-testing:HerdrUITests/ChatUXSmokeTests || failed=1
