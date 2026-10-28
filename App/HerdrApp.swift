@@ -1086,8 +1086,9 @@ struct ConnectView: View {
         return hasNickname ? "\(saved.username)@\(saved.host)" : saved.username
     }
 
-    /// One-tap connect from a saved host. If the key is unreadable (deleted / device
-    /// locked), open the editor so it can be re-added rather than a silent dead tap.
+    /// One-tap connect from a saved host. If the secret is not on this device (the host
+    /// list came from another phone, or it was deleted), open the editor in reconnect
+    /// mode, which says so and asks for it, rather than a silent dead tap.
     private func tapSavedHost(_ saved: SavedHost) {
         guard let ep = HostEndpoint.parse(saved.host) else {
             editorTarget = .edit(saved)
@@ -1096,10 +1097,10 @@ struct ConnectView: View {
         let creds: SSHCredentials
         switch saved.auth {
         case .key:
-            // A missing secret opens the editor rather than a silent dead tap.
+            // A missing secret asks for it rather than a silent dead tap.
             guard let key = savedHosts.key(for: saved)?.trimmingCharacters(in: .whitespacesAndNewlines),
                   !key.isEmpty else {
-                editorTarget = .edit(saved)
+                editorTarget = .missingSecret(saved)
                 return
             }
             creds = SSHCredentials(host: ep.host, port: ep.port, username: saved.username,
@@ -1107,7 +1108,7 @@ struct ConnectView: View {
         case .password:
             // Not trimmed — a password's leading/trailing spaces can be significant.
             guard let password = savedHosts.password(for: saved), !password.isEmpty else {
-                editorTarget = .edit(saved)
+                editorTarget = .missingSecret(saved)
                 return
             }
             creds = SSHCredentials(host: ep.host, port: ep.port, username: saved.username,
