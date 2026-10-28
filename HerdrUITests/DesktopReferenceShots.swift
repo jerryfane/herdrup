@@ -151,6 +151,9 @@ final class DesktopReferenceShots: XCTestCase {
         let toggle = app.buttons[label]
         XCTAssertTrue(toggle.waitForExistence(timeout: 10), "\(label) should be listed")
         toggle.tap()
+        // One more tap if the first never reached the row (seen once on the 11-inch, run
+        // 40685403456): the row reports its state, so a second tap cannot close it again.
+        if !rows[0].waitForExistence(timeout: 3), toggle.value as? String == "collapsed" { toggle.tap() }
         for row in rows {
             XCTAssertTrue(row.waitForExistence(timeout: 10), "opening \(label) should show its agents")
         }
@@ -183,11 +186,21 @@ final class DesktopReferenceShots: XCTestCase {
             XCTFail("\(name): the screen never held still for a second")
             return
         }
-        let pixels = settled.image.cgImage.map { ($0.width, $0.height) } ?? (0, 0)
+        // The screenshot's bitmap is the panel's native portrait; its image carries the
+        // rotation. Drawn upright at the same scale (a quarter turn, no resampling), in sRGB.
+        let image = settled.image
+        let format = UIGraphicsImageRendererFormat()
+        format.scale = image.scale
+        format.opaque = true
+        format.preferredRange = .standard
+        let upright = UIGraphicsImageRenderer(size: image.size, format: format).pngData { _ in
+            image.draw(at: .zero)
+        }
+        let pixels = (Int(image.size.width * image.scale), Int(image.size.height * image.scale))
         XCTAssertTrue(pixels.0 > pixels.1, "\(name) should be landscape, not \(pixels.0)x\(pixels.1)")
 
         let shot = XCTAttachment(uniformTypeIdentifier: "public.png", name: "\(name).png",
-                                 payload: settled.pngRepresentation, userInfo: nil)
+                                 payload: upright, userInfo: nil)
         shot.lifetime = .keepAlways
         add(shot)
 
