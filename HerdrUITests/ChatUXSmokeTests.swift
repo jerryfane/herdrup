@@ -38,7 +38,7 @@ final class ChatUXSmokeTests: XCTestCase {
     }
 
     private func dismissTextSizeMenu(_ app: XCUIApplication) {
-        if app.buttons["terminal-font-increase"].exists {
+        if app.menuEntry("terminal-font-increase", label: "Increase").exists {
             app.descendants(matching: .any)["chat-view"].firstMatch.coordinate(withNormalizedOffset: CGVector(dx: 0.02, dy: 0.4)).tap()
         }
     }
@@ -82,7 +82,7 @@ final class ChatUXSmokeTests: XCTestCase {
         let initialHeight = model.frame.height
         for _ in 0..<4 {
             app.buttons["terminal-actions"].tap()
-            app.buttons["terminal-font-increase"].tap()
+            app.menuEntry("terminal-font-increase", label: "Increase").tap()
             dismissTextSizeMenu(app)
         }
         XCTAssertGreaterThan(model.frame.height, initialHeight)
@@ -830,7 +830,7 @@ final class ChatUXSmokeTests: XCTestCase {
         let codeHeight = code.frame.height
         for _ in 0..<4 {
             app.buttons["terminal-actions"].tap()
-            app.buttons["terminal-font-increase"].tap()
+            app.menuEntry("terminal-font-increase", label: "Increase").tap()
             dismissTextSizeMenu(app)
         }
         let deadline = Date().addingTimeInterval(5)
