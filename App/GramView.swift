@@ -621,6 +621,7 @@ struct GramView: View {
         }
         .padding(.horizontal, 16)
         .padding(.top, 8)
+        .topEdgeClearance(base: 8, rowHeight: 44)
         .padding(.bottom, 6)
         .frame(maxWidth: .infinity)
         .duoProbe("gramHeader")
@@ -711,6 +712,8 @@ struct GramView: View {
         }
         .padding(.horizontal, 16)
         .padding(.top, 4)
+        // Off the glass on iPhone Duo's cover, whose status bar is on the side (top inset 0).
+        .topEdgeClearance(base: 4, rowHeight: 44)
         .padding(.bottom, 8)
         .duoProbe("gramHeader")
     }
@@ -3384,6 +3387,15 @@ private struct GramFloatingHeader<Bar: View>: ViewModifier {
                     }
                     .background {
                         GramGroundFade()
+                            .allowsHitTesting(false)
+                            .accessibilityHidden(true)
+                    }
+                    // Above the header, the status bar's band is solid ground, not the top of
+                    // the fade: stretched over iPhone Duo's 82 pt band (inner display held
+                    // tall) the fade left the messages scrolled up there showing through,
+                    // under the clock. A zero-height view grows up into the top inset only.
+                    .background(alignment: .top) {
+                        Palette.ground.frame(height: 0)
                             .ignoresSafeArea(edges: .top)
                             .allowsHitTesting(false)
                             .accessibilityHidden(true)
