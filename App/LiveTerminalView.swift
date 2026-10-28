@@ -1562,7 +1562,9 @@ struct LiveTerminalView: UIViewRepresentable {
             let reference = Self.maxFontSize
             let advance = ("W" as NSString)
                 .size(withAttributes: [.font: Self.makePaneFont(size: reference)]).width
-            let scale = UIScreen.main.scale
+            // SwiftTerm's own scale (the view's display, not UIScreen.main: iPhone Duo has
+            // two displays), so the fit snaps exactly as the cells are drawn.
+            let scale = view.backingScaleFactor()
             let cell = floor(width / CGFloat(cols) * scale) / scale
             guard advance > 0, cell > 0 else { return }
             // A hair under the pixel boundary, so float error cannot ceil to the next pixel.
@@ -1715,8 +1717,11 @@ struct LiveTerminalView: UIViewRepresentable {
                         var covered: CGFloat?
                         if note.name == UIResponder.keyboardWillHideNotification {
                             covered = 0
-                        } else if let end = note.userInfo?[UIResponder.keyboardFrameEndUserInfoKey] as? CGRect {
-                            let screen = self?.view?.window?.bounds ?? UIScreen.main.bounds
+                        } else if let end = note.userInfo?[UIResponder.keyboardFrameEndUserInfoKey] as? CGRect,
+                                  // The keyboard's screen (the notification's object since
+                                  // iOS 16.1), never UIScreen.main: iPhone Duo has two displays.
+                                  let screen = self?.view?.window?.bounds
+                                    ?? (note.object as? UIScreen)?.bounds {
                             covered = end.intersection(screen).height
                         }
                         self?.beginKeyboardSweep(duration: duration, coveredHeight: covered)

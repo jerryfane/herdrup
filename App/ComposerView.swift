@@ -778,6 +778,9 @@ struct TransferRing: View {
 final class ComposerKeyboard: ObservableObject {
     @Published private(set) var isVisible = false
     private var keyboardFrame = CGRect.zero
+    /// The screen the keyboard is on (the notification's object). Not UIScreen.main:
+    /// iPhone Duo has two displays, and the keyboard is on whichever is in use.
+    private var keyboardScreen = CGRect.zero
     private var observations: Set<AnyCancellable> = []
 
     init() {
@@ -787,6 +790,7 @@ final class ComposerKeyboard: ObservableObject {
             .sink { [weak self] note in
                 guard let self else { return }
                 keyboardFrame = (note.userInfo?[UIResponder.keyboardFrameEndUserInfoKey] as? CGRect) ?? .zero
+                keyboardScreen = (note.object as? UIScreen)?.bounds ?? .zero
                 updateVisibility()
             }.store(in: &observations)
         center.publisher(for: UIResponder.keyboardWillHideNotification)
@@ -802,7 +806,7 @@ final class ComposerKeyboard: ObservableObject {
     static let softwareKeyboardMinimumHeight: CGFloat = 150
 
     private func updateVisibility() {
-        let covered = keyboardFrame.intersection(UIScreen.main.bounds).height
+        let covered = keyboardFrame.intersection(keyboardScreen).height
         isVisible = !ProcessInfo.processInfo.isiOSAppOnMac && covered >= Self.softwareKeyboardMinimumHeight
     }
 }
