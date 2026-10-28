@@ -5,7 +5,7 @@ import HerdrKit
 // Agent folders and stars in the Agents list (herdrup#552, proposal B): the folder row, its
 // picture, and the swipe-right actions on an agent row.
 
-/// A folder as one row: its agents' initials, the name and agent count, the line that says who
+/// A folder as one row: its agents' avatars, the name and agent count, the line that says who
 /// needs you, and the amber (waiting) and red (stopped) counts. Drawn to the agent card's
 /// metrics so the two sit together in the list and the iPad/Mac sidebar.
 struct AgentFolderRow: View {
@@ -17,7 +17,7 @@ struct AgentFolderRow: View {
     var body: some View {
         HStack(alignment: .center, spacing: 0) {
             Color.clear.frame(width: 20, height: 1)
-            AgentFolderPicture(names: summary.members.prefix(4).map(\.title), diameter: sidebar ? 44 : 52)
+            AgentFolderPicture(members: Array(summary.members.prefix(4)), diameter: sidebar ? 44 : 52)
                 .padding(.trailing, 12)
             VStack(alignment: .leading, spacing: 2) {
                 HStack(spacing: 6) {
@@ -71,20 +71,23 @@ struct AgentFolderRow: View {
     }
 }
 
-/// The folder picture: up to four of its agents' initials in a round tile, two to a line.
+/// The folder picture: up to four of its agents' own avatars (photo, mascot or initial tile,
+/// as their rows draw them) in a round tile, two to a line. Each cell is found by its agent:
+/// `folder-avatar-<name>`, its value the kind drawn (`mascot:<id>`, `image`, `initial`).
 /// Plain stacks: no lazy container inside a row of the lazy roster.
 struct AgentFolderPicture: View {
-    let names: [String]
+    let members: [AgentRow]
     let diameter: CGFloat
 
     var body: some View {
         let cell = (diameter - 17) / 2
-        let lines = stride(from: 0, to: names.count, by: 2).map { Array(names[$0..<min($0 + 2, names.count)]) }
+        let lines = stride(from: 0, to: members.count, by: 2).map { Array(members[$0..<min($0 + 2, members.count)]) }
         VStack(spacing: 3) {
             ForEach(lines.indices, id: \.self) { line in
                 HStack(spacing: 3) {
-                    ForEach(lines[line].indices, id: \.self) { index in
-                        initial(lines[line][index], cell: cell)
+                    ForEach(lines[line]) { row in
+                        AgentAvatarView(agent: row.info, name: row.title, size: cell,
+                                        accessibilityID: "folder-avatar-\(row.title)")
                     }
                 }
             }
@@ -92,15 +95,6 @@ struct AgentFolderPicture: View {
         .frame(width: diameter, height: diameter)
         .background(Circle().fill(Palette.surfaceRaised))
         .overlay(Circle().stroke(Palette.hairline, lineWidth: 1))
-        .accessibilityHidden(true)
-    }
-
-    private func initial(_ name: String, cell: CGFloat) -> some View {
-        Text(AgentIdentity.glyph(forName: name))
-            .font(.system(size: cell * 0.5, weight: .bold))
-            .foregroundStyle(.white)
-            .frame(width: cell, height: cell)
-            .background(Circle().fill(AgentIdentity.gradient(forName: name)))
     }
 }
 

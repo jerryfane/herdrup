@@ -58,13 +58,13 @@ final class AgentGroupsTests: XCTestCase {
         let list = try list(roster, stopped: ["enyo-efm"])
         let doc = AgentGroupsDocument(folders: [enyo])
         let layout = AgentFolderLayout(sections: list.sections, groups: doc, openFolders: [])
-        XCTAssertEqual(names(layout.sections[0]), ["jarvis", "vetrina", "[Enyo]"],
-                       "the folder follows the loose waiting rows; its agents leave their sections")
+        XCTAssertEqual(names(layout.sections[0]), ["[Enyo]", "jarvis", "vetrina"],
+                       "the folder comes before the loose waiting rows; its agents leave their sections")
         XCTAssertFalse(layout.sections.flatMap(names).contains { $0.contains("enyo-") },
                        "a closed folder shows no agents")
         XCTAssertEqual(layout.sections[0].agentCount, 6)
-        guard case .folder(let summary) = try XCTUnwrap(layout.sections[0].items.last) else {
-            return XCTFail("expected the folder row last")
+        guard case .folder(let summary) = try XCTUnwrap(layout.sections[0].items.first) else {
+            return XCTFail("expected the folder row first")
         }
         XCTAssertEqual(summary.waitingCount, 1, "a closed folder still shows who waits")
         XCTAssertEqual(summary.stoppedCount, 1)
@@ -79,7 +79,7 @@ final class AgentGroupsTests: XCTestCase {
         let doc = AgentGroupsDocument(folders: [enyo], stars: ["enyo-scout"])
         let layout = AgentFolderLayout(sections: list.sections, groups: doc, openFolders: ["f-enyo"])
         XCTAssertEqual(names(layout.sections[0]),
-                       ["jarvis", "vetrina", "[Enyo]", "  enyo-review", "  enyo", "  enyo-scout*", "  enyo-efm"])
+                       ["[Enyo]", "  enyo-review", "  enyo", "  enyo-scout*", "  enyo-efm", "jarvis", "vetrina"])
     }
 
     func testFolderOfIdleAgentsSitsInIdleAndFoldersFollowTheirOrder() throws {
@@ -92,7 +92,23 @@ final class AgentGroupsTests: XCTestCase {
         XCTAssertEqual(layout.sections.map(\.group), [.needsYou, .working, .idle])
         XCTAssertEqual(names(layout.sections[1]), ["[Herdr]", "[Docks]"],
                        "a state section of only folders, in folder order")
-        XCTAssertEqual(names(layout.sections[2]), ["enyo-efm", "enyo-scout", "[Quiet]"])
+        XCTAssertEqual(names(layout.sections[2]), ["[Quiet]", "enyo-efm", "enyo-scout"],
+                       "a folder sits above the idle agents, not at the bottom of the section")
+    }
+
+    /// Owner report 2026-10-28: a folder of idle agents sank below every idle agent.
+    func testFolderSortsAfterStarredAgentsAndBeforeTheRestOfItsSection() throws {
+        let list = try list(roster)
+        let review = AgentFolder(id: "f-review", name: "Review", order: 0, members: ["enyo-review"])
+        let quiet = AgentFolder(id: "f-quiet", name: "Quiet", order: 1, members: ["trend-scout"])
+        let doc = AgentGroupsDocument(folders: [quiet, review], stars: ["vetrina", "enyo-scout"])
+        let layout = AgentFolderLayout(sections: list.sections, groups: doc, openFolders: ["f-quiet"])
+        XCTAssertEqual(layout.sections.map(\.group), [.needsYou, .working, .idle])
+        XCTAssertEqual(names(layout.sections[0]), ["vetrina*", "[Review]", "jarvis"],
+                       "starred agents, then the folder, then the other agents")
+        XCTAssertEqual(names(layout.sections[2]), ["enyo-scout*", "[Quiet]", "  trend-scout", "enyo-efm"],
+                       "an open folder's agents follow it, before the unstarred agents")
+        XCTAssertEqual(layout.sections.map(\.agentCount), [3, 3, 3])
     }
 
     func testFolderWithNoAgentHereIsKeptAsEmpty() throws {

@@ -159,14 +159,20 @@ struct AgentAvatarView: View {
     private let name: String
     let size: CGFloat
     private let glyphSize: CGFloat?
+    /// Replaces the `agent-avatar-<kind>` identifier; the kind drawn is then the value
+    /// (`mascot:<id>`, `image`, `initial`, `unknown`, `loading`). A folder picture's cells use it,
+    /// so each cell is found by its agent.
+    private let accessibilityID: String?
     @Environment(AgentAvatarDirectory.self) private var directory: AgentAvatarDirectory?
 
     /// A known agent (or nil: the default). `name` drives only the initial tile.
-    init(agent: AgentInfo?, name: String, size: CGFloat, glyphSize: CGFloat? = nil) {
+    init(agent: AgentInfo?, name: String, size: CGFloat, glyphSize: CGFloat? = nil,
+         accessibilityID: String? = nil) {
         source = .agent(agent)
         self.name = name
         self.size = size
         self.glyphSize = glyphSize
+        self.accessibilityID = accessibilityID
     }
 
     /// A Gram sender, by its routing name; resolved through the roster.
@@ -176,6 +182,7 @@ struct AgentAvatarView: View {
         self.size = size
         // Gram's initial was a touch larger than a row's before pictures (herdrup#538).
         glyphSize = (size * 0.45).rounded()
+        accessibilityID = nil
     }
 
     private var agent: AgentInfo? {
@@ -190,16 +197,24 @@ struct AgentAvatarView: View {
         let descriptor = agent.flatMap { info in directory.map { $0.descriptor(for: info) } ?? info.avatar }
         let appearance = AgentAvatarAppearance.resolve(descriptor)
         let (face, identifier, label) = render(appearance)
-        return face
+        let drawn = face
             .frame(width: size, height: size)
             .clipShape(Circle())
             .accessibilityElement(children: .ignore)
             .accessibilityLabel(Text(label))
-            .accessibilityIdentifier("agent-avatar-\(identifier)")
-            .task(id: appearance) {
-                guard case .image(let sha256) = appearance, let target = agent?.avatarTarget else { return }
-                await directory?.load(sha256, target: target)
+        return Group {
+            if let accessibilityID {
+                drawn
+                    .accessibilityIdentifier(accessibilityID)
+                    .accessibilityValue(Text(AgentMascot(rawValue: identifier).map { "mascot:\($0.rawValue)" } ?? identifier))
+            } else {
+                drawn.accessibilityIdentifier("agent-avatar-\(identifier)")
             }
+        }
+        .task(id: appearance) {
+            guard case .image(let sha256) = appearance, let target = agent?.avatarTarget else { return }
+            await directory?.load(sha256, target: target)
+        }
     }
 
     private func render(_ appearance: AgentAvatarAppearance) -> (AnyView, String, String) {

@@ -241,8 +241,8 @@ public struct AgentFolderSummary: Equatable, Sendable {
 /// - A starred agent goes first within its state, so a starred agent that needs you is the
 ///   very first row.
 /// - A folder's agents leave their sections. The folder row sits in the section of its most
-///   urgent agent, after that section's own agents (folders by their order), and when open
-///   its agents follow it, most urgent first.
+///   urgent agent, after that section's starred agents and before its other agents (folders
+///   by their order), and when open its agents follow it, most urgent first.
 /// - A folder with none of its agents in the list is kept in `emptyFolders`, so it can still
 ///   be renamed or deleted.
 public struct AgentFolderLayout: Equatable, Sendable {
@@ -295,10 +295,10 @@ public struct AgentFolderLayout: Equatable, Sendable {
 
         var built: [Section] = []
         for section in sections {
-            var items: [AgentListItem] = starredFirst(section.rows)
-                .filter { folderID($0) == nil }
-                .map { .agent($0, starred: starred($0), folderID: nil) }
-            var count = items.count
+            let loose = section.rows.filter { folderID($0) == nil }
+            var items: [AgentListItem] = loose.filter(starred)
+                .map { .agent($0, starred: true, folderID: nil) }
+            var count = loose.count
             for summary in summaries[section.group] ?? [] {
                 items.append(.folder(summary))
                 count += summary.members.count
@@ -306,6 +306,7 @@ public struct AgentFolderLayout: Equatable, Sendable {
                     items += summary.members.map { .agent($0, starred: starred($0), folderID: summary.folder.id) }
                 }
             }
+            items += loose.filter { !starred($0) }.map { .agent($0, starred: false, folderID: nil) }
             if !items.isEmpty { built.append(Section(group: section.group, items: items, agentCount: count)) }
         }
         // A folder whose most urgent agent's state has no section of its own here cannot
