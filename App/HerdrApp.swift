@@ -2425,6 +2425,12 @@ struct TerminalHomeView: View {
                 if columnVisibility == .detailOnly { sidebarRail }
                 detailColumn
             }
+            // A floor under the detail column, so a window just wider than two columns
+            // (iPhone Duo's inner display held tall, 669 pt) shows them side by side. Without
+            // it UIKit's own default minimum for the secondary column did not fit beside the
+            // 320 pt sidebar, and the split laid the sidebar OVER the detail: the detail kept
+            // the full width from x = 0 and its centred content ran under the sidebar.
+            .background { SplitDetailMinimumWidth(width: DesignTokens.Size.sidebarMin) }
             .duoProbe("detail")
             // NO SIZE CONTRACT IS ADDED HERE, AND THE ONE I TRIED IS WITHDRAWN.
             //
@@ -11004,3 +11010,39 @@ final class CCScrollDriver: @unchecked Sendable {
     }
 }
 #endif
+
+/// Sets the hosting split view's minimum width for its secondary (detail) column.
+/// SwiftUI's `navigationSplitViewColumnWidth` governs the sidebar here; the detail column's
+/// floor is otherwise UIKit's automatic default, which on a 669 pt window did not fit beside
+/// a 320 pt sidebar and turned the split into an overlay. Placed in the detail column, it
+/// reaches the `UISplitViewController` that SwiftUI's `NavigationSplitView` is built on.
+private struct SplitDetailMinimumWidth: UIViewControllerRepresentable {
+    let width: CGFloat
+
+    final class Controller: UIViewController {
+        var width: CGFloat = 0
+
+        override func viewWillLayoutSubviews() {
+            super.viewWillLayoutSubviews()
+            apply()
+        }
+
+        func apply() {
+            guard #available(iOS 26.0, *), let split = splitViewController,
+                  split.minimumSecondaryColumnWidth != width else { return }
+            split.minimumSecondaryColumnWidth = width
+        }
+    }
+
+    func makeUIViewController(context: Context) -> Controller {
+        let controller = Controller()
+        controller.width = width
+        controller.view.isUserInteractionEnabled = false
+        return controller
+    }
+
+    func updateUIViewController(_ controller: Controller, context: Context) {
+        controller.width = width
+        controller.apply()
+    }
+}
