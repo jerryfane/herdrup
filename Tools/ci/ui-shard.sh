@@ -321,7 +321,11 @@ case "$shard" in
       -skip-testing:HerdrUITests/ChatViewTests -skip-testing:HerdrUITests/ChatUXSmokeTests -skip-testing:HerdrUITests/PagingTests
       -skip-testing:HerdrUITests/AgentFoldersTests -skip-testing:HerdrUITests/NeedsYouPillTests)
     for class in "${TERMINAL_CLASSES[@]}"; do skip+=("-skip-testing:HerdrUITests/$class"); done
-    run_suite iPhoneApp "$IPHONE_UDID" 30m -only-testing:HerdrUITests "${skip[@]}" || failed=1
+    # 40m: on the Xcode 27 image every class ran slower. Run 40728450580 logged "iPhoneApp
+    # exceeded its 30m budget" on its 79th case; its 69 cases that passed there and on
+    # Xcode 26 took 1738 s against 1351 s in run 40686976698 (x1.29), whose whole round
+    # took 25 min, so a green round now needs ~33 min.
+    run_suite iPhoneApp "$IPHONE_UDID" 40m -only-testing:HerdrUITests "${skip[@]}" || failed=1
     swiftterm_api iPhone "$IPHONE_UDID" || failed=1
     ;;
   ipad)
