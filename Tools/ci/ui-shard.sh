@@ -235,6 +235,7 @@ desktop_reference_round() {
   run_suite "$label" "$udid" 15m -only-testing:HerdrUITests/DesktopReferenceShots || status=1
   check_classes_ran "TestReceipts/$label-first.xcresult" DesktopReferenceShots || status=1
   xcrun simctl status_bar "$udid" clear || true
+  xcrun simctl ui "$udid" appearance light || true
   return "$status"
 }
 

@@ -27,6 +27,14 @@ final class DesktopReferenceShots: XCTestCase {
         continueAfterFailure = false
     }
 
+    /// Hands the device back in portrait, as GramColumnTests does: AgentListChromeTests runs
+    /// next on the same iPad and measures its window chrome in portrait (run 40702149432).
+    override func tearDown() {
+        XCUIApplication().terminate()
+        XCUIDevice.shared.orientation = .portrait
+        super.tearDown()
+    }
+
     func testLoading() throws {
         let (app, device) = try launch("loading")
         XCTAssertTrue(app.activityIndicators.firstMatch.waitForExistence(timeout: 20),
