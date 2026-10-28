@@ -139,6 +139,15 @@ public actor HerdrClient {
         try await call("ping", EmptyParams(), as: PingResult.self).capabilities
     }
 
+    /// The server's version string and capabilities from one `ping`, uncached: an update
+    /// replaces the server under the same client. The answer also replaces the cached
+    /// capabilities, so the openers see what the server that answered supports.
+    public func serverVersionAndCapabilities() async throws -> (version: String, capabilities: ServerCapabilities?) {
+        let pong = try await call("ping", EmptyParams(), as: PingResult.self)
+        capabilityCache = .probed(pong.capabilities)
+        return (pong.version, pong.capabilities)
+    }
+
     /// Whether the daemon advertises `flag`, from the per-client `capabilityCache`.
     /// False when the probe fails, which leaves the cache `unknown` for the next call.
     ///
@@ -220,6 +229,41 @@ public actor HerdrClient {
     /// `apply_staged_update_disk_stale` (new build running, but the on-disk path was not updated).
     public func applyStagedUpdate() async throws {
         _ = try await call("server.apply_staged_update", EmptyParams(), as: OkAck.self)
+    }
+
+    /// The running build, the newest signed preview, and how the server can take it
+    /// (`server.update_check`). THROWS `APIError`: `update_manifest_unreachable`,
+    /// `update_signature_invalid` (also "not ready yet": no signature published),
+    /// `update_manifest_invalid`, and `guest_forbidden` for anyone but the owner.
+    public func updateCheck() async throws -> ServerUpdateCheck {
+        try await call("server.update_check", EmptyParams(), as: ServerUpdateCheck.self)
+    }
+
+    struct UpdateApplyParams: Encodable {
+        let buildID: String
+        let restartLater: Bool
+        enum CodingKeys: String, CodingKey {
+            case buildID = "build_id"
+            case restartLater = "restart_later"
+        }
+    }
+
+    /// Starts updating to `buildID`, the build the user confirmed (`server.update_apply`). The
+    /// server answers once preflight passes, BEFORE the download and the handoff; the handoff then
+    /// drops this connection, so progress and the outcome come from `updateStatus()`.
+    /// `restartLater` downloads and installs on disk without touching the running server.
+    /// THROWS `APIError`: `update_build_mismatch`, `update_in_progress`, `update_not_available`,
+    /// `update_restart_required`, `update_unsupported_install`, `update_preflight_failed`.
+    @discardableResult
+    public func updateApply(buildID: String, restartLater: Bool) async throws -> String {
+        try await call("server.update_apply",
+                       UpdateApplyParams(buildID: buildID, restartLater: restartLater),
+                       as: ServerUpdateApplyResult.self).attemptID
+    }
+
+    /// The last update attempt on this machine (`server.update_status`); nil if none ever ran.
+    public func updateStatus() async throws -> ServerUpdateAttempt? {
+        try await call("server.update_status", EmptyParams(), as: ServerUpdateStatus.self).attempt
     }
 
     struct FsListDirParams: Encodable {

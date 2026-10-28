@@ -340,6 +340,10 @@ struct RootView: View {
             let _ = AgentFoldersMockTransport.prepared
             TerminalHomeView(client: HerdrClient(transport: AgentFoldersMockTransport()), onDisconnect: {},
                              onTrustHostKey: { _ in false }, livePaneIDs: AgentFoldersMockTransport.livePaneIDs)
+        case .serverUpdate:
+            TerminalHomeView(client: HerdrClient(transport: ServerUpdateMockTransport()), onDisconnect: {},
+                             host: ServerUpdateMock.host, onTrustHostKey: { _ in false },
+                             livePaneIDs: MockWireFixtures.demoLivePaneIDs)
         case .sessions:
             SessionsMockHome()
         case .liveEvents, .liveEventsLegacy:
@@ -1843,6 +1847,8 @@ struct TerminalHomeView: View {
     /// Agent folders and stars (herdrup#552). Empty on a server without `agent_groups`, and
     /// then the list shows no folder rows, no stars and no folder actions.
     @State private var groups = AgentGroupsStore()
+    /// The herdr update for this machine (herdrup#565); see `attachServerUpdate`.
+    @State private var serverUpdate: ServerUpdateModel?
     /// The folder-name prompt (a new folder, or a rename) and its text.
     @State private var folderNaming: FolderNaming?
     @State private var folderNameText = ""
@@ -2526,7 +2532,8 @@ struct TerminalHomeView: View {
                         connected: error == nil && !loading,
                         canReconnect: rejectedFingerprint == nil,
                         onReconnect: onReconnect,
-                        detail: settingsAnchor ?? .machines)
+                        detail: settingsAnchor ?? .machines,
+                        serverUpdate: serverUpdate)
                 }
                 // Keep-mounted terminal container, hoisted ABOVE the `switch` so switching to
                 // Settings/Gram never removes it from the view tree. Previously it lived inside
@@ -2788,7 +2795,7 @@ struct TerminalHomeView: View {
         GramUnreadContent(unread: gramUnread) { count in
             HStack(spacing: 0) {
                 ForEach(HomeTab.allCases, id: \.self) { tab in
-                    sidebarTabItem(tab, badge: tab == .gram ? count : 0)
+                    sidebarTabItem(tab, badge: tabBadgeCount(for: tab, gram: count))
                 }
             }
         }
@@ -2845,7 +2852,7 @@ struct TerminalHomeView: View {
         .buttonStyle(.plain)
         .hoverEffect(.highlight)
         .accessibilityLabel(tab.label)
-        .accessibilityValue(badge > 0 ? "\(badge) unread" : "")
+        .accessibilityValue(badgeValue(tab, badge))
         .accessibilityAddTraits(selected ? .isSelected : [])
     }
 
@@ -2957,7 +2964,7 @@ struct TerminalHomeView: View {
                 .padding(.bottom, 2)
             GramUnreadContent(unread: gramUnread) { count in
                 ForEach(HomeTab.allCases, id: \.self) { tab in
-                    railSectionButton(tab, badge: tab == .gram ? count : 0)
+                    railSectionButton(tab, badge: tabBadgeCount(for: tab, gram: count))
                 }
             }
             // Gated on the same condition as the counts below it: a separator with
@@ -3013,7 +3020,21 @@ struct TerminalHomeView: View {
         .buttonStyle(.plain)
         .hoverEffect(.highlight)
         .accessibilityLabel(tab.label)
-        .accessibilityValue(badge > 0 ? "\(badge) unread" : "")
+        .accessibilityValue(badgeValue(tab, badge))
+    }
+
+    /// The count a section's tab carries: Gram's unread messages, Settings' herdr update.
+    private func tabBadgeCount(for tab: HomeTab, gram: Int) -> Int {
+        switch tab {
+        case .gram: return gram
+        case .settings: return settingsBadge
+        case .agents: return 0
+        }
+    }
+
+    private func badgeValue(_ tab: HomeTab, _ badge: Int) -> String {
+        guard badge > 0 else { return "" }
+        return tab == .settings ? "\(badge) update" : "\(badge) unread"
     }
 
     /// One activity count. Rendered only when non-zero: a rail of zeroes is noise.
@@ -3088,8 +3109,10 @@ struct TerminalHomeView: View {
                     // would first-contact-trust the next key (same gate as the recovery
                     // screen's withheld retry).
                     canReconnect: rejectedFingerprint == nil,
-                    onReconnect: onReconnect)
+                    onReconnect: onReconnect,
+                    serverUpdate: serverUpdate)
                     .tag(HomeTab.settings)
+                    .badge(settingsBadge)
                     .tabItem { Label(HomeTab.settings.label, systemImage: HomeTab.settings.icon) }
             }
             .tint(Palette.text)
@@ -3327,7 +3350,39 @@ struct TerminalHomeView: View {
             groups.attach(client: client, host: hostKey)
         }
         .environment(avatars)
+        .task { attachServerUpdate() }
+        // An update landed: the new server may support what the old one didn't (folders,
+        // avatars, …). Ask it again instead of keeping the old answer for this home's life.
+        .onChange(of: serverUpdate?.completedUpdates ?? 0) { _, _ in
+            checkedSessionTransferCapability = false
+            Task { await load() }
+        }
     }
+
+    /// The herdr update for this machine (herdrup#565), kept across reconnects by host and
+    /// session, since an update's handoff drops the connection this home was built on. A guest
+    /// never gets here (`GuestHomeView`), and a non-owner is refused by the server.
+    private func attachServerUpdate() {
+        let key = "\(hostKey)#\(session ?? "")"
+        #if DEBUG
+        // Screenshot fixtures are drawn without the card, except the update mock's.
+        if let mock = ScreenshotMock.mode {
+            guard mock == .serverUpdate else { return }
+            if serverUpdate == nil { ServerUpdateModel.reset(host: key) }
+            let model = ServerUpdateModel.forHost(key, displayName: host)
+            model.follower = ServerUpdateMock.follower
+            serverUpdate = model
+            model.attach(client: client)
+            return
+        }
+        #endif
+        let model = ServerUpdateModel.forHost(key, displayName: host)
+        serverUpdate = model
+        model.attach(client: client)
+    }
+
+    /// The Settings tab's "1": a herdr update to look at.
+    private var settingsBadge: Int { serverUpdate?.showsBadge == true ? 1 : 0 }
 
     /// The Agents tab: the app-drawn header plus the agents list (or the first-load
     /// spinner / error). It carries the connect lifecycle — load, fork-probe, the
@@ -7414,6 +7469,9 @@ struct SettingsView: View {
     /// the split's detail column (no NavigationStack — the split view IS the nav). Nil =
     /// iPhone (and the screenshot mock): the whole index → detail flow in a NavigationStack.
     var detail: SettingsSection? = nil
+    /// The connected machine's herdr update (herdrup#565): the card in Machines. Nil for
+    /// guests and in screenshot fixtures drawn without it.
+    var serverUpdate: ServerUpdateModel? = nil
 
     @AppStorage("notify.needsInput") private var notifyNeedsInput = true
     @AppStorage("notify.dies") private var notifyDies = true
@@ -7557,6 +7615,10 @@ struct SettingsView: View {
         // Fetch the daemon version + any staged self-update. `try?` so an older daemon without
         // `server.staged_update` leaves it nil (version line + update callout simply absent).
         .task { stagedUpdate = try? await client.stagedUpdate() }
+        // After a herdr update the Connection line names the new build.
+        .onChange(of: serverUpdate?.completedUpdates ?? 0) { _, _ in
+            Task { stagedUpdate = try? await client.stagedUpdate() }
+        }
         // The Shared access row's summary; `try?`-style degrade lives in the model.
         .task { await loadGuestAccess() }
         // "How to set up accounts" — a step-by-step guide for adding another
@@ -7953,7 +8015,7 @@ struct SettingsView: View {
         NavigationLink(value: SettingsSection.machines) {
             HStack(spacing: 10) {
                 Circle().fill(Palette.waiting).frame(width: 8, height: 8)
-                Text("Daemon update available")
+                Text(glanceUpdateText)
                     .font(Typography.app(14)).foregroundStyle(Palette.textDim).lineLimit(1)
                 Spacer(minLength: 0)
                 Image(systemName: "chevron.right")
@@ -8183,14 +8245,33 @@ struct SettingsView: View {
             }
             .settingsRowShell()
             .padding(.horizontal, 16).padding(.top, 10)   // align with the toggle/action rows
-            daemonUpdateCallout
+            // The herdr update card replaces the staged-build callout on a server that can
+            // update itself; the callout stays for fleet servers that only stage builds.
+            if let serverUpdate, serverUpdate.card != .hidden {
+                ServerUpdateCardView(model: serverUpdate, host: host)
+            } else {
+                daemonUpdateCallout
+            }
         }
     }
 
     /// True when the connected daemon has a newer build staged and ready to activate — a staged
     /// build whose sha differs from what's running (HerdrKit's `updateAvailable`), so a stale/equal
     /// manifest never shows a phantom update.
-    private var daemonUpdateAvailable: Bool { stagedUpdate?.updateAvailable ?? false }
+    private var daemonUpdateAvailable: Bool {
+        (stagedUpdate?.updateAvailable ?? false) || serverUpdate?.card.badgeKey != nil
+    }
+
+    /// The At a glance line for an update: the herdr update card's state, else a staged build.
+    private var glanceUpdateText: String {
+        switch serverUpdate?.card {
+        case .available(_, let new, _, _, _, _)?: return "herdr \(new) is ready to install"
+        case .restartPending(let new, _)?: return "herdr \(new) finishes on next restart"
+        case .failed?: return "herdr update didn't finish"
+        case .tooOld?: return "herdr needs a one-time update"
+        default: return "Daemon update available"
+        }
+    }
 
     /// Shown only when the daemon has a staged self-update: an icon chip + "Update available" + the
     /// staged build's id/date, then an "Update & restart" action (a spinner replaces it while the
@@ -9693,6 +9774,9 @@ enum ScreenshotMock {
     // The Agents home with two agent folders and a star, over a daemon that keeps them in
     // memory (#552); `HERDR_MOCK_GROUPS=off` is a server without folders.
     case folders
+    // The Agents home on "mac-mini", whose herdr updates itself from the app (#565):
+    // `HERDR_MOCK_UPDATE` picks the state (see `ServerUpdateMock`).
+    case serverUpdate
 
     static var mode: ScreenshotMock? {
         let env = ProcessInfo.processInfo.environment["HERDR_SCREENSHOT_MOCK"]?.lowercased()
@@ -9710,6 +9794,7 @@ enum ScreenshotMock {
         case "sessions": return .sessions
         case "needsyou": return .needsYou
         case "folders": return .folders
+        case "serverupdate": return .serverUpdate
         case "liveevents-legacy": return .liveEventsLegacy
         case "pane": return .pane
         case "settings": return .settings
