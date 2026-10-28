@@ -1,4 +1,5 @@
 import XCTest
+import CoreGraphics
 
 /// In-app herdr updates (herdrup#565, proposal B) over the `serverupdate` mock server: the
 /// Settings tab's "1" and the update card in Settings › Machines, in every state, on whichever
@@ -53,8 +54,31 @@ final class ServerUpdateUITests: XCTestCase {
         add(shot)
     }
 
-    private func settingsBadgeValue(_ app: XCUIApplication) -> String {
-        settingsTab(app).value as? String ?? ""
+    /// Whether the Settings tab carries the red "1". Read from pixels: the system tab bar
+    /// draws the badge without exposing it as the button's value.
+    private func settingsTabHasBadge(_ app: XCUIApplication) -> Bool {
+        guard let image = settingsTab(app).screenshot().image.cgImage else { return false }
+        let width = image.width, height = image.height
+        var pixels = [UInt8](repeating: 0, count: width * height * 4)
+        guard let context = CGContext(data: &pixels, width: width, height: height, bitsPerComponent: 8,
+                                      bytesPerRow: width * 4, space: CGColorSpaceCreateDeviceRGB(),
+                                      bitmapInfo: CGImageAlphaInfo.premultipliedLast.rawValue) else { return false }
+        context.draw(image, in: CGRect(x: 0, y: 0, width: width, height: height))
+        var red = 0
+        for index in stride(from: 0, to: pixels.count, by: 4)
+        where pixels[index] > 210 && pixels[index + 1] < 100 && pixels[index + 2] < 100 {
+            red += 1
+        }
+        return red > 40
+    }
+
+    private func waitForBadge(_ app: XCUIApplication, timeout: TimeInterval = 15) -> Bool {
+        let deadline = Date().addingTimeInterval(timeout)
+        repeat {
+            if settingsTabHasBadge(app) { return true }
+            Thread.sleep(forTimeInterval: 0.5)
+        } while Date() < deadline
+        return false
     }
 
     private func confirmUpdate(_ app: XCUIApplication, button: String = "Update") {
@@ -71,10 +95,9 @@ final class ServerUpdateUITests: XCTestCase {
         let app = launch("available")
         let tab = settingsTab(app)
         XCTAssertTrue(tab.waitForExistence(timeout: 15))
-        let badged = XCTNSPredicateExpectation(predicate: NSPredicate(format: "value CONTAINS '1'"), object: tab)
-        XCTAssertEqual(XCTWaiter().wait(for: [badged], timeout: 15), .completed,
-                       "the Settings tab should carry a 1; value \(settingsBadgeValue(app))")
+        let badged = waitForBadge(app)
         record(app, "badge")
+        XCTAssertTrue(badged, "the Settings tab should carry a red 1")
         openMachines(app)
         XCTAssertTrue(waitForTitle(app, "Update herdr on mac-mini"))
         XCTAssertTrue(app.staticTexts["Folders and avatars need herdr 0.9.5. mac-mini has 0.9.3."].exists)
@@ -116,8 +139,10 @@ final class ServerUpdateUITests: XCTestCase {
         XCTAssertTrue(app.staticTexts["Nothing changed. herdr 0.9.3 is still running, and your terminals are fine."].exists)
         XCTAssertTrue(app.staticTexts["The download stopped at 21 of 38 MB."].exists)
         record(app, "failed")
-        app.buttons["server-update-copy-details"].tap()
-        XCTAssertTrue(app.buttons["server-update-copy-details"].staticTexts["Copied"].waitForExistence(timeout: 5))
+        let copy = app.buttons["server-update-copy-details"]
+        copy.tap()
+        let copied = XCTNSPredicateExpectation(predicate: NSPredicate(format: "label == 'Copied'"), object: copy)
+        XCTAssertEqual(XCTWaiter().wait(for: [copied], timeout: 5), .completed, "Copy details: \(copy.label)")
         app.buttons["server-update-retry"].tap()
         XCTAssertTrue(waitForTitle(app, "herdr 0.9.5 is running", timeout: 40), "the retry should succeed")
     }
@@ -160,7 +185,7 @@ final class ServerUpdateUITests: XCTestCase {
         let tab = settingsTab(app)
         XCTAssertTrue(tab.waitForExistence(timeout: 15))
         sleep(3)
-        XCTAssertFalse(settingsBadgeValue(app).contains("1"), "no badge for a non-owner")
+        XCTAssertFalse(settingsTabHasBadge(app), "no badge for a non-owner")
         openMachines(app)
         sleep(3)
         XCTAssertFalse(card(app).exists, "no update card for a non-owner")
