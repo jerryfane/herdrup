@@ -109,7 +109,9 @@ new_sim() {
 
 new_sim || { fail "simulator: could not create/boot a $DEVICE_TYPE on $RUNTIME"; exit 1; }
 
-state() { t 120 duoctl state; }
+# The simulator is slow for a few minutes after its first boot: a 120 s `duoctl state`
+# timed out in run 40740648537. So 300 s, and one more try.
+state() { t 300 duoctl state || t 300 duoctl state; }
 field() { python3 -c 'import json,sys; v=json.load(open(sys.argv[1])).get(sys.argv[2]); print("" if v is None else v)' "$1" "$2"; }
 
 launch() { # <screen>
@@ -143,12 +145,12 @@ pose_spec() {
 # Moves the hinge for a pose, always as a sweep. Returns nonzero with duoctl's error.
 move_hinge() { # <pose>
   case $1 in
-    closed-*) t 120 duoctl close --duration 1 ;;
-    open|open-rotated) t 120 duoctl open --duration 1.5 ;;
-    laptop) t 120 duoctl open --duration 1.5 && t 120 duoctl hinge "$LAPTOP_ANGLE" --duration 1.5 ;;
+    closed-*) t 300 duoctl close --duration 1 ;;
+    open|open-rotated) t 300 duoctl open --duration 1.5 ;;
+    laptop) t 300 duoctl open --duration 1.5 && t 300 duoctl hinge "$LAPTOP_ANGLE" --duration 1.5 ;;
     tent)
       # Up from closed, slowly (60 steps a second), so the cover stays the active screen.
-      t 120 duoctl close --duration 1 && t 120 duoctl hinge "$TENT_ANGLE" --duration 3 ;;
+      t 300 duoctl close --duration 1 && t 300 duoctl hinge "$TENT_ANGLE" --duration 3 ;;
   esac
 }
 
@@ -186,7 +188,7 @@ set_pose() { # <pose>
     echo "$why" > "$dir/pose.err"
     return 1
   fi
-  if ! err=$(t 120 duoctl rotate "$ui" 2>&1); then
+  if ! err=$(t 300 duoctl rotate "$ui" 2>&1); then
     # duoctl tried every device orientation; put the device back in the physical one.
     helper orientation "$device" || true
     sleep 1
@@ -228,7 +230,7 @@ for pose in $POSES; do
   for screen in $SCREENS; do
     log "--- $pose / $screen"
     if ! launch "$screen"; then fail "$pose/$screen: launch failed"; continue; fi
-    if ! state > "$dir/$screen.state.json"; then fail "$pose/$screen: duoctl state failed"; continue; fi
+    if ! state > "$dir/$screen.state.json"; then fail "$pose/$screen: duoctl state failed twice (300 s each)"; continue; fi
     now=$(field "$dir/$screen.state.json" activeScreen)
     [ "$now" = "$pose_screen" ] || fail "$pose/$screen: active screen changed to $now after relaunch"
     # The first capture after boot can take minutes (run 40731654683 lost one at 120 s),
