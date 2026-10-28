@@ -24,8 +24,9 @@
 #
 # A pose whose hinge/screen does not verify is retried once on a recreated simulator, then
 # recorded in FAILURES.txt and skipped. A pose whose interface refuses to rotate (the app
-# may not support that orientation) is captured anyway, with the device orientation set
-# directly, and recorded in FAILURES.txt: those images are what the owner sees.
+# is portrait-only on iPhone, so the cover screen stays portrait) is captured anyway, with
+# the device orientation set directly, and noted in POSES.md rather than FAILURES.txt:
+# that is the app's behaviour in the pose, and those images are what the owner sees.
 
 set -uo pipefail
 
@@ -222,7 +223,6 @@ for pose in $POSES; do
     continue
   fi
   [ "$pose" = tent ] && echo "tent angle used: $TENT_ANGLE" >> "$dir/pose.notes"
-  [ -f "$dir/pose.notes" ] && grep '^rotate ' "$dir/pose.notes" | sed "s/^/$pose: interface did not rotate: /" >> "$OUT/FAILURES.txt"
   pose_screen=$(field "$dir/pose.state.json" activeScreen)
 
   for screen in $SCREENS; do
@@ -231,8 +231,11 @@ for pose in $POSES; do
     if ! state > "$dir/$screen.state.json"; then fail "$pose/$screen: duoctl state failed"; continue; fi
     now=$(field "$dir/$screen.state.json" activeScreen)
     [ "$now" = "$pose_screen" ] || fail "$pose/$screen: active screen changed to $now after relaunch"
-    if ! err=$(t 120 duoctl screenshot "$dir/$screen.png" 2>&1); then
-      fail "$pose/$screen: screenshot: $err"; continue
+    # The first capture after boot can take minutes (run 40731654683 lost one at 120 s),
+    # so a timed-out capture gets one more, longer try.
+    if ! err=$(t 300 duoctl screenshot "$dir/$screen.png" 2>&1) &&
+       ! err=$(t 300 duoctl screenshot "$dir/$screen.png" 2>&1); then
+      fail "$pose/$screen: screenshot: ${err:-timed out after 300 s}"; continue
     fi
     log "saved $dir/$screen.png ($(stat -f %z "$dir/$screen.png") bytes)"
   done
