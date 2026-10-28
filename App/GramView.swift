@@ -3393,12 +3393,17 @@ private struct GramFloatingHeader<Bar: View>: ViewModifier {
                     // Above the header, the status bar's band is solid ground, not the top of
                     // the fade: stretched over iPhone Duo's 82 pt band (inner display held
                     // tall) the fade left the messages scrolled up there showing through,
-                    // under the clock. A zero-height view grows up into the top inset only.
+                    // under the clock. Sized from the header's own distance to the window
+                    // top, which is exactly the band (0 where the status bar is on the side).
                     .background(alignment: .top) {
-                        Palette.ground.frame(height: 0)
-                            .ignoresSafeArea(edges: .top)
-                            .allowsHitTesting(false)
-                            .accessibilityHidden(true)
+                        GeometryReader { geometry in
+                            let band = max(0, geometry.frame(in: .global).minY)
+                            Palette.ground
+                                .frame(width: geometry.size.width, height: band)
+                                .offset(y: -band)
+                        }
+                        .allowsHitTesting(false)
+                        .accessibilityHidden(true)
                     }
                     // The controls sit on top of the page, so VoiceOver meets them before
                     // the feed, as when the header was the first row: without this the
