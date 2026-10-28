@@ -106,7 +106,8 @@ struct SectionTopBar<Leading: View, Actions: View>: View {
                 let windowed = controls != nil
                 // Mac keeps its window controls in their own row above the bar.
                 let sharesRow = windowed && !ProcessInfo.processInfo.isiOSAppOnMac
-                let rowHeight = sharesRow ? max(20, (controls?.pillHeight ?? 44).rounded()) : 44
+                let row = DesignTokens.Size.topBarRow
+                let rowHeight = sharesRow ? max(20, (controls?.pillHeight ?? row).rounded()) : row
                 content(leading: corners.topLeading.width, trailing: corners.topTrailing.width,
                         windowed: windowed, rowHeight: rowHeight)
                     .frame(height: rowHeight)
@@ -118,12 +119,12 @@ struct SectionTopBar<Leading: View, Actions: View>: View {
                                          rowHeight: rowHeight)
                         : (windowed ? 0 : 6))
             } else {
-                content(leading: 0, trailing: 0, windowed: false, rowHeight: 44)
-                    .frame(height: 44).offset(y: 6)
+                content(leading: 0, trailing: 0, windowed: false, rowHeight: DesignTokens.Size.topBarRow)
+                    .frame(height: DesignTokens.Size.topBarRow).offset(y: 6)
             }
         }
-        .frame(height: 50)
-        .padding(.horizontal, 16)
+        .frame(height: DesignTokens.Size.topBar)
+        .padding(.horizontal, DesignTokens.Space.screenInset)
         .padding(.bottom, 8)
     }
 
@@ -141,9 +142,9 @@ struct SectionTopBar<Leading: View, Actions: View>: View {
             HStack(spacing: 0, content: self.leading)
                 .padding(.horizontal, 2)
                 .background(Capsule().fill(Palette.surfaceRaised))
-            HStack(spacing: 6) {
+            HStack(spacing: DesignTokens.Space.stackSmall) {
                 Text(title)
-                    .font(Typography.app(17, .semibold))
+                    .font(Typography.app(DesignTokens.Text.BarTitle.size, DesignTokens.Text.BarTitle.weight))
                     .foregroundStyle(Palette.text)
                     .lineLimit(1).minimumScaleFactor(0.7)
                     .accessibilityAddTraits(.isHeader)

@@ -290,9 +290,9 @@ struct AgentAvatar: View {
     let badge: AgentAvatarBadge
     /// What VoiceOver reads for the badge: the status is colour + shape, so it is named.
     let badgeLabel: String
-    var diameter: CGFloat = 52
+    var diameter: CGFloat = DesignTokens.Size.avatarPhone
     /// The fallback circle's initial size (an unknown mascot id or a missing asset).
-    var glyphSize: CGFloat = 22
+    var glyphSize: CGFloat = DesignTokens.Size.avatarGlyphPhone
     /// The agent whose picture this is; nil draws the default.
     var info: AgentInfo? = nil
     /// The photo sheet's crop preview, shown instead of the agent's current picture.
@@ -304,13 +304,13 @@ struct AgentAvatar: View {
                 Image(uiImage: preview).resizable().interpolation(.high)
                     .frame(width: diameter, height: diameter)
                     .clipShape(Circle())
-                    .overlay(Circle().stroke(Palette.hairline, lineWidth: 1))
+                    .overlay(Circle().stroke(Palette.hairline, lineWidth: DesignTokens.Size.hairline))
             } else {
                 AgentAvatarView(agent: info, name: name, size: diameter, glyphSize: glyphSize)
             }
             badgeView
                 .accessibilityLabel(Text(badgeLabel))
-                .offset(x: 4, y: 4)
+                .offset(x: DesignTokens.Size.statusBadgeOffset, y: DesignTokens.Size.statusBadgeOffset)
         }
     }
 
@@ -323,21 +323,21 @@ struct AgentAvatar: View {
         case .offline: glyph("wifi.slash", Palette.surfaceRaised, square: true, ink: Palette.textDim)
         case .working:
             TurningRing(color: Palette.working, diameter: 12, lineWidth: 2)
-                .frame(width: 22, height: 22)
+                .frame(width: DesignTokens.Size.statusBadge, height: DesignTokens.Size.statusBadge)
                 .background(Circle().fill(Palette.ground))
-                .overlay(Circle().stroke(Palette.ground, lineWidth: 2.5))
+                .overlay(Circle().stroke(Palette.ground, lineWidth: DesignTokens.Size.statusBadgeStroke))
         case .none:
             EmptyView()
         }
     }
 
     private func glyph(_ system: String, _ fill: Color, square: Bool, ink: Color = Palette.ground) -> some View {
-        let shape = RoundedRectangle(cornerRadius: square ? 6 : 11)
+        let shape = RoundedRectangle(cornerRadius: square ? DesignTokens.Radius.badgeSquare : 11)
         return Image(systemName: system)
             .font(.system(size: 10, weight: .heavy)).foregroundStyle(ink)
-            .frame(width: 22, height: 22)
+            .frame(width: DesignTokens.Size.statusBadge, height: DesignTokens.Size.statusBadge)
             .background(shape.fill(fill))
-            .overlay(shape.stroke(Palette.ground, lineWidth: 2.5))
+            .overlay(shape.stroke(Palette.ground, lineWidth: DesignTokens.Size.statusBadgeStroke))
     }
 }
 
