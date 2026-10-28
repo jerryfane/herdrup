@@ -80,8 +80,16 @@ boot_simulator() {
   case "$cold_booted" in *" $udid "*) budget=5m ;; esac
   cold_booted="$cold_booted$udid "
   "$TIMEOUT_BIN" --signal=TERM --kill-after=15s "$budget" bash -c '
-    # An already-booted device rejects boot; bootstatus is the readiness authority.
-    xcrun simctl boot "$1" || true
+    # Boot only a device that is not booted; bootstatus is the readiness authority.
+    # On Xcode 27, `simctl boot` of an iPad that had just finished booting hung with no
+    # output: run 40728450580 (iPadResize-boot.log empty, "failed to become ready within
+    # 5m") and run 40774306376 with no recorder running ("IPAD-REC-DIAG norec-boot
+    # exit=124 secs=307"), while bootstatus on the same iPad answered "Device already
+    # booted". Xcode 26 rejected the same call at once ("Unable to boot device in current
+    # state: Booted"), which this used to rely on.
+    if ! xcrun simctl list devices | grep -qF "($1) (Booted)"; then
+      xcrun simctl boot "$1" || true
+    fi
     exec xcrun simctl bootstatus "$1" -b
   ' _ "$udid" 2>&1 | tee "$log" || status=$?
   if [ "$status" -ne 0 ]; then
