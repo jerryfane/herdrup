@@ -6054,7 +6054,10 @@ struct TerminalPaneContent: View {
         // to the accessibility tree. VoiceOver could then land on a hidden pane's controls,
         // and an automation query for one button legitimately matches several.
         .accessibilityHidden(!isForeground)
-        .padding(.horizontal, 16).padding(.top, 6).padding(.bottom, 8)
+        .padding(.horizontal, 16).padding(.top, 6)
+        // Off the glass where nothing sits above the pane (iPhone Duo's side status bar).
+        .topEdgeClearance(base: 6, rowHeight: 44)
+        .padding(.bottom, 8)
         .background(Palette.groundMachine)
         .modifier(GuestSharePresenter(model: guestShare, client: client, agent: agent,
                                       fallbackTitle: title, isForeground: isForeground))
