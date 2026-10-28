@@ -2604,6 +2604,14 @@ struct TerminalHomeView: View {
                             .font(Typography.app(15, settingsAnchor == section ? .semibold : .regular))
                             .foregroundStyle(settingsAnchor == section ? Palette.text : Palette.textDim)
                         Spacer(minLength: 0)
+                        if section == .machines, serverUpdate?.card.badgeKey != nil {
+                            Text("Update")
+                                .font(Typography.app(11, .semibold)).foregroundStyle(Palette.waiting)
+                                .padding(.horizontal, 8).padding(.vertical, 3)
+                                .background(Capsule().fill(Palette.waiting.opacity(0.12)))
+                                .overlay(Capsule().stroke(Palette.waiting.opacity(0.5), lineWidth: 1))
+                                .accessibilityIdentifier("machines-update-pill")
+                        }
                     }
                     .padding(.horizontal, 12).padding(.vertical, 11)
                     .background(settingsAnchor == section ? Palette.surfaceRaised : Color.clear,

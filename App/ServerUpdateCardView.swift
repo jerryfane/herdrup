@@ -29,7 +29,10 @@ struct ServerUpdateCardView: View {
             }
             .padding(.top, 16).padding(.horizontal, 18).padding(.bottom, 18)
             .frame(maxWidth: .infinity, alignment: .leading)
-            .settingsGroup()
+            // `settingsGroup()` is private to HerdrApp.swift: the same group, drawn here.
+            .background(Palette.surface)
+            .clipShape(RoundedRectangle(cornerRadius: DesignTokens.Radius.group))
+            .overlay(RoundedRectangle(cornerRadius: DesignTokens.Radius.group).stroke(Palette.hairlineQuiet, lineWidth: 1))
             .overlay {
                 if let edge = edge(card) {
                     RoundedRectangle(cornerRadius: DesignTokens.Radius.group)
