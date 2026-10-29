@@ -344,6 +344,14 @@ struct RootView: View {
             TerminalHomeView(client: HerdrClient(transport: ServerUpdateMockTransport()), onDisconnect: {},
                              host: ServerUpdateMock.host, onTrustHostKey: { _ in false },
                              livePaneIDs: MockWireFixtures.demoLivePaneIDs)
+        case .desktopReference:
+            // Herdrup Desktop's reference screenshots (herdrup-desktop#16): no animation, so
+            // every capture of a state is the same picture. See DesktopReferenceMock.
+            let _ = DesktopReferenceMock.prepared
+            TerminalHomeView(client: HerdrClient(transport: DesktopReferenceMockTransport()), onDisconnect: {},
+                             onTrustHostKey: { _ in false })
+                .transaction { $0.disablesAnimations = true; $0.animation = nil }
+                .overlay(alignment: .topLeading) { DesktopReferenceProbe().frame(width: 1, height: 1) }
         case .sessions:
             SessionsMockHome()
         case .liveEvents, .liveEventsLegacy:
@@ -1764,8 +1772,8 @@ struct TerminalHomeView: View {
     /// task; it changes at most once or twice per connection.
     @State private var liveEventsSupported = false
     /// One shared time source for every status-age badge. It updates at most once
-    /// per production poll interval, never once per row.
-    @State private var rosterNow = Date()
+    /// per production poll interval, never once per row. `rosterClockNow` is its clock.
+    @State private var rosterNow = TerminalHomeView.rosterClockNow()
     private var agents: [AgentInfo] { displayedRoster.agents }
     private var accounts: [CredentialAccount] { displayedRoster.accounts }
     @State private var error: String?
@@ -3228,7 +3236,7 @@ struct TerminalHomeView: View {
         // DEBUG mock knob: a home redraw at every touch-down (DebugTouchRedraw).
         .onAppear { DebugTouchRedraw.installIfEnabled() }
         .onReceive(NotificationCenter.default.publisher(for: DebugTouchRedraw.touchDown)) { _ in
-            rosterNow = Date()
+            rosterNow = Self.rosterClockNow()
         }
         // The live status stream (herdr events v2): one all-panes `events.subscribe`
         // held while the app is not backgrounded and the daemon advertises
@@ -3777,7 +3785,7 @@ struct TerminalHomeView: View {
         }
         // A covered or hidden roster keeps its rows built; their working rings must not
         // keep turning behind the pane or another tab.
-        .environment(\.statusMotion, agentRosterIsVisible)
+        .environment(\.statusMotion, agentRosterIsVisible && Self.rosterStatusMayMove)
         // Pinned under the top bar (the sidebar's top on iPad and Mac). An overlay, so it
         // never takes part in the list's layout. Hidden while searching: the filtered list
         // may not show the waiting rows at all.
@@ -3804,6 +3812,27 @@ struct TerminalHomeView: View {
             return columnVisibility != .detailOnly
         }
         return frontID == nil
+    }
+
+    /// The roster's "now", behind every row's time-in-state age (`compactTimeInState` in
+    /// `card`), the only relative time the list and sidebar draw. In DEBUG a screenshot
+    /// mock may pin it with `HERDR_MOCK_NOW` (`MockClock`), so an age reads the same on
+    /// every run.
+    static func rosterClockNow() -> Date {
+        #if DEBUG
+        if let pinned = MockClock.pinned { return pinned }
+        #endif
+        return Date()
+    }
+
+    /// Whether the roster's working rings may turn at all. False only in the DEBUG
+    /// `desktopref` mock, whose reference screenshots need the ring at rest.
+    private static var rosterStatusMayMove: Bool {
+        #if DEBUG
+        return !DesktopReferenceMock.holdsStill
+        #else
+        return true
+        #endif
     }
 
     /// Eager on the Mac (see `agentRosterScroll`), and wherever the list shows folders (#552).
@@ -3911,7 +3940,7 @@ struct TerminalHomeView: View {
         if next.displayed != displayedRoster { displayedRoster = next.displayed }
         rosterScroll.isScrolling = next.isScrolling
         if !next.isScrolling {
-            rosterNow = Date()
+            rosterNow = Self.rosterClockNow()
             updateLiveAgentBookkeeping()
         }
         onAgentListScrollPhaseChange?(next.isScrolling)
@@ -3931,7 +3960,7 @@ struct TerminalHomeView: View {
         let next = current.receiving(snapshot)
         pendingRoster.snapshot = next.pending
         if next.displayed != displayedRoster { displayedRoster = next.displayed }
-        let now = Date()
+        let now = Self.rosterClockNow()
         if !rosterScroll.isScrolling,
            now.timeIntervalSince(rosterNow) >= 5 {
             rosterNow = now
@@ -9786,6 +9815,9 @@ enum ScreenshotMock {
     // The Agents home on "mac-mini", whose herdr updates itself from the app (#565):
     // `HERDR_MOCK_UPDATE` picks the state (see `ServerUpdateMock`).
     case serverUpdate
+    // Herdrup Desktop's pixel-parity references (herdrup-desktop#16): the Agents home over
+    // the desktop's fake herdr agent.list, held still (DesktopReferenceMock).
+    case desktopReference
 
     static var mode: ScreenshotMock? {
         let env = ProcessInfo.processInfo.environment["HERDR_SCREENSHOT_MOCK"]?.lowercased()
@@ -9804,6 +9836,7 @@ enum ScreenshotMock {
         case "needsyou": return .needsYou
         case "folders": return .folders
         case "serverupdate": return .serverUpdate
+        case "desktopref": return .desktopReference
         case "liveevents-legacy": return .liveEventsLegacy
         case "pane": return .pane
         case "settings": return .settings
