@@ -1,0 +1,211 @@
+# THE iOS 26 LANE. ci.yml runs on the Xcode 27 image, which carries no iOS 26 simulator
+# runtime, so nothing there tests the OS most users still run. This downloads iOS 26.5
+# and runs a slice of the device suite on one iPhone and one iPad: a launch smoke and the
+# classes nearest the iOS 27 changes (Tools/ci/ui-shard.sh, shards ios26-iphone and
+# ios26-ipad). A red run on main is a main failure: fix it like one.
+#
+# Main and manual only, not pull requests: macOS runner slots are the bottleneck, and the
+# runtime download alone is about 8 GB per job.
+#
+# The setup steps are copies of ci.yml's uitest steps, not a shared composite action:
+# sharing them would mean rewriting ci.yml's job around an action for five short steps.
+# Keep the two in step when one changes.
+name: iOS 26
+
+on:
+  push:
+    branches: [main]
+    paths-ignore:
+      - "**/*.md"
+      - "docs/**"
+      - ".github/ISSUE_TEMPLATE/**"
+      - "LICENSE"
+  workflow_dispatch:
+
+# One run at a time per ref, and a newer push waits rather than cancelling: a lane that a
+# busy main kept cancelling would never report. GitHub keeps only the newest waiting run.
+concurrency:
+  group: ios26-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  uitest:
+    name: ios26 (${{ matrix.shard }})
+    runs-on: xcode-27
+    strategy:
+      # Each device reports its own evidence even when the other fails.
+      fail-fast: false
+      matrix:
+        include:
+          - shard: ios26-iphone
+            device_type: iPhone 17 Pro
+            udid_var: IPHONE_UDID
+          - shard: ios26-ipad
+            device_type: iPad Pro 13-inch (M5)
+            udid_var: IPAD_UDID
+    # Worst rounds (iPhone): 5 + 20 + 15 + 35 + 10 = 85m of tests, five 10-min diagnostic
+    # reruns = 50m, a 10m cold boot. Leaves 35m for setup (runtime download or restore and
+    # import, build) and the upload. The iPad's rounds are shorter. A ceiling, not a duration.
+    timeout-minutes: 180
+    env:
+      SHARD: ${{ matrix.shard }}
+      RUNTIME_VERSION: "26.5"
+      # In the workspace, where actions/cache resolves relative paths.
+      RUNTIME_DIR: .ios-runtime
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Record native runner capacity
+        run: |
+          printf 'Runner: %s; environment: %s; OS: %s\n' "${RUNNER_NAME:-unknown}" "${RUNNER_ENVIRONMENT:-unknown}" "${RUNNER_OS:-unknown}"
+          df -Pk "$GITHUB_WORKSPACE"
+
+      - name: Cache Swift packages
+        uses: actions/cache@v4
+        with:
+          path: SourcePackages
+          key: spm-${{ runner.os }}-${{ hashFiles('project.yml') }}
+          restore-keys: |
+            spm-${{ runner.os }}-
+
+      - name: Select Xcode and assert the iOS SDK
+        # As in ci.yml: the image's default Xcode, and the SDK iPhone Duo needs, because
+        # this lane tests the app that ships, built with that SDK.
+        run: |
+          echo "Xcodes present:"; ls -d /Applications/Xcode*.app || true
+          sudo xcode-select -s /Applications/Xcode.app; xcodebuild -version
+          SDK=$(xcodebuild -showsdks | grep -oE 'iphonesimulator[0-9.]+' | sed 's/iphonesimulator//' | sort -V | tail -1)
+          echo "newest iOS simulator SDK: ${SDK:-<none>}"
+          if [ -z "$SDK" ] || [ "$(printf '%s\n27.1\n' "$SDK" | sort -V | head -1)" != "27.1" ]; then
+            echo "::error::iOS simulator SDK '${SDK:-none}' is older than 27.1, which iPhone Duo needs."
+            exit 1
+          fi
+
+      - name: Download the Metal toolchain
+        run: |
+          xcodebuild -downloadComponent MetalToolchain 2>&1 | tail -20 || \
+            echo "::warning::-downloadComponent MetalToolchain returned nonzero (may already be present); continuing"
+
+      - name: Install XcodeGen
+        # coreutils supplies `gtimeout`, which bounds each test invocation.
+        run: HOMEBREW_NO_AUTO_UPDATE=1 brew install xcodegen coreutils
+
+      - name: Generate project
+        run: xcodegen generate
+
+      # THE RUNTIME IMAGE IS CACHED: the .dmg `-downloadPlatform -exportPath` writes, which
+      # `-importPlatform` installs. A fixed key, because one runtime build is one file; the
+      # image and Xcode do not change what it holds.
+      - name: Restore the iOS ${{ env.RUNTIME_VERSION }} runtime image
+        id: runtime_cache
+        uses: actions/cache/restore@v4
+        with:
+          path: ${{ env.RUNTIME_DIR }}
+          key: ios-runtime-${{ env.RUNTIME_VERSION }}-${{ runner.arch }}-v1
+
+      - name: Download the iOS ${{ env.RUNTIME_VERSION }} runtime image
+        if: steps.runtime_cache.outputs.cache-hit != 'true'
+        run: |
+          set -o pipefail
+          mkdir -p "$RUNTIME_DIR"
+          start=$(date +%s)
+          xcodebuild -downloadPlatform iOS -buildVersion "$RUNTIME_VERSION" -exportPath "$RUNTIME_DIR" 2>&1 \
+            | grep -v -E '^Downloading .*%' | tail -20
+          echo "downloaded in $(( $(date +%s) - start )) s"
+          ls -l "$RUNTIME_DIR"
+
+      - name: Install the iOS ${{ env.RUNTIME_VERSION }} runtime
+        run: |
+          set -o pipefail
+          images=("$RUNTIME_DIR"/*.dmg)
+          if [ "${#images[@]}" -ne 1 ] || [ ! -f "${images[0]}" ]; then
+            echo "::error::expected one runtime .dmg in $RUNTIME_DIR"; ls -l "$RUNTIME_DIR"; exit 1
+          fi
+          ls -l "${images[0]}"
+          start=$(date +%s)
+          xcodebuild -importPlatform "${images[0]}" 2>&1 | tail -20
+          echo "imported in $(( $(date +%s) - start )) s"
+          # The runtime appears once CoreSimulator has mounted the image.
+          for _ in $(seq 1 24); do
+            RUNTIME=$(xcrun simctl list runtimes --json | python3 -c '
+          import json, os, sys
+          wanted = os.environ["RUNTIME_VERSION"]
+          for runtime in json.load(sys.stdin)["runtimes"]:
+              if runtime.get("platform") == "iOS" and runtime["version"] == wanted and runtime.get("isAvailable"):
+                  print(runtime["identifier"])
+                  break
+          ')
+            [ -n "$RUNTIME" ] && break
+            sleep 5
+          done
+          xcrun simctl list runtimes
+          if [ -z "$RUNTIME" ]; then
+            echo "::error::iOS $RUNTIME_VERSION is not an available runtime after the import"; exit 1
+          fi
+          echo "RUNTIME=$RUNTIME" >> "$GITHUB_ENV"
+
+      # Saved once the import has proved the image good, and before the tests, so a test
+      # failure still leaves the next run a cached image. Both devices miss together on a
+      # cold cache; the second save finds the key taken and only warns.
+      - name: Save the iOS ${{ env.RUNTIME_VERSION }} runtime image
+        if: steps.runtime_cache.outputs.cache-hit != 'true'
+        uses: actions/cache/save@v4
+        with:
+          path: ${{ env.RUNTIME_DIR }}
+          key: ${{ steps.runtime_cache.outputs.cache-primary-key }}
+
+      - name: Remove the runtime image
+        # Installed and cached: the build and the simulators need the disk.
+        run: rm -rf "$RUNTIME_DIR"; df -Pk "$GITHUB_WORKSPACE"
+
+      - name: Create the ${{ matrix.device_type }} on iOS ${{ env.RUNTIME_VERSION }}
+        # One named device, no substitute: a missing device type fails the lane.
+        env:
+          DEVICE_TYPE: ${{ matrix.device_type }}
+          UDID_VAR: ${{ matrix.udid_var }}
+        run: |
+          UDID=$(xcrun simctl create "ios26 $DEVICE_TYPE" "$DEVICE_TYPE" "$RUNTIME") || {
+            echo "::error::cannot create a $DEVICE_TYPE on $RUNTIME"; exit 1
+          }
+          echo "$RUNTIME: $UDID_VAR=$UDID ($DEVICE_TYPE)"
+          { echo "DEVICE_UDID=$UDID"; echo "$UDID_VAR=$UDID"; } >> "$GITHUB_ENV"
+          xcrun simctl list runtimes --json > SimulatorRuntimes.json
+          xcrun simctl list devices available --json > SimulatorDevices.json
+
+      - name: Build app and tests for simulator
+        run: |
+          set -o pipefail
+          xcodebuild build-for-testing \
+            -project Herdr.xcodeproj -scheme Herdr \
+            -destination "platform=iOS Simulator,id=${DEVICE_UDID}" \
+            -derivedDataPath .build-dd \
+            -clonedSourcePackagesDirPath SourcePackages \
+            CODE_SIGNING_ALLOWED=NO | xcbeautify || xcodebuild build-for-testing \
+            -project Herdr.xcodeproj -scheme Herdr \
+            -destination "platform=iOS Simulator,id=${DEVICE_UDID}" \
+            -derivedDataPath .build-dd \
+            -clonedSourcePackagesDirPath SourcePackages \
+            CODE_SIGNING_ALLOWED=NO
+
+      - name: Run the ${{ matrix.shard }} device shard
+        run: Tools/ci/ui-shard.sh "$SHARD"
+
+      - name: Export simulator screenshots
+        if: always()
+        run: |
+          for bundle in TestReceipts/*.xcresult; do
+            [ -d "$bundle" ] || continue
+            xcrun xcresulttool export attachments --path "$bundle" \
+              --output-path "${bundle%.xcresult}-attachments"
+          done
+
+      - name: Upload terminal receipts and first-failure diagnostics
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: ios26-test-results-${{ matrix.shard }}
+          path: |
+            TestReceipts/
+            SimulatorRuntimes.json
+            SimulatorDevices.json
+          if-no-files-found: ignore
