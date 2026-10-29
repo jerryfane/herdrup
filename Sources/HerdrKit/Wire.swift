@@ -1159,6 +1159,10 @@ public struct ServerCapabilities: Decodable, Equatable, Sendable {
     public let agentAvatar: Bool
     /// `agent.groups.get` / `agent.groups.set`: the owner's agent folders and stars (#552).
     public let agentGroups: Bool
+    /// `server.update_check` / `update_apply` / `update_status`: the server updates itself to
+    /// the newest signed preview (jerryfane/herdr#336). False on older servers, which have to
+    /// be updated once by hand.
+    public let serverUpdate: Bool
 
     enum CodingKeys: String, CodingKey {
         case liveHandoff = "live_handoff"
@@ -1174,6 +1178,7 @@ public struct ServerCapabilities: Decodable, Equatable, Sendable {
         case agentAnswer = "agent_answer"
         case agentAvatar = "agent_avatar"
         case agentGroups = "agent_groups"
+        case serverUpdate = "server_update"
     }
 
     public init(from decoder: Decoder) throws {
@@ -1194,6 +1199,7 @@ public struct ServerCapabilities: Decodable, Equatable, Sendable {
         agentAnswer = try c.decodeIfPresent(Bool.self, forKey: .agentAnswer) ?? false
         agentAvatar = try c.decodeIfPresent(Bool.self, forKey: .agentAvatar) ?? false
         agentGroups = try c.decodeIfPresent(Bool.self, forKey: .agentGroups) ?? false
+        serverUpdate = try c.decodeIfPresent(Bool.self, forKey: .serverUpdate) ?? false
     }
 }
 
