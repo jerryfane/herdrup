@@ -14,7 +14,7 @@ name: iOS 26
 
 on:
   push:
-    branches: [main]
+    branches: [main, ios26-lane]  # TEMP: ios26-lane, to run the lane before it exists on main
     paths-ignore:
       - "**/*.md"
       - "docs/**"
