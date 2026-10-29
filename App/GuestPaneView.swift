@@ -651,7 +651,7 @@ struct GuestPaneView: View {
                         ComposerActionIcon(image: Image("ComposerSend"), primary: true, busy: sending,
                                            progress: uploader.sendProgress(attachments, sending: sending))
                     }
-                    .disabled(!canCompose || sending || dictating)
+                    .disabled(!canCompose || sending || dictating || loadingAttachment)
                     .fixedSize()
                     .accessibilityLabel("Send message")
                     .accessibilityIdentifier("guest-send-button")
@@ -662,7 +662,7 @@ struct GuestPaneView: View {
                         reply = prompt.text
                         send()
                     }
-                    .disabled(!canCompose || sending || dictating)
+                    .disabled(!canCompose || sending || dictating || loadingAttachment)
                     .accessibilityIdentifier("guest-saved-prompts")
                 }
             }
@@ -804,7 +804,7 @@ struct GuestPaneView: View {
     // MARK: - Send
 
     private func send() {
-        guard canCompose, !sending, !dictating, hasContent else { return }
+        guard canCompose, !sending, !dictating, !loadingAttachment, hasContent else { return }
         let text = reply.trimmingCharacters(in: .whitespacesAndNewlines)
         guard text.utf8.count <= Self.maxPromptBytes else {
             note = "Messages are limited to 32 KB. Send it in parts, or attach it as a file."
