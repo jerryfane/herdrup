@@ -8173,7 +8173,7 @@ struct SettingsView: View {
             pageRow(.typingLatency)
             glyphDivider
             linkGlyphRow("Report a bug or request a feature", systemImage: "exclamationmark.bubble",
-                         url: URL(string: "https://github.com/jerryfane/herdrup/issues")!)
+                         url: URL(string: "https://github.com/themartianapp/herdrup/issues")!)
         }
     }
 
@@ -8194,7 +8194,7 @@ struct SettingsView: View {
                          url: URL(string: "https://herdrup.themartian.app/legal/terms")!)
             glyphDivider
             linkGlyphRow("Open source on GitHub", systemImage: "chevron.left.forwardslash.chevron.right",
-                         url: URL(string: "https://github.com/jerryfane/herdrup")!)
+                         url: URL(string: "https://github.com/themartianapp/herdrup")!)
         }
     }
 
