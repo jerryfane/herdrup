@@ -569,24 +569,11 @@ case "$shard" in
       stop_recording
     fi
     ;;
-  # SCRATCH (xcode27-duo-scratch-ios26, never merged): the classes #577's app changes touch,
-  # on iOS 26.5, because the Xcode 27 image has no iOS 26 runtime of its own.
-  ios26-iphone)
-    run_suite iPhone26ChatUX "$IPHONE_UDID" 25m -only-testing:HerdrUITests/ChatUXSmokeTests || failed=1
-    # Run 40921111625: 34 Gram passes and one skip consumed 1487.6 seconds,
-    # leaving four cases unfinished at the 25m class ceiling. Keep every case;
-    # use the permanent lane's 35m budget. Resize and Paging already passed.
-    run_suite iPhone26Gram "$IPHONE_UDID" 35m -only-testing:HerdrUITests/GramTests || failed=1
-    ;;
-  ios26-ipad)
-    boot_simulator "$IPAD_UDID" TestReceipts/iPad26-recording-boot.log || exit 1
-    xcrun simctl io "$IPAD_UDID" recordVideo TestReceipts/iPad26.mp4 > TestReceipts/iPad26-video.log 2>&1 &
-    recorder=$!
-    run_suite iPad26ChatUX "$IPAD_UDID" 25m -only-testing:HerdrUITests/ChatUXSmokeTests || failed=1
-    run_suite iPad26GramColumn "$IPAD_UDID" 15m -only-testing:HerdrUITests/GramColumnTests || failed=1
-    run_suite iPad26Resize "$IPAD_UDID" 25m -only-testing:HerdrUITests/TerminalResizeTests || failed=1
-    run_suite iPad26AgentListChrome "$IPAD_UDID" 10m -only-testing:HerdrUITests/AgentListChromeTests || failed=1
-    stop_recording
+  # Scratch-only targeted receipt requested by the exact-head reviewer.
+  chat-hidden-ios27|chat-hidden-ios26)
+    run_suite ChatHiddenTerminal "$IPHONE_UDID" 15m \
+      -only-testing:HerdrUITests/ChatHiddenTerminalSmokeTests || failed=1
+    check_classes_ran TestReceipts/ChatHiddenTerminal-first.xcresult ChatHiddenTerminalSmokeTests || failed=1
     ;;
   *)
     echo "::error::unknown shard $shard"

@@ -37,8 +37,11 @@ final class TerminalInteractionDriver: @unchecked Sendable {
             }
         }
     }
+    // Scratch-only integration receipt: compose the existing PTY peer with Chat.
+    static let chatReceipt = ProcessInfo.processInfo.environment["HERDR_CHAT_HIDDEN_RECEIPT"] == "1"
     static let fixtureAgents: [[String: String]] = [("ix:a", "RESIZE-ALFA"), ("ix:b", "RESIZE-BRAVO")].map { pane, name in
-        ["pane_id": pane, "name": name, "agent": name, "agent_status": "idle", "cwd": "/root/" + name]
+        ["pane_id": pane, "name": name, "agent": chatReceipt ? "omp" : name,
+         "agent_status": "idle", "cwd": "/root/" + name]
     }
     private let mutex = NSLock()
     private var children: [String: TerminalInteractionDriver] = [:]
@@ -140,6 +143,13 @@ final class TerminalInteractionDriver: @unchecked Sendable {
             return try await pane(id).roundTrip(line)
         }
         switch request.method {
+        case "ping" where Self.chatReceipt:
+            return Self.json(["id": request.id, "result": ["type": "pong", "version": "0.9.4",
+                "protocol": 22, "capabilities": ["agent_transcript": true]]])
+        case "agent.transcript" where Self.chatReceipt:
+            let object = ChatMockConversation.requestObject(line)
+            return ChatMockConversation.owner.transcript(id: request.id,
+                params: object["params"] as? [String: Any] ?? [:])
         case "agent.list":
             return Self.json(["id": request.id, "result": ["type": "agent_list", "agents": Self.fixtureAgents]])
         case "pane.set_pty_size":
@@ -475,8 +485,9 @@ final class TerminalInteractionHarness: ObservableObject {
     static let navigateNotification = Notification.Name("TerminalInteractionNavigate")
     /// Sets the control pane's reply text from outside the field, the way dictation does.
     static let replyTextNotification = Notification.Name("TerminalInteractionReplyText")
-    static let agents = [MockTransport.pagingAgent(kind: "RESIZE-ALFA", pane: "ix:a"),
-                         MockTransport.pagingAgent(kind: "RESIZE-BRAVO", pane: "ix:b")]
+    static let agents = TerminalInteractionDriver.fixtureAgents.map {
+        try! JSONDecoder().decode(AgentInfo.self, from: JSONSerialization.data(withJSONObject: $0))
+    }
     static let driver = TerminalInteractionDriver(control: ScreenshotMock.mode == .control)
     @Published private(set) var revision = 0
     /// A stand-in for the software keyboard's share of the pane, animated like the real
@@ -529,6 +540,8 @@ final class TerminalInteractionHarness: ObservableObject {
     private var activeID: String {
         surfaces.first(where: { $0.value.isForeground() })?.key ?? "ix:a"
     }
+    private var pendingChatReveals: Set<String> = []
+    private var firstChatRevealedPaint: [String: [String: Any]] = [:]
     static var enabled: Bool { ScreenshotMock.mode == .resize || ScreenshotMock.mode == .control }
 
     /// The file the composer's attach sheet "picks" under this harness, in place of the
@@ -626,6 +639,10 @@ final class TerminalInteractionHarness: ObservableObject {
         if !surface.isCovered() { surface.retained = nil }
         surface.painted = shared.viewport(view, cellSize: cellSize)
         surface.painted["complete"] = complete
+        if !view.isHidden, !surface.isCovered(),
+           shared.pendingChatReveals.remove(paneID) != nil {
+            shared.firstChatRevealedPaint[paneID] = surface.painted
+        }
         shared.surfaces[paneID] = surface
         _ = shared.noteStability(paneID: paneID, surface)
         shared.sampleSweep()
@@ -801,6 +818,15 @@ final class TerminalInteractionHarness: ObservableObject {
             // test can say which half is broken: a non-zero total here with an empty counter
             // in the UI means the wiring, not the engine.
             if let view = surface.view {
+                value["chatHidden"] = view.isHidden
+                if view.isHidden {
+                    pendingChatReveals.insert(id)
+                    firstChatRevealedPaint[id] = nil
+                }
+                if surface.cellSize.height > 0, surface.cellSize.width > 0 {
+                    value["live"] = viewport(view, cellSize: surface.cellSize)
+                }
+                value["firstChatRevealedPaint"] = firstChatRevealedPaint[id]
                 value["engineMatches"] = view.searchMatchSummary("RECORD").total
                 // The font the view has APPLIED, so a menu receipt can tell a Text size tap
                 // that landed from one that was dropped, before any grid change follows it.
@@ -985,7 +1011,12 @@ struct TerminalInteractionRoot: View {
     /// ONLY the spacer, never the harness itself: the probe's ten-per-second tick would
     /// otherwise re-render the pane under test (see `KeyboardSpacerBox`).
     @ObservedObject private var spacer = TerminalInteractionHarness.shared.spacer
-    private let client = HerdrClient(transport: MockTransport(interactionDriver: TerminalInteractionHarness.driver))
+    private let client: HerdrClient = {
+        if TerminalInteractionDriver.chatReceipt {
+            UserDefaults.standard.set(ChatPreference.terminal, forKey: ChatPreference.key)
+        }
+        return HerdrClient(transport: MockTransport(interactionDriver: TerminalInteractionHarness.driver))
+    }()
     var body: some View {
         VStack(spacing: 0) {
             TerminalInteractionControls()

@@ -136,8 +136,8 @@ jobs:
       # Every shard reports its own evidence even when another shard fails.
       fail-fast: false
       matrix:
-        # SCRATCH (xcode27-duo-scratch-ios26, never merged): the #577 app changes on iOS 26.
-        shard: ["ios26-iphone"]
+        # Scratch-only receipt: identical production code, two supported OS generations.
+        shard: ["chat-hidden-ios27", "chat-hidden-ios26"]
     # Worst test/build rounds (iPad), including Chat UX and Gram column: 25 + 20 + 5 + 5 + 20 + 10,
     # SwiftTerm build 10 + test 15, six 10-min diagnostic rounds + SwiftTerm's 15 = 185m.
     # At most nine boot checks: first 10m, next eight 5m, each with 15s kill grace.
@@ -206,6 +206,7 @@ jobs:
         run: xcodegen generate
 
       - name: SCRATCH download the iOS 26.5 simulator runtime and its devices
+        if: matrix.shard == 'chat-hidden-ios26'
         run: |
           xcodebuild -downloadPlatform iOS -buildVersion 26.5 2>&1 | grep -v -E '^Downloading .*%' | tail -5
           RT=$(xcrun simctl list runtimes | grep -oE 'com\.apple\.CoreSimulator\.SimRuntime\.iOS-26-[0-9-]+' | sort -V | tail -1)
@@ -229,7 +230,8 @@ jobs:
               for name in devices
               if (match := re.fullmatch(r"com\.apple\.CoreSimulator\.SimRuntime\.iOS-(\d+(?:-\d+)*)", name))
           ]
-          runtimes = [entry for entry in runtimes if entry[0][0] == 26]  # SCRATCH: iOS 26 only
+          major = 26 if os.environ["SHARD"] == "chat-hidden-ios26" else 27
+          runtimes = [entry for entry in runtimes if entry[0][0] == major]
           def usable(name):
               available = [device for device in devices[name] if device.get("isAvailable", True)]
               phones = [device for device in available if device["name"].startswith("iPhone")
