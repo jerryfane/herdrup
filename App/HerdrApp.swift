@@ -846,7 +846,7 @@ struct ConnectView: View {
                     .accessibilityIdentifier("shared-machine-row")
                 }
             }
-            .settingsGroup()
+            .settingsGroup(outline: true)
         }
     }
 
@@ -1007,7 +1007,7 @@ struct ConnectView: View {
             }
             .frame(maxWidth: .infinity, alignment: .leading)
             .padding(.horizontal, 18).padding(.vertical, 14)
-            .settingsGroup()
+            .settingsGroup(outline: true)
 
             Text("Then, on your computer, run:")
                 .font(connectFont(13)).foregroundStyle(Palette.textDim)
@@ -1067,7 +1067,7 @@ struct ConnectView: View {
                     savedHostRow(saved)
                 }
             }
-            .settingsGroup()
+            .settingsGroup(outline: true)
         }
     }
 
@@ -8444,9 +8444,14 @@ struct SettingsView: View {
     private var connectionSection: some View {
         VStack(alignment: .leading, spacing: 0) {
             sectionLabel("CONNECTION")
-            actionRow("Reconnect now", enabled: canReconnect,
-                      note: "verify the host key first") { onReconnect() }
-            actionRow(copied ? "Copied ✓" : "Copy diagnostics") { copyDiagnostics() }
+            VStack(spacing: 0) {
+                groupedActionRow("Reconnect now", enabled: canReconnect,
+                                 note: "verify the host key first") { onReconnect() }
+                rowDivider
+                groupedActionRow(copied ? "Copied ✓" : "Copy diagnostics") { copyDiagnostics() }
+            }
+            .settingsGroup()
+            .padding(.horizontal, DesignTokens.Space.screenInset)
         }
         // After a herdr update the hero names the new build. Here, not on the body's long
         // modifier chain, which is at the type checker's limit.
@@ -8485,10 +8490,11 @@ struct SettingsView: View {
         }
         VStack(alignment: .leading, spacing: 0) {
             sectionLabel("FEDERATION")
-            if machines.isEmpty && extraPeers.isEmpty {
-                federationEmpty
-            } else {
-                VStack(spacing: 0) {
+            // One group, as proposal B draws it: the machines, then "How to add a machine".
+            VStack(spacing: 0) {
+                if machines.isEmpty && extraPeers.isEmpty {
+                    federationEmpty
+                } else {
                     ForEach(Array(machines.enumerated()), id: \.element.id) { index, machine in
                         savedMachineRow(machine, peer: peers.first { $0.alias == machine.profileID })
                         if index < machines.count - 1 || !extraPeers.isEmpty { rowDivider }
@@ -8498,13 +8504,14 @@ struct SettingsView: View {
                         if index < extraPeers.count - 1 { rowDivider }
                     }
                 }
-                .settingsGroup()
-                .padding(.horizontal, 16).padding(.top, 10)
+                rowDivider
+                actionGlyphRow("How to add a machine", systemImage: "plus.circle",
+                               subtitle: "Connect another computer to your home box") {
+                    showFederationSetup = true
+                }
             }
-            richActionRow("How to add a machine", systemImage: "plus.circle",
-                          subtitle: "Connect another computer to your home box") {
-                showFederationSetup = true
-            }
+            .settingsGroup()
+            .padding(.horizontal, DesignTokens.Space.screenInset)
         }
     }
 
@@ -8584,8 +8591,6 @@ struct SettingsView: View {
         }
         .frame(maxWidth: .infinity, alignment: .leading)
         .padding(.horizontal, 18).padding(.vertical, 14)
-        .settingsGroup()
-        .padding(.horizontal, 16).padding(.top, 10)
     }
 
     /// One peer: an identity chip keyed on the alias (the same gradient+glyph the
@@ -9381,6 +9386,13 @@ struct SettingsView: View {
     /// An action row (proposal B): a brand Geist 17/600 label and no chevron, since it acts
     /// in place; a disabled one dims and says why.
     private func actionRow(_ label: String, enabled: Bool = true, note: String? = nil, _ action: @escaping () -> Void) -> some View {
+        groupedActionRow(label, enabled: enabled, note: note, action)
+            .settingsGroup()
+            .padding(.horizontal, 16).padding(.top, 10)
+    }
+
+    /// `actionRow`'s row on its own, for a group holding several (Machines › Connection).
+    private func groupedActionRow(_ label: String, enabled: Bool = true, note: String? = nil, _ action: @escaping () -> Void) -> some View {
         Button { if enabled { action() } } label: {
             HStack {
                 VStack(alignment: .leading, spacing: 2) {
@@ -9391,11 +9403,12 @@ struct SettingsView: View {
                 }
                 Spacer()
             }
-            .settingsRowShell()
+            .padding(.horizontal, 18).padding(.vertical, 12)
+            .frame(maxWidth: .infinity, minHeight: 52, alignment: .leading)
+            .contentShape(Rectangle())
         }
         .buttonStyle(.plain)
         .disabled(!enabled)
-        .padding(.horizontal, 16).padding(.top, 10)
     }
 
     /// An icon-led row with an ALWAYS-visible subtitle (unlike `actionRow`, whose
@@ -9618,14 +9631,14 @@ private extension View {
         self
             .padding(.horizontal, 18).padding(.vertical, 12)
             .frame(maxWidth: .infinity, minHeight: 52, alignment: .leading)
-            .settingsGroup(outline: false)
+            .settingsGroup()
             .contentShape(RoundedRectangle(cornerRadius: DesignTokens.Radius.group))
     }
 
     /// One inset group (#357 "HerdrUp voice"): `surface`, radius 18, clipping its rows. The
-    /// connect screen keeps the 1 pt `hairlineQuiet` outline; Settings (proposal B, #572)
-    /// passes `outline: false`, as its spec drops the stroke.
-    func settingsGroup(outline: Bool = true) -> some View {
+    /// connect screen passes `outline: true` to keep the 1 pt `hairlineQuiet` outline; Settings
+    /// (proposal B, #572) drops the stroke.
+    func settingsGroup(outline: Bool = false) -> some View {
         let shape = RoundedRectangle(cornerRadius: DesignTokens.Radius.group)
         return self
             .background(Palette.surface)
