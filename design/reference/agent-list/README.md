@@ -23,14 +23,14 @@ These are pixel-exact screenshots of herdrup's Agents home on iPad, in landscape
   - `needs-you-pill` (fixture `needs-you`): 3 agents need you (api-review and deploy blocked, docs on a menu), then 20 working. The test swipes the roster to its end, so the waiting rows are out of sight and the sticky "3 agents need you" pill shows under the "Agents" bar, with the first three waiting agents' avatars. Working rows sort by pane id as strings when no turn has completed (`AgentList.init`), so the list ends with auth (`w2:p9`).
   - `needs-you-rail` (fixture `needs-you`): the sidebar minimised (the bar's Minimise sidebar button) to the rail, which shows the amber 3 (need you) and the blue 20 (working) under the section icons. The Agents tab itself has no count on iPad: `tabBadgeCount(for:gram:)` returns 0 for `.agents` (`App/HerdrApp.swift`). The count is the rail's and the pill's.
 - **Devices.** `ipad-pro-13` is the iPad Pro 13-inch at 1376×1032 pt. `ipad-11` is an 1180×820 pt iPad (iPad Air 11-inch, or the base iPad (A16) when the runner lacks it). Both are @2x, landscape and full screen.
-- **Held still.** Dark appearance and the default Dynamic Type size (Large). UIKit and SwiftUI animations are off, and the working ring is drawn at rest. The empty detail column's glyph field is drawn once from a fixed seed (SplitMix64 `0x4845524452555031`, `FieldDice` in `App/SelectAgentField.swift`), with no lens, twinkle or typing. The roster's clock is pinned to `2026-10-28T09:41:00Z` (`HERDR_MOCK_NOW`). That clock is behind the only relative time the list draws: a row's time in its state (`compactTimeInState` in `card`). The fakeherdr fixture has no `status_since_unix_ms`, so the first six states draw no age. Every agent in the served fixtures has an absolute `status_since_unix_ms` a fixed number of minutes before that clock (4m, 37m, 2h, 9h, 3d, 12m, 55m, 5h, 26m, 2d in list order, repeating), so their rows draw that age before the chevron. The status bar is overridden to 9:41, full charged battery, three Wi-Fi bars and no cellular, and is 32 pt tall. simctl on this image accepts only a plain time, so the date beside it is the runner's real date: "Wed Oct 28" in the six states first committed (`loading` to `all-expanded`), "Thu Oct 29" in the served states. A later run of the first six on 2026-10-29 (run 40877132394) differed from the committed pictures only in those date pixels, so they were kept. A capture is kept only after three screenshots 0.5 s apart are byte-identical.
+- **Held still.** Dark appearance and the default Dynamic Type size (Large). UIKit and SwiftUI animations are off, and the working ring is drawn at rest. The empty detail column's glyph field is drawn once from a fixed seed (SplitMix64 `0x4845524452555031`, `FieldDice` in `App/SelectAgentField.swift`), with no lens, twinkle or typing. The roster's clock is pinned to `2026-10-28T09:41:00Z` (`HERDR_MOCK_NOW`). That clock is behind the only relative time the list draws: a row's time in its state (`compactTimeInState` in `card`). The fakeherdr fixture has no `status_since_unix_ms`, so the first six states draw no age. Every agent in the served fixtures has an absolute `status_since_unix_ms` a fixed number of minutes before that clock (4m, 37m, 2h, 9h, 3d, 12m, 55m, 5h, 26m, 2d in list order, repeating), so their rows draw that age before the chevron. The status bar is overridden to 9:41, full charged battery, three Wi-Fi bars and no cellular, and is 32 pt tall. simctl on this image accepts only a plain time, so the date beside it is the runner's real date: "Wed Oct 28" in the six states first committed (`loading` to `all-expanded`), "Thu Oct 29" in the served states. Later runs of the first six on 2026-10-29 (runs 40877132394 and 40896841718) differed from the committed pictures only in those date pixels, so they were kept. A capture is kept only after three screenshots 0.5 s apart are byte-identical.
 
 ## Regenerating
 
 1. Run the focused CI round on the branch or PR head (needs `gh` with access to the fork):
 
    ```sh
-   gh workflow run ci.yml -R jerryfane/herdrup --ref <branch> \
+   gh workflow run ci.yml -R themartianapp/herdrup --ref <branch> \
      -f only_suite=DesktopReferenceShots -f only_device=ipad
    ```
 
@@ -39,11 +39,11 @@ These are pixel-exact screenshots of herdrup's Agents home on iPad, in landscape
 2. Download the attachments:
 
    ```sh
-   gh run download <run-id> -R jerryfane/herdrup -n terminal-test-results-focused -D /tmp/refs
+   gh run download <run-id> -R themartianapp/herdrup -n terminal-test-results-focused -D /tmp/refs
    ```
 
    The PNGs and their `.json` conditions are in `/tmp/refs/TestReceipts/iPadDesktopReference-first-attachments/` and `/tmp/refs/TestReceipts/iPad11DesktopReference-first-attachments/`. Each folder's `manifest.json` (written by `xcresulttool`) maps an exported file to its attachment name, `ref-<device>-<state>.png` or `.json`. The status-bar override that was used is in `TestReceipts/iPad*DesktopReference-status-bar.txt`.
 
 3. Copy each `ref-*.png` here under its attachment name. Recompress losslessly with `zopflipng` (the `zopfli` Python package's `zopfli.png.optimize`), which keeps the decoded pixels identical and saves about 25%. Rebuild `manifest.json` from the `.json` conditions, the status-bar receipts and each PNG's `sha256sum`, and set `herdrupCommit` to the head the run built. Look at every picture before committing it.
 
-`herdrupCommit` is the pull request head that produced the pictures. The merge commit on `main` has a different sha but the same app code.
+`herdrupCommit` is the pull request head that produced the pictures (per file; the served states have their own, with their `ciRun`). The merge commit on `main` has a different sha but the same app code.

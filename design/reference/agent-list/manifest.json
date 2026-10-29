@@ -34,12 +34,18 @@
       "statusBar": {
         "heightPoints": 32.0,
         "safeAreaTopPoints": 32.0,
-        "override": "xcrun simctl status_bar <udid> override --time 9:41 --batteryLevel 100 --batteryState charged --cellularMode notSupported --wifiBars 3"
+        "override": "xcrun simctl status_bar <udid> override --time 9:41 --batteryLevel 100 --batteryState charged --cellularMode notSupported --wifiBars 3",
+        "date": "Wed Oct 28"
       },
       "mockClock": "2026-10-28T09:41:00Z",
       "herdrupCommit": "aba8f3d0e58e81a2c4d332b706dad81a75154a96",
       "fixtureSHA256": "f912df090a009597e326cc7df873addc242be2400e8645f5c654c2b168a081e2",
-      "sha256": "475702b2a8707c06789a6cdf68c9c9a6730df1572e01fb4daae69d805c4657e7"
+      "sha256": "475702b2a8707c06789a6cdf68c9c9a6730df1572e01fb4daae69d805c4657e7",
+      "fixture": "HerdrUITests/Fixtures/desktop-reference-agents.json",
+      "avatars": {
+        "images": [],
+        "mascots": []
+      }
     },
     {
       "file": "ref-ipad-11-archived-expanded.png",
@@ -61,12 +67,65 @@
       "statusBar": {
         "heightPoints": 32.0,
         "safeAreaTopPoints": 32.0,
-        "override": "xcrun simctl status_bar <udid> override --time 9:41 --batteryLevel 100 --batteryState charged --cellularMode notSupported --wifiBars 3"
+        "override": "xcrun simctl status_bar <udid> override --time 9:41 --batteryLevel 100 --batteryState charged --cellularMode notSupported --wifiBars 3",
+        "date": "Wed Oct 28"
       },
       "mockClock": "2026-10-28T09:41:00Z",
       "herdrupCommit": "aba8f3d0e58e81a2c4d332b706dad81a75154a96",
       "fixtureSHA256": "f912df090a009597e326cc7df873addc242be2400e8645f5c654c2b168a081e2",
-      "sha256": "dcad94c44ded21a44b2ed4e114f67b580bc1eab3d65222d81081da7c3c26bd7f"
+      "sha256": "dcad94c44ded21a44b2ed4e114f67b580bc1eab3d65222d81081da7c3c26bd7f",
+      "fixture": "HerdrUITests/Fixtures/desktop-reference-agents.json",
+      "avatars": {
+        "images": [],
+        "mascots": []
+      }
+    },
+    {
+      "file": "ref-ipad-11-avatars.png",
+      "state": "avatars",
+      "device": "ipad-11",
+      "simulator": "iPad Air 11-inch (M4)",
+      "points": {
+        "width": 1180,
+        "height": 820
+      },
+      "pixels": {
+        "width": 2360,
+        "height": 1640
+      },
+      "scale": 2,
+      "orientation": "landscape",
+      "appearance": "dark",
+      "dynamicTypeSize": "UICTContentSizeCategoryL",
+      "statusBar": {
+        "heightPoints": 32.0,
+        "safeAreaTopPoints": 32.0,
+        "override": "xcrun simctl status_bar <udid> override --time 9:41 --batteryLevel 100 --batteryState charged --cellularMode notSupported --wifiBars 3",
+        "date": "Thu Oct 29"
+      },
+      "mockClock": "2026-10-28T09:41:00Z",
+      "herdrupCommit": "2d8e3792954d64b356feb3a96b5def1404ab43b5",
+      "ciRun": "https://github.com/themartianapp/herdrup/actions/runs/40896841718",
+      "fixture": "HerdrUITests/Fixtures/desktop-reference-avatars.json",
+      "fixtureSHA256": "1dcc6889466fecc87efd23bca7bc2dee6cdde450a4e75d601a7e5a28eb879592",
+      "avatars": {
+        "images": [
+          {
+            "agent": "atlas",
+            "pane_id": "w1:p1",
+            "sha256": "e4d4139d5914062cd06d5b6cbd8ade1d5fddf83c20ee575d4d83b8d81de38a4a",
+            "file": "HerdrUITests/Fixtures/desktop-reference-avatar.png"
+          }
+        ],
+        "mascots": [
+          {
+            "agent": "nova",
+            "pane_id": "w1:p2",
+            "mascot": "cub"
+          }
+        ]
+      },
+      "sha256": "9e694b1db90b6c478543df2358fdc07560d4742eea5d4e455f94c317fcf49175"
     },
     {
       "file": "ref-ipad-11-empty.png",
@@ -88,12 +147,86 @@
       "statusBar": {
         "heightPoints": 32.0,
         "safeAreaTopPoints": 32.0,
-        "override": "xcrun simctl status_bar <udid> override --time 9:41 --batteryLevel 100 --batteryState charged --cellularMode notSupported --wifiBars 3"
+        "override": "xcrun simctl status_bar <udid> override --time 9:41 --batteryLevel 100 --batteryState charged --cellularMode notSupported --wifiBars 3",
+        "date": "Wed Oct 28"
       },
       "mockClock": "2026-10-28T09:41:00Z",
       "herdrupCommit": "aba8f3d0e58e81a2c4d332b706dad81a75154a96",
       "fixtureSHA256": "f912df090a009597e326cc7df873addc242be2400e8645f5c654c2b168a081e2",
-      "sha256": "1ca49a5cc9268b7a4677bf48974ce9e3c536a63bf72345f181fe62199f172f1a"
+      "sha256": "1ca49a5cc9268b7a4677bf48974ce9e3c536a63bf72345f181fe62199f172f1a",
+      "fixture": "HerdrUITests/Fixtures/desktop-reference-agents.json",
+      "avatars": {
+        "images": [],
+        "mascots": []
+      }
+    },
+    {
+      "file": "ref-ipad-11-federated.png",
+      "state": "federated",
+      "device": "ipad-11",
+      "simulator": "iPad Air 11-inch (M4)",
+      "points": {
+        "width": 1180,
+        "height": 820
+      },
+      "pixels": {
+        "width": 2360,
+        "height": 1640
+      },
+      "scale": 2,
+      "orientation": "landscape",
+      "appearance": "dark",
+      "dynamicTypeSize": "UICTContentSizeCategoryL",
+      "statusBar": {
+        "heightPoints": 32.0,
+        "safeAreaTopPoints": 32.0,
+        "override": "xcrun simctl status_bar <udid> override --time 9:41 --batteryLevel 100 --batteryState charged --cellularMode notSupported --wifiBars 3",
+        "date": "Thu Oct 29"
+      },
+      "mockClock": "2026-10-28T09:41:00Z",
+      "herdrupCommit": "2d8e3792954d64b356feb3a96b5def1404ab43b5",
+      "ciRun": "https://github.com/themartianapp/herdrup/actions/runs/40896841718",
+      "fixture": "HerdrUITests/Fixtures/desktop-reference-federated.json",
+      "fixtureSHA256": "0445d1690258871aac0048c1c9f77f71dfe0476808738fbc6744eb641ae1c2ad",
+      "avatars": {
+        "images": [],
+        "mascots": []
+      },
+      "sha256": "741fa50a04d6111a1ede93f92a5aca66cf2724daac49e1865d2c738830e830e1"
+    },
+    {
+      "file": "ref-ipad-11-folders.png",
+      "state": "folders",
+      "device": "ipad-11",
+      "simulator": "iPad Air 11-inch (M4)",
+      "points": {
+        "width": 1180,
+        "height": 820
+      },
+      "pixels": {
+        "width": 2360,
+        "height": 1640
+      },
+      "scale": 2,
+      "orientation": "landscape",
+      "appearance": "dark",
+      "dynamicTypeSize": "UICTContentSizeCategoryL",
+      "statusBar": {
+        "heightPoints": 32.0,
+        "safeAreaTopPoints": 32.0,
+        "override": "xcrun simctl status_bar <udid> override --time 9:41 --batteryLevel 100 --batteryState charged --cellularMode notSupported --wifiBars 3",
+        "date": "Thu Oct 29"
+      },
+      "mockClock": "2026-10-28T09:41:00Z",
+      "herdrupCommit": "2d8e3792954d64b356feb3a96b5def1404ab43b5",
+      "ciRun": "https://github.com/themartianapp/herdrup/actions/runs/40896841718",
+      "fixture": "HerdrUITests/Fixtures/desktop-reference-folders.json",
+      "fixtureSHA256": "7688f3779c18e297213dd1248be390728857c228460aa6ae04cf70b06650cf84",
+      "avatars": {
+        "images": [],
+        "mascots": []
+      },
+      "sha256": "b5878c1aac56841a390833be876017b613941bc0cbe3016531ec8196096056d9"
     },
     {
       "file": "ref-ipad-11-idle-expanded.png",
@@ -115,12 +248,18 @@
       "statusBar": {
         "heightPoints": 32.0,
         "safeAreaTopPoints": 32.0,
-        "override": "xcrun simctl status_bar <udid> override --time 9:41 --batteryLevel 100 --batteryState charged --cellularMode notSupported --wifiBars 3"
+        "override": "xcrun simctl status_bar <udid> override --time 9:41 --batteryLevel 100 --batteryState charged --cellularMode notSupported --wifiBars 3",
+        "date": "Wed Oct 28"
       },
       "mockClock": "2026-10-28T09:41:00Z",
       "herdrupCommit": "aba8f3d0e58e81a2c4d332b706dad81a75154a96",
       "fixtureSHA256": "f912df090a009597e326cc7df873addc242be2400e8645f5c654c2b168a081e2",
-      "sha256": "f8afca553a742e61179cee7c670a52c0b37c9d751e5e8b9feef671e52c1b1d94"
+      "sha256": "f8afca553a742e61179cee7c670a52c0b37c9d751e5e8b9feef671e52c1b1d94",
+      "fixture": "HerdrUITests/Fixtures/desktop-reference-agents.json",
+      "avatars": {
+        "images": [],
+        "mascots": []
+      }
     },
     {
       "file": "ref-ipad-11-loading.png",
@@ -142,12 +281,86 @@
       "statusBar": {
         "heightPoints": 32.0,
         "safeAreaTopPoints": 32.0,
-        "override": "xcrun simctl status_bar <udid> override --time 9:41 --batteryLevel 100 --batteryState charged --cellularMode notSupported --wifiBars 3"
+        "override": "xcrun simctl status_bar <udid> override --time 9:41 --batteryLevel 100 --batteryState charged --cellularMode notSupported --wifiBars 3",
+        "date": "Wed Oct 28"
       },
       "mockClock": "2026-10-28T09:41:00Z",
       "herdrupCommit": "aba8f3d0e58e81a2c4d332b706dad81a75154a96",
       "fixtureSHA256": "f912df090a009597e326cc7df873addc242be2400e8645f5c654c2b168a081e2",
-      "sha256": "402823072a7b55bf9ff4e05aa027afdd1575015f81711f1584d46242bb025499"
+      "sha256": "402823072a7b55bf9ff4e05aa027afdd1575015f81711f1584d46242bb025499",
+      "fixture": "HerdrUITests/Fixtures/desktop-reference-agents.json",
+      "avatars": {
+        "images": [],
+        "mascots": []
+      }
+    },
+    {
+      "file": "ref-ipad-11-needs-you-pill.png",
+      "state": "needs-you-pill",
+      "device": "ipad-11",
+      "simulator": "iPad Air 11-inch (M4)",
+      "points": {
+        "width": 1180,
+        "height": 820
+      },
+      "pixels": {
+        "width": 2360,
+        "height": 1640
+      },
+      "scale": 2,
+      "orientation": "landscape",
+      "appearance": "dark",
+      "dynamicTypeSize": "UICTContentSizeCategoryL",
+      "statusBar": {
+        "heightPoints": 32.0,
+        "safeAreaTopPoints": 32.0,
+        "override": "xcrun simctl status_bar <udid> override --time 9:41 --batteryLevel 100 --batteryState charged --cellularMode notSupported --wifiBars 3",
+        "date": "Thu Oct 29"
+      },
+      "mockClock": "2026-10-28T09:41:00Z",
+      "herdrupCommit": "2d8e3792954d64b356feb3a96b5def1404ab43b5",
+      "ciRun": "https://github.com/themartianapp/herdrup/actions/runs/40896841718",
+      "fixture": "HerdrUITests/Fixtures/desktop-reference-needs-you.json",
+      "fixtureSHA256": "101ad2cba65a1a12b77ed32ae3bfbbf13da2a34d90b5a75d9021a5bcfaee2856",
+      "avatars": {
+        "images": [],
+        "mascots": []
+      },
+      "sha256": "95812e7d127d53104706675bcc4663db6376852f24e58f3fcca213e59a1e65b7"
+    },
+    {
+      "file": "ref-ipad-11-needs-you-rail.png",
+      "state": "needs-you-rail",
+      "device": "ipad-11",
+      "simulator": "iPad Air 11-inch (M4)",
+      "points": {
+        "width": 1180,
+        "height": 820
+      },
+      "pixels": {
+        "width": 2360,
+        "height": 1640
+      },
+      "scale": 2,
+      "orientation": "landscape",
+      "appearance": "dark",
+      "dynamicTypeSize": "UICTContentSizeCategoryL",
+      "statusBar": {
+        "heightPoints": 32.0,
+        "safeAreaTopPoints": 32.0,
+        "override": "xcrun simctl status_bar <udid> override --time 9:41 --batteryLevel 100 --batteryState charged --cellularMode notSupported --wifiBars 3",
+        "date": "Thu Oct 29"
+      },
+      "mockClock": "2026-10-28T09:41:00Z",
+      "herdrupCommit": "2d8e3792954d64b356feb3a96b5def1404ab43b5",
+      "ciRun": "https://github.com/themartianapp/herdrup/actions/runs/40896841718",
+      "fixture": "HerdrUITests/Fixtures/desktop-reference-needs-you.json",
+      "fixtureSHA256": "101ad2cba65a1a12b77ed32ae3bfbbf13da2a34d90b5a75d9021a5bcfaee2856",
+      "avatars": {
+        "images": [],
+        "mascots": []
+      },
+      "sha256": "577bab5bb53039c4612a5d92de03f8d8fac71dd06d0fa5aea795fce6d4d8ac2f"
     },
     {
       "file": "ref-ipad-11-populated.png",
@@ -169,12 +382,52 @@
       "statusBar": {
         "heightPoints": 32.0,
         "safeAreaTopPoints": 32.0,
-        "override": "xcrun simctl status_bar <udid> override --time 9:41 --batteryLevel 100 --batteryState charged --cellularMode notSupported --wifiBars 3"
+        "override": "xcrun simctl status_bar <udid> override --time 9:41 --batteryLevel 100 --batteryState charged --cellularMode notSupported --wifiBars 3",
+        "date": "Wed Oct 28"
       },
       "mockClock": "2026-10-28T09:41:00Z",
       "herdrupCommit": "aba8f3d0e58e81a2c4d332b706dad81a75154a96",
       "fixtureSHA256": "f912df090a009597e326cc7df873addc242be2400e8645f5c654c2b168a081e2",
-      "sha256": "d4a17e24f5bceedfd5518381bfb34fca93c859b28a25147b0da28e642da72cc1"
+      "sha256": "d4a17e24f5bceedfd5518381bfb34fca93c859b28a25147b0da28e642da72cc1",
+      "fixture": "HerdrUITests/Fixtures/desktop-reference-agents.json",
+      "avatars": {
+        "images": [],
+        "mascots": []
+      }
+    },
+    {
+      "file": "ref-ipad-11-sessions.png",
+      "state": "sessions",
+      "device": "ipad-11",
+      "simulator": "iPad Air 11-inch (M4)",
+      "points": {
+        "width": 1180,
+        "height": 820
+      },
+      "pixels": {
+        "width": 2360,
+        "height": 1640
+      },
+      "scale": 2,
+      "orientation": "landscape",
+      "appearance": "dark",
+      "dynamicTypeSize": "UICTContentSizeCategoryL",
+      "statusBar": {
+        "heightPoints": 32.0,
+        "safeAreaTopPoints": 32.0,
+        "override": "xcrun simctl status_bar <udid> override --time 9:41 --batteryLevel 100 --batteryState charged --cellularMode notSupported --wifiBars 3",
+        "date": "Thu Oct 29"
+      },
+      "mockClock": "2026-10-28T09:41:00Z",
+      "herdrupCommit": "2d8e3792954d64b356feb3a96b5def1404ab43b5",
+      "ciRun": "https://github.com/themartianapp/herdrup/actions/runs/40896841718",
+      "fixture": "HerdrUITests/Fixtures/desktop-reference-sessions.json",
+      "fixtureSHA256": "e600054d6595f7df0abeb3ed56cfa3f346c919cf093a18c32f9f20226dd328bd",
+      "avatars": {
+        "images": [],
+        "mascots": []
+      },
+      "sha256": "73da2f6d4c1961ed97bc3613c68f48bb68f3eb6074d4ec2a86f35e32c12433b2"
     },
     {
       "file": "ref-ipad-pro-13-all-expanded.png",
@@ -196,12 +449,18 @@
       "statusBar": {
         "heightPoints": 32.0,
         "safeAreaTopPoints": 32.0,
-        "override": "xcrun simctl status_bar <udid> override --time 9:41 --batteryLevel 100 --batteryState charged --cellularMode notSupported --wifiBars 3"
+        "override": "xcrun simctl status_bar <udid> override --time 9:41 --batteryLevel 100 --batteryState charged --cellularMode notSupported --wifiBars 3",
+        "date": "Wed Oct 28"
       },
       "mockClock": "2026-10-28T09:41:00Z",
       "herdrupCommit": "aba8f3d0e58e81a2c4d332b706dad81a75154a96",
       "fixtureSHA256": "f912df090a009597e326cc7df873addc242be2400e8645f5c654c2b168a081e2",
-      "sha256": "3380f6e8b63e5ca9bc9bc8beeddabb4039119861d7cd8e9cc1da0d4498bcceb9"
+      "sha256": "3380f6e8b63e5ca9bc9bc8beeddabb4039119861d7cd8e9cc1da0d4498bcceb9",
+      "fixture": "HerdrUITests/Fixtures/desktop-reference-agents.json",
+      "avatars": {
+        "images": [],
+        "mascots": []
+      }
     },
     {
       "file": "ref-ipad-pro-13-archived-expanded.png",
@@ -223,12 +482,65 @@
       "statusBar": {
         "heightPoints": 32.0,
         "safeAreaTopPoints": 32.0,
-        "override": "xcrun simctl status_bar <udid> override --time 9:41 --batteryLevel 100 --batteryState charged --cellularMode notSupported --wifiBars 3"
+        "override": "xcrun simctl status_bar <udid> override --time 9:41 --batteryLevel 100 --batteryState charged --cellularMode notSupported --wifiBars 3",
+        "date": "Wed Oct 28"
       },
       "mockClock": "2026-10-28T09:41:00Z",
       "herdrupCommit": "aba8f3d0e58e81a2c4d332b706dad81a75154a96",
       "fixtureSHA256": "f912df090a009597e326cc7df873addc242be2400e8645f5c654c2b168a081e2",
-      "sha256": "e4f698fcd65f4b89e86c92e4d585c6eec962a5e0d9e5a756862faf6d2f2537d1"
+      "sha256": "e4f698fcd65f4b89e86c92e4d585c6eec962a5e0d9e5a756862faf6d2f2537d1",
+      "fixture": "HerdrUITests/Fixtures/desktop-reference-agents.json",
+      "avatars": {
+        "images": [],
+        "mascots": []
+      }
+    },
+    {
+      "file": "ref-ipad-pro-13-avatars.png",
+      "state": "avatars",
+      "device": "ipad-pro-13",
+      "simulator": "iPad Pro 13-inch (M5)",
+      "points": {
+        "width": 1376,
+        "height": 1032
+      },
+      "pixels": {
+        "width": 2752,
+        "height": 2064
+      },
+      "scale": 2,
+      "orientation": "landscape",
+      "appearance": "dark",
+      "dynamicTypeSize": "UICTContentSizeCategoryL",
+      "statusBar": {
+        "heightPoints": 32.0,
+        "safeAreaTopPoints": 32.0,
+        "override": "xcrun simctl status_bar <udid> override --time 9:41 --batteryLevel 100 --batteryState charged --cellularMode notSupported --wifiBars 3",
+        "date": "Thu Oct 29"
+      },
+      "mockClock": "2026-10-28T09:41:00Z",
+      "herdrupCommit": "2d8e3792954d64b356feb3a96b5def1404ab43b5",
+      "ciRun": "https://github.com/themartianapp/herdrup/actions/runs/40896841718",
+      "fixture": "HerdrUITests/Fixtures/desktop-reference-avatars.json",
+      "fixtureSHA256": "1dcc6889466fecc87efd23bca7bc2dee6cdde450a4e75d601a7e5a28eb879592",
+      "avatars": {
+        "images": [
+          {
+            "agent": "atlas",
+            "pane_id": "w1:p1",
+            "sha256": "e4d4139d5914062cd06d5b6cbd8ade1d5fddf83c20ee575d4d83b8d81de38a4a",
+            "file": "HerdrUITests/Fixtures/desktop-reference-avatar.png"
+          }
+        ],
+        "mascots": [
+          {
+            "agent": "nova",
+            "pane_id": "w1:p2",
+            "mascot": "cub"
+          }
+        ]
+      },
+      "sha256": "20271fbb4de70e5807b47d1dfd7b126df5c77eedb66233ca4272f71acfb9e736"
     },
     {
       "file": "ref-ipad-pro-13-empty.png",
@@ -250,12 +562,86 @@
       "statusBar": {
         "heightPoints": 32.0,
         "safeAreaTopPoints": 32.0,
-        "override": "xcrun simctl status_bar <udid> override --time 9:41 --batteryLevel 100 --batteryState charged --cellularMode notSupported --wifiBars 3"
+        "override": "xcrun simctl status_bar <udid> override --time 9:41 --batteryLevel 100 --batteryState charged --cellularMode notSupported --wifiBars 3",
+        "date": "Wed Oct 28"
       },
       "mockClock": "2026-10-28T09:41:00Z",
       "herdrupCommit": "aba8f3d0e58e81a2c4d332b706dad81a75154a96",
       "fixtureSHA256": "f912df090a009597e326cc7df873addc242be2400e8645f5c654c2b168a081e2",
-      "sha256": "5a1e8776c9f0063c742899259a0c6ce6daea98cc09fbd2a688f05e0586b29d0f"
+      "sha256": "5a1e8776c9f0063c742899259a0c6ce6daea98cc09fbd2a688f05e0586b29d0f",
+      "fixture": "HerdrUITests/Fixtures/desktop-reference-agents.json",
+      "avatars": {
+        "images": [],
+        "mascots": []
+      }
+    },
+    {
+      "file": "ref-ipad-pro-13-federated.png",
+      "state": "federated",
+      "device": "ipad-pro-13",
+      "simulator": "iPad Pro 13-inch (M5)",
+      "points": {
+        "width": 1376,
+        "height": 1032
+      },
+      "pixels": {
+        "width": 2752,
+        "height": 2064
+      },
+      "scale": 2,
+      "orientation": "landscape",
+      "appearance": "dark",
+      "dynamicTypeSize": "UICTContentSizeCategoryL",
+      "statusBar": {
+        "heightPoints": 32.0,
+        "safeAreaTopPoints": 32.0,
+        "override": "xcrun simctl status_bar <udid> override --time 9:41 --batteryLevel 100 --batteryState charged --cellularMode notSupported --wifiBars 3",
+        "date": "Thu Oct 29"
+      },
+      "mockClock": "2026-10-28T09:41:00Z",
+      "herdrupCommit": "2d8e3792954d64b356feb3a96b5def1404ab43b5",
+      "ciRun": "https://github.com/themartianapp/herdrup/actions/runs/40896841718",
+      "fixture": "HerdrUITests/Fixtures/desktop-reference-federated.json",
+      "fixtureSHA256": "0445d1690258871aac0048c1c9f77f71dfe0476808738fbc6744eb641ae1c2ad",
+      "avatars": {
+        "images": [],
+        "mascots": []
+      },
+      "sha256": "0948e86fbeb7ab0694c4449d64ee1353fca69e60e65850aa1342383fb147738f"
+    },
+    {
+      "file": "ref-ipad-pro-13-folders.png",
+      "state": "folders",
+      "device": "ipad-pro-13",
+      "simulator": "iPad Pro 13-inch (M5)",
+      "points": {
+        "width": 1376,
+        "height": 1032
+      },
+      "pixels": {
+        "width": 2752,
+        "height": 2064
+      },
+      "scale": 2,
+      "orientation": "landscape",
+      "appearance": "dark",
+      "dynamicTypeSize": "UICTContentSizeCategoryL",
+      "statusBar": {
+        "heightPoints": 32.0,
+        "safeAreaTopPoints": 32.0,
+        "override": "xcrun simctl status_bar <udid> override --time 9:41 --batteryLevel 100 --batteryState charged --cellularMode notSupported --wifiBars 3",
+        "date": "Thu Oct 29"
+      },
+      "mockClock": "2026-10-28T09:41:00Z",
+      "herdrupCommit": "2d8e3792954d64b356feb3a96b5def1404ab43b5",
+      "ciRun": "https://github.com/themartianapp/herdrup/actions/runs/40896841718",
+      "fixture": "HerdrUITests/Fixtures/desktop-reference-folders.json",
+      "fixtureSHA256": "7688f3779c18e297213dd1248be390728857c228460aa6ae04cf70b06650cf84",
+      "avatars": {
+        "images": [],
+        "mascots": []
+      },
+      "sha256": "5e09caca1cd12ac1d2ca3cfbb3000ba900ef5ba7c5e2181c5057c56b310ebae0"
     },
     {
       "file": "ref-ipad-pro-13-idle-expanded.png",
@@ -277,12 +663,18 @@
       "statusBar": {
         "heightPoints": 32.0,
         "safeAreaTopPoints": 32.0,
-        "override": "xcrun simctl status_bar <udid> override --time 9:41 --batteryLevel 100 --batteryState charged --cellularMode notSupported --wifiBars 3"
+        "override": "xcrun simctl status_bar <udid> override --time 9:41 --batteryLevel 100 --batteryState charged --cellularMode notSupported --wifiBars 3",
+        "date": "Wed Oct 28"
       },
       "mockClock": "2026-10-28T09:41:00Z",
       "herdrupCommit": "aba8f3d0e58e81a2c4d332b706dad81a75154a96",
       "fixtureSHA256": "f912df090a009597e326cc7df873addc242be2400e8645f5c654c2b168a081e2",
-      "sha256": "2a061d55682eacda1edaa0fef1fa8b1a66e7300148f8bf497c077f9de7427549"
+      "sha256": "2a061d55682eacda1edaa0fef1fa8b1a66e7300148f8bf497c077f9de7427549",
+      "fixture": "HerdrUITests/Fixtures/desktop-reference-agents.json",
+      "avatars": {
+        "images": [],
+        "mascots": []
+      }
     },
     {
       "file": "ref-ipad-pro-13-loading.png",
@@ -304,12 +696,86 @@
       "statusBar": {
         "heightPoints": 32.0,
         "safeAreaTopPoints": 32.0,
-        "override": "xcrun simctl status_bar <udid> override --time 9:41 --batteryLevel 100 --batteryState charged --cellularMode notSupported --wifiBars 3"
+        "override": "xcrun simctl status_bar <udid> override --time 9:41 --batteryLevel 100 --batteryState charged --cellularMode notSupported --wifiBars 3",
+        "date": "Wed Oct 28"
       },
       "mockClock": "2026-10-28T09:41:00Z",
       "herdrupCommit": "aba8f3d0e58e81a2c4d332b706dad81a75154a96",
       "fixtureSHA256": "f912df090a009597e326cc7df873addc242be2400e8645f5c654c2b168a081e2",
-      "sha256": "0c9f6997bb408084cca0362d52ecbbb6a8226c7fc49adee9f2dd6ef054cbdbb0"
+      "sha256": "0c9f6997bb408084cca0362d52ecbbb6a8226c7fc49adee9f2dd6ef054cbdbb0",
+      "fixture": "HerdrUITests/Fixtures/desktop-reference-agents.json",
+      "avatars": {
+        "images": [],
+        "mascots": []
+      }
+    },
+    {
+      "file": "ref-ipad-pro-13-needs-you-pill.png",
+      "state": "needs-you-pill",
+      "device": "ipad-pro-13",
+      "simulator": "iPad Pro 13-inch (M5)",
+      "points": {
+        "width": 1376,
+        "height": 1032
+      },
+      "pixels": {
+        "width": 2752,
+        "height": 2064
+      },
+      "scale": 2,
+      "orientation": "landscape",
+      "appearance": "dark",
+      "dynamicTypeSize": "UICTContentSizeCategoryL",
+      "statusBar": {
+        "heightPoints": 32.0,
+        "safeAreaTopPoints": 32.0,
+        "override": "xcrun simctl status_bar <udid> override --time 9:41 --batteryLevel 100 --batteryState charged --cellularMode notSupported --wifiBars 3",
+        "date": "Thu Oct 29"
+      },
+      "mockClock": "2026-10-28T09:41:00Z",
+      "herdrupCommit": "2d8e3792954d64b356feb3a96b5def1404ab43b5",
+      "ciRun": "https://github.com/themartianapp/herdrup/actions/runs/40896841718",
+      "fixture": "HerdrUITests/Fixtures/desktop-reference-needs-you.json",
+      "fixtureSHA256": "101ad2cba65a1a12b77ed32ae3bfbbf13da2a34d90b5a75d9021a5bcfaee2856",
+      "avatars": {
+        "images": [],
+        "mascots": []
+      },
+      "sha256": "7ff4e8e39c212bf84566d8fea6231307542cd534866d5f73b0e30b67474633b4"
+    },
+    {
+      "file": "ref-ipad-pro-13-needs-you-rail.png",
+      "state": "needs-you-rail",
+      "device": "ipad-pro-13",
+      "simulator": "iPad Pro 13-inch (M5)",
+      "points": {
+        "width": 1376,
+        "height": 1032
+      },
+      "pixels": {
+        "width": 2752,
+        "height": 2064
+      },
+      "scale": 2,
+      "orientation": "landscape",
+      "appearance": "dark",
+      "dynamicTypeSize": "UICTContentSizeCategoryL",
+      "statusBar": {
+        "heightPoints": 32.0,
+        "safeAreaTopPoints": 32.0,
+        "override": "xcrun simctl status_bar <udid> override --time 9:41 --batteryLevel 100 --batteryState charged --cellularMode notSupported --wifiBars 3",
+        "date": "Thu Oct 29"
+      },
+      "mockClock": "2026-10-28T09:41:00Z",
+      "herdrupCommit": "2d8e3792954d64b356feb3a96b5def1404ab43b5",
+      "ciRun": "https://github.com/themartianapp/herdrup/actions/runs/40896841718",
+      "fixture": "HerdrUITests/Fixtures/desktop-reference-needs-you.json",
+      "fixtureSHA256": "101ad2cba65a1a12b77ed32ae3bfbbf13da2a34d90b5a75d9021a5bcfaee2856",
+      "avatars": {
+        "images": [],
+        "mascots": []
+      },
+      "sha256": "c092cd16616a72c6d71ef7b10bd697c75b301ac0a41a8955eb0fb493a9c3bbb1"
     },
     {
       "file": "ref-ipad-pro-13-populated.png",
@@ -331,12 +797,90 @@
       "statusBar": {
         "heightPoints": 32.0,
         "safeAreaTopPoints": 32.0,
-        "override": "xcrun simctl status_bar <udid> override --time 9:41 --batteryLevel 100 --batteryState charged --cellularMode notSupported --wifiBars 3"
+        "override": "xcrun simctl status_bar <udid> override --time 9:41 --batteryLevel 100 --batteryState charged --cellularMode notSupported --wifiBars 3",
+        "date": "Wed Oct 28"
       },
       "mockClock": "2026-10-28T09:41:00Z",
       "herdrupCommit": "aba8f3d0e58e81a2c4d332b706dad81a75154a96",
       "fixtureSHA256": "f912df090a009597e326cc7df873addc242be2400e8645f5c654c2b168a081e2",
-      "sha256": "4351122f2bb0efb15efe696956efa13cacc4c8becc5e06e7cb04b3ddc538e4f1"
+      "sha256": "4351122f2bb0efb15efe696956efa13cacc4c8becc5e06e7cb04b3ddc538e4f1",
+      "fixture": "HerdrUITests/Fixtures/desktop-reference-agents.json",
+      "avatars": {
+        "images": [],
+        "mascots": []
+      }
+    },
+    {
+      "file": "ref-ipad-pro-13-sessions.png",
+      "state": "sessions",
+      "device": "ipad-pro-13",
+      "simulator": "iPad Pro 13-inch (M5)",
+      "points": {
+        "width": 1376,
+        "height": 1032
+      },
+      "pixels": {
+        "width": 2752,
+        "height": 2064
+      },
+      "scale": 2,
+      "orientation": "landscape",
+      "appearance": "dark",
+      "dynamicTypeSize": "UICTContentSizeCategoryL",
+      "statusBar": {
+        "heightPoints": 32.0,
+        "safeAreaTopPoints": 32.0,
+        "override": "xcrun simctl status_bar <udid> override --time 9:41 --batteryLevel 100 --batteryState charged --cellularMode notSupported --wifiBars 3",
+        "date": "Thu Oct 29"
+      },
+      "mockClock": "2026-10-28T09:41:00Z",
+      "herdrupCommit": "2d8e3792954d64b356feb3a96b5def1404ab43b5",
+      "ciRun": "https://github.com/themartianapp/herdrup/actions/runs/40896841718",
+      "fixture": "HerdrUITests/Fixtures/desktop-reference-sessions.json",
+      "fixtureSHA256": "e600054d6595f7df0abeb3ed56cfa3f346c919cf093a18c32f9f20226dd328bd",
+      "avatars": {
+        "images": [],
+        "mascots": []
+      },
+      "sha256": "31576a3f46765ffac7b5049b6843b8c3f575eeb6e7f87bf1a54573e64c7f9d9f"
     }
-  ]
+  ],
+  "avatarImage": {
+    "file": "HerdrUITests/Fixtures/desktop-reference-avatar.png",
+    "sha256": "e4d4139d5914062cd06d5b6cbd8ade1d5fddf83c20ee575d4d83b8d81de38a4a",
+    "bytes": 559,
+    "pixels": {
+      "width": 256,
+      "height": 256
+    },
+    "mime": "image/png",
+    "usedBy": [
+      "avatars"
+    ]
+  },
+  "servedFixtures": {
+    "folders": {
+      "file": "HerdrUITests/Fixtures/desktop-reference-folders.json",
+      "sha256": "7688f3779c18e297213dd1248be390728857c228460aa6ae04cf70b06650cf84"
+    },
+    "avatars": {
+      "file": "HerdrUITests/Fixtures/desktop-reference-avatars.json",
+      "sha256": "1dcc6889466fecc87efd23bca7bc2dee6cdde450a4e75d601a7e5a28eb879592"
+    },
+    "sessions": {
+      "file": "HerdrUITests/Fixtures/desktop-reference-sessions.json",
+      "sha256": "e600054d6595f7df0abeb3ed56cfa3f346c919cf093a18c32f9f20226dd328bd"
+    },
+    "federated": {
+      "file": "HerdrUITests/Fixtures/desktop-reference-federated.json",
+      "sha256": "0445d1690258871aac0048c1c9f77f71dfe0476808738fbc6744eb641ae1c2ad"
+    },
+    "needs-you": {
+      "file": "HerdrUITests/Fixtures/desktop-reference-needs-you.json",
+      "sha256": "101ad2cba65a1a12b77ed32ae3bfbbf13da2a34d90b5a75d9021a5bcfaee2856"
+    }
+  },
+  "ciRunNote": "ciRun and herdrupCommit at the top are the run and head of the six states first committed (#564). A file entry with its own ciRun and herdrupCommit was produced by that run: the served states come from run 40896841718 (head 2d8e3792).",
+  "mockClockNote": "Every state, old and new, is captured at the pinned clock 2026-10-28T09:41:00Z (HERDR_MOCK_NOW); no state needs another. The fakeherdr fixture has no status_since_unix_ms, so the first six states draw no age. Every agent in the served fixtures has an absolute status_since_unix_ms, the clock (1793180460000) minus a fixed number of minutes, so its row draws a fixed age.",
+  "avatarsNote": "Per file, avatars lists every agent with an uploaded image (by sha256) and every agent wearing a mascot (by mascot id). Every other agent draws its initial tile."
 }
