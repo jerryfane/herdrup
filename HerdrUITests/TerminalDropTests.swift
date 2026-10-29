@@ -9,10 +9,6 @@ import UIKit
 /// drag from ANOTHER app (Finder, Files) cannot be synthesised by XCUITest, so the source
 /// is in-process; the drop target, the providers and the composer path are the real ones.
 final class TerminalDropTests: TerminalInteractionTestCase {
-    private var terminal: XCUIElement {
-        app.descendants(matching: .any).matching(identifier: "terminal-surface").firstMatch
-    }
-
     private func source(_ identifier: String) -> XCUIElement {
         app.descendants(matching: .any).matching(identifier: identifier).firstMatch
     }
