@@ -93,9 +93,9 @@ jobs:
       - name: Generate project
         run: xcodegen generate
 
-      # THE RUNTIME IMAGE IS CACHED: the .dmg `-downloadPlatform -exportPath` writes, which
-      # `-importPlatform` installs. A fixed key, because one runtime build is one file; the
-      # image and Xcode do not change what it holds.
+      # Cache the complete exported runtime bundle, including its metadata.
+      # Xcode 27's -exportPath writes an .exportedBundle directory, not a .dmg.
+      # -importPlatform consumes that bundle on a fresh runner.
       - name: Restore the iOS ${{ env.RUNTIME_VERSION }} runtime image
         id: runtime_cache
         uses: actions/cache/restore@v4
@@ -117,13 +117,13 @@ jobs:
       - name: Install the iOS ${{ env.RUNTIME_VERSION }} runtime
         run: |
           set -o pipefail
-          images=("$RUNTIME_DIR"/*.dmg)
-          if [ "${#images[@]}" -ne 1 ] || [ ! -f "${images[0]}" ]; then
-            echo "::error::expected one runtime .dmg in $RUNTIME_DIR"; ls -l "$RUNTIME_DIR"; exit 1
+          bundles=("$RUNTIME_DIR"/*.exportedBundle)
+          if [ "${#bundles[@]}" -ne 1 ] || [ ! -d "${bundles[0]}" ]; then
+            echo "::error::expected one runtime .exportedBundle in $RUNTIME_DIR"; ls -l "$RUNTIME_DIR"; exit 1
           fi
-          ls -l "${images[0]}"
+          ls -l "${bundles[0]}"
           start=$(date +%s)
-          xcodebuild -importPlatform "${images[0]}" 2>&1 | tail -20
+          xcodebuild -importPlatform "${bundles[0]}" 2>&1 | tail -20
           echo "imported in $(( $(date +%s) - start )) s"
           # The runtime appears once CoreSimulator has mounted the image.
           for _ in $(seq 1 24); do
