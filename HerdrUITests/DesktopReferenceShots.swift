@@ -165,11 +165,13 @@ final class DesktopReferenceShots: XCTestCase {
         let pill = element(app, "needs-you-pill")
         XCTAssertFalse(pill.exists, "no pill while the waiting rows are on screen")
         // The end of the list, not a drag distance: the one scroll position every run, and
-        // the desktop, can reach exactly.
+        // the desktop, can reach exactly. Working rows sort by pane id as strings (no
+        // completed turns), so the last row is auth, w2:p9. Once it is on screen, three more
+        // swipes pin the list against its end.
         let roster = app.scrollViews["agent-roster-scroll"]
-        let last = row(app, "w2:p20")
-        for _ in 0..<10 where !(last.exists && last.isHittable) { roster.swipeUp() }
-        roster.swipeUp()
+        let last = row(app, "w2:p9")
+        for _ in 0..<12 where !(last.exists && last.isHittable) { roster.swipeUp() }
+        for _ in 0..<3 { roster.swipeUp() }
         XCTAssertTrue(last.waitForHittable(timeout: 5), "the last row should be on screen")
         XCTAssertTrue(pill.waitForExistence(timeout: 5), "the pill should show once the waiting rows are out of sight")
         XCTAssertEqual(pill.label, "3 agents need you")
