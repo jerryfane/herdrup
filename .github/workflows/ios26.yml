@@ -130,8 +130,9 @@ jobs:
             RUNTIME=$(xcrun simctl list runtimes --json | python3 -c '
           import json, os, sys
           wanted = os.environ["RUNTIME_VERSION"]
+          identifier = "com.apple.CoreSimulator.SimRuntime.iOS-" + wanted.replace(".", "-")
           for runtime in json.load(sys.stdin)["runtimes"]:
-              if runtime.get("platform") == "iOS" and runtime["version"] == wanted and runtime.get("isAvailable"):
+              if runtime["identifier"] == identifier and runtime["version"] == wanted and runtime.get("isAvailable"):
                   print(runtime["identifier"])
                   break
           ')
