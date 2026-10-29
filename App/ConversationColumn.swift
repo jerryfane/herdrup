@@ -104,7 +104,7 @@ private struct ConversationColumnResizing: ViewModifier {
 
     func body(content: Content) -> some View {
         content
-            // The width the column can take, for the UI tests (`gram-width-area`).
+            // The width the column can take, for the UI tests (`chat-width-area`, `gram-width-area`).
             .background(alignment: .top) { widthProbe("\(surface.rawValue)-width-area") }
             .overlay {
                 if sizeClass == .regular, available > 0 {

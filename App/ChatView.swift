@@ -634,7 +634,6 @@ struct ChatView: View {
         }
         // The resizer's width is the chat's whole width: the most the column can take.
         .conversationColumnResizer(.chat)
-        .background { probe("chat-area", "Chat area") }
         .task(id: model.loaded) {
             guard model.loaded, !landed, findRequest == nil else { return }
             for _ in 0..<8 {
@@ -968,20 +967,6 @@ struct ChatView: View {
         if ScreenshotMock.mode != nil {
             ChatCopyProbe()
             ChatRowRenderProbe()
-        }
-        #endif
-    }
-
-    /// UI tests measure the chat's whole width (`chat-area`: `chat-view`'s own frame spans its
-    /// scrolled-away content); the column is `chat-column` (`conversationColumn`).
-    @ViewBuilder private func probe(_ identifier: String, _ label: String) -> some View {
-        #if DEBUG
-        if ScreenshotMock.mode != nil {
-            Color.clear
-                .accessibilityElement()
-                .accessibilityIdentifier(identifier)
-                .accessibilityLabel(label)
-                .allowsHitTesting(false)
         }
         #endif
     }
