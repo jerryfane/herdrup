@@ -7963,10 +7963,9 @@ struct SettingsView: View {
     /// What the machine is called: the saved nickname when there is one, else the host.
     private var machineName: String { guestMachineLabel.isEmpty ? host : guestMachineLabel }
 
-    /// "Connected · 14 agents", naming the machines too once peers are federated.
+    /// "Connected · 14 agents". The machine count and reach are the Federation footer's.
     private var machineCardStatus: String {
         var parts = [connected ? "Connected" : "Disconnected"]
-        if machineCount > 1 { parts.append("\(machineCount) machines") }
         parts.append("\(agents.count) agent\(agents.count == 1 ? "" : "s")")
         return parts.joined(separator: " · ")
     }
@@ -8129,7 +8128,7 @@ struct SettingsView: View {
             pageRow(.textSize, value: "\(Int((uiFontScale * 100).rounded()))% · \(String(format: "%g", terminalFontSize)) pt")
             glyphDivider
             glyphRow("Instant typing", systemImage: "keyboard",
-                     subtitle: "Shows what you type at once and checks it against the server. Off: wait for the server's echo.") {
+                     subtitle: "Shows what you type at once and checks it against the server.") {
                 menuPicker("Instant typing", value: predictiveEchoLabel, identifier: "settings-instant-typing") {
                     Picker("Instant typing", selection: $predictiveEcho) {
                         Text("Auto").tag(PredictionEngine.Mode.auto.rawValue)
@@ -8142,7 +8141,7 @@ struct SettingsView: View {
             // "omp agents open in": Chat (default) or Terminal (#481). The page's switch
             // overrides it per agent for the session.
             glyphRow("omp agents open in", systemImage: "bubble.left.and.bubble.right",
-                     subtitle: "Chat shows omp's replies, thinking and steps as a conversation. Claude Code and Codex agents always open in the terminal.") {
+                     subtitle: "Claude Code and Codex agents always open in the terminal.") {
                 menuPicker("omp agents open in", value: ompOpensIn == ChatPreference.terminal ? "Terminal" : "Chat",
                            identifier: "settings-omp-opens-in") {
                     Picker("omp agents open in", selection: $ompOpensIn) {
@@ -8393,9 +8392,9 @@ struct SettingsView: View {
     /// "N of 4 alerts on" — the Notifications detail-header subtitle.
     private var notifyHeaderSubtitle: String { "\(notifyOnCount) of 4 alerts on" }
 
-    /// "N on · blocked" (amber) when iOS is blocking, else "N of 4 on".
+    /// "N on · blocked" (amber) when iOS is blocking, else "N of 4".
     private var notifyManageValue: String {
-        notifyBlocked ? "\(notifyOnCount) on · blocked" : "\(notifyOnCount) of 4 on"
+        notifyBlocked ? "\(notifyOnCount) on · blocked" : "\(notifyOnCount) of 4"
     }
     private var notifyManageTint: Color { notifyBlocked ? Palette.waiting : Palette.textDim }
 
@@ -9123,8 +9122,8 @@ struct SettingsView: View {
             glyphRow("Run JavaScript in previews",
                      systemImage: previewJavaScript ? "exclamationmark.triangle" : "chevron.left.forwardslash.chevron.right",
                      subtitle: previewJavaScript
-                         ? "On: scripts in a previewed file will run. It still can't load anything from the network or open another page, but a file written to do so could signal that you opened it. Applies to the next preview you open."
-                         : "Off: scripts in a previewed file are ignored, and it can't load anything from the network. Turn this on only for a file you trust that needs to be interactive.") {
+                         ? "On: scripts in a previewed file will run. A file written to do so could signal that you opened it."
+                         : "Off: scripts in a previewed file are ignored.") {
                 Toggle("", isOn: .constant(previewJavaScript))
                     .labelsHidden()
                     .tint(Palette.brand)
