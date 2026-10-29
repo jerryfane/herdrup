@@ -569,6 +569,24 @@ case "$shard" in
       stop_recording
     fi
     ;;
+  # SCRATCH (xcode27-duo-scratch-ios26, never merged): the classes #577's app changes touch,
+  # on iOS 26.5, because the Xcode 27 image has no iOS 26 runtime of its own.
+  ios26-iphone)
+    run_suite iPhone26ChatUX "$IPHONE_UDID" 25m -only-testing:HerdrUITests/ChatUXSmokeTests || failed=1
+    run_suite iPhone26Resize "$IPHONE_UDID" 40m -only-testing:HerdrUITests/TerminalResizeTests || failed=1
+    run_suite iPhone26Gram "$IPHONE_UDID" 25m -only-testing:HerdrUITests/GramTests || failed=1
+    run_suite iPhone26Paging "$IPHONE_UDID" 10m -only-testing:HerdrUITests/PagingTests || failed=1
+    ;;
+  ios26-ipad)
+    boot_simulator "$IPAD_UDID" TestReceipts/iPad26-recording-boot.log || exit 1
+    xcrun simctl io "$IPAD_UDID" recordVideo TestReceipts/iPad26.mp4 > TestReceipts/iPad26-video.log 2>&1 &
+    recorder=$!
+    run_suite iPad26ChatUX "$IPAD_UDID" 25m -only-testing:HerdrUITests/ChatUXSmokeTests || failed=1
+    run_suite iPad26GramColumn "$IPAD_UDID" 15m -only-testing:HerdrUITests/GramColumnTests || failed=1
+    run_suite iPad26Resize "$IPAD_UDID" 25m -only-testing:HerdrUITests/TerminalResizeTests || failed=1
+    run_suite iPad26AgentListChrome "$IPAD_UDID" 10m -only-testing:HerdrUITests/AgentListChromeTests || failed=1
+    stop_recording
+    ;;
   *)
     echo "::error::unknown shard $shard"
     exit 1

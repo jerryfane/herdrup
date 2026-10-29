@@ -136,7 +136,8 @@ jobs:
       # Every shard reports its own evidence even when another shard fails.
       fail-fast: false
       matrix:
-        shard: ${{ fromJSON(github.event.inputs.only_suite == '' && '["iphone-terminal","iphone-app","ipad","settings-gram"]' || '["focused"]') }}
+        # SCRATCH (xcode27-duo-scratch-ios26, never merged): the #577 app changes on iOS 26.
+        shard: ["ios26-iphone", "ios26-ipad"]
     # Worst test/build rounds (iPad), including Chat UX and Gram column: 25 + 20 + 5 + 5 + 20 + 10,
     # SwiftTerm build 10 + test 15, six 10-min diagnostic rounds + SwiftTerm's 15 = 185m.
     # At most nine boot checks: first 10m, next eight 5m, each with 15s kill grace.
@@ -172,6 +173,13 @@ jobs:
         run: |
           echo "Xcodes present:"; ls -d /Applications/Xcode*.app || true
           sudo xcode-select -s /Applications/Xcode.app; xcodebuild -version
+          # SCRATCH: smoke of the TestFlight pre-release guard (ff73dc4) on this image.
+          RESOLVED=$(cd /Applications/Xcode.app && pwd -P); echo "Xcode.app resolves to $RESOLVED"
+          case "$RESOLVED" in *[Bb]eta*|*Release_Candidate*) echo "::error::pre-release: $RESOLVED"; exit 1 ;; esac
+          for app in /Applications/Xcode_27.2.app /Applications/Xcode_27.1.app; do
+            r=$(cd "$app" 2>/dev/null && pwd -P) || continue
+            case "$r" in *[Bb]eta*|*Release_Candidate*) echo "guard: $app -> $r REJECT" ;; *) echo "guard: $app -> $r ok" ;; esac
+          done
           SDK=$(xcodebuild -showsdks | grep -oE 'iphonesimulator[0-9.]+' | sed 's/iphonesimulator//' | sort -V | tail -1)
           echo "newest iOS simulator SDK: ${SDK:-<none>}"
           if [ -z "$SDK" ] || [ "$(printf '%s\n27.1\n' "$SDK" | sort -V | head -1)" != "27.1" ]; then
@@ -197,6 +205,15 @@ jobs:
       - name: Generate project
         run: xcodegen generate
 
+      - name: SCRATCH download the iOS 26.5 simulator runtime and its devices
+        run: |
+          xcodebuild -downloadPlatform iOS -buildVersion 26.5 2>&1 | grep -v -E '^Downloading .*%' | tail -5
+          RT=$(xcrun simctl list runtimes | grep -oE 'com\.apple\.CoreSimulator\.SimRuntime\.iOS-26-[0-9-]+' | sort -V | tail -1)
+          echo "runtime: ${RT:-none}"; [ -n "$RT" ] || exit 1
+          for t in "iPhone 17 Pro" "iPhone 17" "iPhone 16 Pro"; do xcrun simctl create "hd26 $t" "$t" "$RT" && break; done
+          for t in "iPad Pro 13-inch (M5)" "iPad Pro 13-inch (M4)"; do xcrun simctl create "hd26 $t" "$t" "$RT" && break; done
+          xcrun simctl list devices | grep -A8 -- "-- iOS 26"
+
       - name: Select required iPhone and iPad simulators
         id: simulators
         run: |
@@ -212,6 +229,7 @@ jobs:
               for name in devices
               if (match := re.fullmatch(r"com\.apple\.CoreSimulator\.SimRuntime\.iOS-(\d+(?:-\d+)*)", name))
           ]
+          runtimes = [entry for entry in runtimes if entry[0][0] == 26]  # SCRATCH: iOS 26 only
           def usable(name):
               available = [device for device in devices[name] if device.get("isAvailable", True)]
               phones = [device for device in available if device["name"].startswith("iPhone")
