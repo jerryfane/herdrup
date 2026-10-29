@@ -2424,6 +2424,14 @@ struct TerminalHomeView: View {
                 if columnVisibility == .detailOnly { sidebarRail }
                 detailColumn
             }
+            // A floor under the detail column, so a window just wider than two columns keeps
+            // them side by side. Without it the split's automatic minimum for the detail does
+            // not fit beside the 320 pt sidebar: on iOS 27 a 715 pt iPad window (full screen
+            // dragged into a window) went secondaryOnly, `columnVisibility` became
+            // `.detailOnly` and the sidebar collapsed to the rail (CI 40847167282). The same
+            // floor keeps the columns side by side on iPhone Duo held tall (669 pt).
+            .navigationSplitViewColumnWidth(min: DesignTokens.Size.sidebarMin,
+                                            ideal: DesignTokens.Size.sidebarMin)
             // NO SIZE CONTRACT IS ADDED HERE, AND THE ONE I TRIED IS WITHDRAWN.
             //
             // It was `.frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)`,
