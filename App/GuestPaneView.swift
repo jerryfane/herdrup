@@ -95,6 +95,7 @@ struct GuestPaneView: View {
     @State private var forbiddenProbe = ""
     @State private var hostCallsProbe = ""
     @State private var streamOpensProbe = ""
+    @State private var delayedDropCompletion: ((Data?, Error?) -> Void)?
     #endif
 
     /// The owner shares this agent's Gram with the guest (the host's hello says so).
@@ -939,6 +940,36 @@ struct GuestPaneView: View {
                 .accessibilityLabel(streamOpensProbe)
         }
         .frame(width: 1, height: 1)
+        .overlay(alignment: .topLeading) {
+            if ProcessInfo.processInfo.environment["HERDR_MOCK_DELAYED_DROP"] == "1" {
+                HStack {
+                    Button("Drop file") {
+                        let provider = NSItemProvider()
+                        provider.suggestedName = "delayed-report.pdf"
+                        provider.registerDataRepresentation(
+                            forTypeIdentifier: "com.adobe.pdf", visibility: .all
+                        ) { completion in
+                            Task { @MainActor in delayedDropCompletion = completion }
+                            return nil
+                        }
+                        acceptDroppedFiles([provider])
+                    }
+                    .accessibilityIdentifier("guest-fixture-drop-file")
+                    Button("Finish staging") {
+                        let completion = delayedDropCompletion
+                        delayedDropCompletion = nil
+                        completion?(Data("%PDF-1.4 delayed drop\n".utf8), nil)
+                    }
+                    .disabled(delayedDropCompletion == nil)
+                    .accessibilityIdentifier("guest-fixture-finish-staging")
+                    Button("Send shortcut") { send() }
+                        .accessibilityIdentifier("guest-fixture-send-shortcut")
+                }
+                .buttonStyle(.bordered)
+                .fixedSize()
+                .offset(x: 12, y: 80)
+            }
+        }
         .task {
             while !Task.isCancelled {
                 forbiddenProbe = GuestMockTransport.forbiddenCalls.joined(separator: ",")
