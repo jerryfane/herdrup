@@ -195,7 +195,6 @@ struct SectionTopBar<Leading: View, Actions: View>: View {
         }
         .frame(height: DesignTokens.Size.topBar)
         .topEdgeClearance(base: 6, rowHeight: DesignTokens.Size.topBarRow)
-        .duoProbe("topBar \(title)")
         .padding(.horizontal, DesignTokens.Space.screenInset)
         .padding(.bottom, 8)
     }

@@ -624,7 +624,6 @@ struct GramView: View {
         .topEdgeClearance(base: 8, rowHeight: 44)
         .padding(.bottom, 6)
         .frame(maxWidth: .infinity)
-        .duoProbe("gramHeader")
     }
 
     /// The header's inline field, shared with the terminal pane (`InlineSearchField`).
@@ -715,7 +714,6 @@ struct GramView: View {
         // Off the glass on iPhone Duo's cover, whose status bar is on the side (top inset 0).
         .topEdgeClearance(base: 4, rowHeight: 44)
         .padding(.bottom, 8)
-        .duoProbe("gramHeader")
     }
 
     /// The unread count, when there is one.
