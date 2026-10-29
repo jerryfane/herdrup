@@ -45,7 +45,8 @@
       "avatars": {
         "images": [],
         "mascots": []
-      }
+      },
+      "runtime": "iOS 26.5 (com.apple.CoreSimulator.SimRuntime.iOS-26-5)"
     },
     {
       "file": "ref-ipad-11-archived-expanded.png",
@@ -78,7 +79,8 @@
       "avatars": {
         "images": [],
         "mascots": []
-      }
+      },
+      "runtime": "iOS 26.5 (com.apple.CoreSimulator.SimRuntime.iOS-26-5)"
     },
     {
       "file": "ref-ipad-11-avatars.png",
@@ -125,7 +127,9 @@
           }
         ]
       },
-      "sha256": "9e694b1db90b6c478543df2358fdc07560d4742eea5d4e455f94c317fcf49175"
+      "sha256": "9e694b1db90b6c478543df2358fdc07560d4742eea5d4e455f94c317fcf49175",
+      "runtime": "iOS 26.5 (com.apple.CoreSimulator.SimRuntime.iOS-26-5)",
+      "xcode": "26.6"
     },
     {
       "file": "ref-ipad-11-empty.png",
@@ -158,7 +162,8 @@
       "avatars": {
         "images": [],
         "mascots": []
-      }
+      },
+      "runtime": "iOS 26.5 (com.apple.CoreSimulator.SimRuntime.iOS-26-5)"
     },
     {
       "file": "ref-ipad-11-federated.png",
@@ -192,7 +197,9 @@
         "images": [],
         "mascots": []
       },
-      "sha256": "741fa50a04d6111a1ede93f92a5aca66cf2724daac49e1865d2c738830e830e1"
+      "sha256": "741fa50a04d6111a1ede93f92a5aca66cf2724daac49e1865d2c738830e830e1",
+      "runtime": "iOS 26.5 (com.apple.CoreSimulator.SimRuntime.iOS-26-5)",
+      "xcode": "26.6"
     },
     {
       "file": "ref-ipad-11-folders.png",
@@ -226,7 +233,9 @@
         "images": [],
         "mascots": []
       },
-      "sha256": "b5878c1aac56841a390833be876017b613941bc0cbe3016531ec8196096056d9"
+      "sha256": "b5878c1aac56841a390833be876017b613941bc0cbe3016531ec8196096056d9",
+      "runtime": "iOS 26.5 (com.apple.CoreSimulator.SimRuntime.iOS-26-5)",
+      "xcode": "26.6"
     },
     {
       "file": "ref-ipad-11-idle-expanded.png",
@@ -259,7 +268,8 @@
       "avatars": {
         "images": [],
         "mascots": []
-      }
+      },
+      "runtime": "iOS 26.5 (com.apple.CoreSimulator.SimRuntime.iOS-26-5)"
     },
     {
       "file": "ref-ipad-11-loading.png",
@@ -292,7 +302,8 @@
       "avatars": {
         "images": [],
         "mascots": []
-      }
+      },
+      "runtime": "iOS 26.5 (com.apple.CoreSimulator.SimRuntime.iOS-26-5)"
     },
     {
       "file": "ref-ipad-11-needs-you-pill.png",
@@ -326,7 +337,9 @@
         "images": [],
         "mascots": []
       },
-      "sha256": "95812e7d127d53104706675bcc4663db6376852f24e58f3fcca213e59a1e65b7"
+      "sha256": "95812e7d127d53104706675bcc4663db6376852f24e58f3fcca213e59a1e65b7",
+      "runtime": "iOS 26.5 (com.apple.CoreSimulator.SimRuntime.iOS-26-5)",
+      "xcode": "26.6"
     },
     {
       "file": "ref-ipad-11-needs-you-rail.png",
@@ -360,7 +373,9 @@
         "images": [],
         "mascots": []
       },
-      "sha256": "577bab5bb53039c4612a5d92de03f8d8fac71dd06d0fa5aea795fce6d4d8ac2f"
+      "sha256": "577bab5bb53039c4612a5d92de03f8d8fac71dd06d0fa5aea795fce6d4d8ac2f",
+      "runtime": "iOS 26.5 (com.apple.CoreSimulator.SimRuntime.iOS-26-5)",
+      "xcode": "26.6"
     },
     {
       "file": "ref-ipad-11-populated.png",
@@ -393,7 +408,8 @@
       "avatars": {
         "images": [],
         "mascots": []
-      }
+      },
+      "runtime": "iOS 26.5 (com.apple.CoreSimulator.SimRuntime.iOS-26-5)"
     },
     {
       "file": "ref-ipad-11-sessions.png",
@@ -427,7 +443,9 @@
         "images": [],
         "mascots": []
       },
-      "sha256": "73da2f6d4c1961ed97bc3613c68f48bb68f3eb6074d4ec2a86f35e32c12433b2"
+      "sha256": "73da2f6d4c1961ed97bc3613c68f48bb68f3eb6074d4ec2a86f35e32c12433b2",
+      "runtime": "iOS 26.5 (com.apple.CoreSimulator.SimRuntime.iOS-26-5)",
+      "xcode": "26.6"
     },
     {
       "file": "ref-ipad-pro-13-all-expanded.png",
@@ -460,7 +478,8 @@
       "avatars": {
         "images": [],
         "mascots": []
-      }
+      },
+      "runtime": "iOS 26.5 (com.apple.CoreSimulator.SimRuntime.iOS-26-5)"
     },
     {
       "file": "ref-ipad-pro-13-archived-expanded.png",
@@ -493,7 +512,8 @@
       "avatars": {
         "images": [],
         "mascots": []
-      }
+      },
+      "runtime": "iOS 26.5 (com.apple.CoreSimulator.SimRuntime.iOS-26-5)"
     },
     {
       "file": "ref-ipad-pro-13-avatars.png",
@@ -540,7 +560,9 @@
           }
         ]
       },
-      "sha256": "20271fbb4de70e5807b47d1dfd7b126df5c77eedb66233ca4272f71acfb9e736"
+      "sha256": "20271fbb4de70e5807b47d1dfd7b126df5c77eedb66233ca4272f71acfb9e736",
+      "runtime": "iOS 26.5 (com.apple.CoreSimulator.SimRuntime.iOS-26-5)",
+      "xcode": "26.6"
     },
     {
       "file": "ref-ipad-pro-13-empty.png",
@@ -573,7 +595,8 @@
       "avatars": {
         "images": [],
         "mascots": []
-      }
+      },
+      "runtime": "iOS 26.5 (com.apple.CoreSimulator.SimRuntime.iOS-26-5)"
     },
     {
       "file": "ref-ipad-pro-13-federated.png",
@@ -607,7 +630,9 @@
         "images": [],
         "mascots": []
       },
-      "sha256": "0948e86fbeb7ab0694c4449d64ee1353fca69e60e65850aa1342383fb147738f"
+      "sha256": "0948e86fbeb7ab0694c4449d64ee1353fca69e60e65850aa1342383fb147738f",
+      "runtime": "iOS 26.5 (com.apple.CoreSimulator.SimRuntime.iOS-26-5)",
+      "xcode": "26.6"
     },
     {
       "file": "ref-ipad-pro-13-folders.png",
@@ -641,7 +666,9 @@
         "images": [],
         "mascots": []
       },
-      "sha256": "5e09caca1cd12ac1d2ca3cfbb3000ba900ef5ba7c5e2181c5057c56b310ebae0"
+      "sha256": "5e09caca1cd12ac1d2ca3cfbb3000ba900ef5ba7c5e2181c5057c56b310ebae0",
+      "runtime": "iOS 26.5 (com.apple.CoreSimulator.SimRuntime.iOS-26-5)",
+      "xcode": "26.6"
     },
     {
       "file": "ref-ipad-pro-13-idle-expanded.png",
@@ -674,7 +701,8 @@
       "avatars": {
         "images": [],
         "mascots": []
-      }
+      },
+      "runtime": "iOS 26.5 (com.apple.CoreSimulator.SimRuntime.iOS-26-5)"
     },
     {
       "file": "ref-ipad-pro-13-loading.png",
@@ -707,7 +735,8 @@
       "avatars": {
         "images": [],
         "mascots": []
-      }
+      },
+      "runtime": "iOS 26.5 (com.apple.CoreSimulator.SimRuntime.iOS-26-5)"
     },
     {
       "file": "ref-ipad-pro-13-needs-you-pill.png",
@@ -741,7 +770,9 @@
         "images": [],
         "mascots": []
       },
-      "sha256": "7ff4e8e39c212bf84566d8fea6231307542cd534866d5f73b0e30b67474633b4"
+      "sha256": "7ff4e8e39c212bf84566d8fea6231307542cd534866d5f73b0e30b67474633b4",
+      "runtime": "iOS 26.5 (com.apple.CoreSimulator.SimRuntime.iOS-26-5)",
+      "xcode": "26.6"
     },
     {
       "file": "ref-ipad-pro-13-needs-you-rail.png",
@@ -775,7 +806,9 @@
         "images": [],
         "mascots": []
       },
-      "sha256": "c092cd16616a72c6d71ef7b10bd697c75b301ac0a41a8955eb0fb493a9c3bbb1"
+      "sha256": "c092cd16616a72c6d71ef7b10bd697c75b301ac0a41a8955eb0fb493a9c3bbb1",
+      "runtime": "iOS 26.5 (com.apple.CoreSimulator.SimRuntime.iOS-26-5)",
+      "xcode": "26.6"
     },
     {
       "file": "ref-ipad-pro-13-populated.png",
@@ -808,7 +841,8 @@
       "avatars": {
         "images": [],
         "mascots": []
-      }
+      },
+      "runtime": "iOS 26.5 (com.apple.CoreSimulator.SimRuntime.iOS-26-5)"
     },
     {
       "file": "ref-ipad-pro-13-sessions.png",
@@ -842,7 +876,9 @@
         "images": [],
         "mascots": []
       },
-      "sha256": "31576a3f46765ffac7b5049b6843b8c3f575eeb6e7f87bf1a54573e64c7f9d9f"
+      "sha256": "31576a3f46765ffac7b5049b6843b8c3f575eeb6e7f87bf1a54573e64c7f9d9f",
+      "runtime": "iOS 26.5 (com.apple.CoreSimulator.SimRuntime.iOS-26-5)",
+      "xcode": "26.6"
     }
   ],
   "avatarImage": {
@@ -882,5 +918,6 @@
   },
   "ciRunNote": "ciRun and herdrupCommit at the top are the run and head of the six states first committed (#564). A file entry with its own ciRun and herdrupCommit was produced by that run: the served states come from run 40896841718 (head 2d8e3792).",
   "mockClockNote": "Every state, old and new, is captured at the pinned clock 2026-10-28T09:41:00Z (HERDR_MOCK_NOW); no state needs another. The fakeherdr fixture has no status_since_unix_ms, so the first six states draw no age. Every agent in the served fixtures has an absolute status_since_unix_ms, the clock (1793180460000) minus a fixed number of minutes, so its row draws a fixed age.",
-  "avatarsNote": "Per file, avatars lists every agent with an uploaded image (by sha256) and every agent wearing a mascot (by mascot id). Every other agent draws its initial tile."
+  "avatarsNote": "Per file, avatars lists every agent with an uploaded image (by sha256) and every agent wearing a mascot (by mascot id). Every other agent draws its initial tile.",
+  "runtimeNote": "Each file records its simulator runtime and device model (runtime, simulator). The served states ran on Xcode 26.6 with the iOS 26.5 runtime (run 40896841718 log: SimRuntime.iOS-26-5). The first six states record the iOS 26.5 runtime from the top-level runtime field written by #564."
 }
