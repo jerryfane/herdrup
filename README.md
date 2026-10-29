@@ -274,6 +274,13 @@ Saved reads like the feed: oldest at the top, opening at the newest, older ones 
 Search filters the loaded messages, newest match at the bottom; scrolling to the top of the results (or
 “Search older messages” when none match) fetches older pages until another match turns up.
 
+Owner Gram downloads keep running when you switch to Agents. Returning while a download
+is running restores its progress ring; a file that finished while you were away opens
+from the download cache on the next tap without another transfer. Use **Cancel Download**
+in the message menu to stop it explicitly. Disconnecting, reconnecting, or switching
+sessions also cancels running downloads. This lifetime applies to the owner's Gram;
+guest file downloads still stop when their page disappears.
+
 Gram's composer is the terminal's: attach, mic and send sit where they do in a pane. Type @ to
 send to one agent: a “Send to one agent” list opens above the composer, and picking one puts a
 violet @name in the text, which addresses that exact agent and, when it leads, is not sent with
