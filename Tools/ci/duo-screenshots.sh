@@ -42,7 +42,11 @@ LAPTOP_ANGLE=130             # Device Hub's "Partially Open" preset
 TENT_ANGLES="80 60 45"       # tried in order until the cover stays active
 
 POSES="closed-portrait closed-landscape tent open open-rotated laptop"
-SCREENS="connect list pane gram settings onboarding"
+# split: the Agents home with an agent's terminal open beside the list (a notification tap
+# on w1:p1 fronts it). rail: the same with the list minimised to the icon rail, the
+# terminal at full width. gram-unread: Gram with fourteen read messages newer than the
+# three unread ones, so the opening position shows (the first unread, or the newest).
+SCREENS="connect list split rail pane gram gram-unread settings onboarding"
 
 mkdir -p "$OUT"
 OUT=$(cd "$OUT" && pwd)
@@ -122,7 +126,21 @@ launch() { # <screen>
     t 300 xcrun simctl install "$UDID" "$APP" || return 1
     t 60 xcrun simctl launch "$UDID" "$BUNDLE_ID" || return 1
   else
-    SIMCTL_CHILD_HERDR_SCREENSHOT_MOCK="$1" t 60 xcrun simctl launch "$UDID" "$BUNDLE_ID" || return 1
+    # The mock name, then any extra environment and launch arguments the screen needs.
+    # A subshell, so one screen's environment never reaches the next launch.
+    (
+      mock=$1; set --
+      case $mock in
+        split) mock=list; export SIMCTL_CHILD_HERDR_MOCK_PUSH_TAP='{"pane_id":"w1:p1"}' ;;
+        rail)
+          mock=list; export SIMCTL_CHILD_HERDR_MOCK_PUSH_TAP='{"pane_id":"w1:p1"}'
+          # The argument domain overrides the stored preference for this launch only.
+          set -- -ui.sidebarMinimized YES ;;
+        gram-unread) mock=gram; export SIMCTL_CHILD_HERDR_MOCK_GRAM_NEWER=1 ;;
+      esac
+      export SIMCTL_CHILD_HERDR_SCREENSHOT_MOCK=$mock
+      t 60 xcrun simctl launch "$UDID" "$BUNDLE_ID" ${1+"$@"}
+    ) || return 1
   fi
   sleep "$SETTLE"
 }
