@@ -263,6 +263,21 @@ final class GramDownloadStoreTests: XCTestCase {
         XCTAssertNil(store.takeFailure(), "reported once")
     }
 
+    /// Disconnect, reconnect and session switch all reset this root-owned store. An error
+    /// from a download that failed on Agents belongs to that connection, not the next one.
+    func testConnectionResetDiscardsAFailureWhileAway() async {
+        let store = GramDownloadStore()
+        store.start(id: "old-session-file", purpose: .save, expectedBytes: nil,
+                    transfer: transfer("old-session-file"))
+        await until("the hidden page's download starts") { started == ["old-session-file"] }
+        await fail("old-session-file")
+        await until("the failed download has ended") { store.held == nil }
+
+        store.cancelAll()
+
+        XCTAssertNil(store.takeFailure(), "returning to Gram must not report the previous connection's failure")
+    }
+
     /// The ring's progress: the held download's only, whole percents, never backwards, and
     /// never past the end.
     func testProgressDrawsOnlyTheHeldDownloadAndNeverRunsBackwards() async {
