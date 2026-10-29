@@ -157,9 +157,11 @@ public final class GramDownloadStore {
         entry.task?.cancel()
     }
 
-    /// The session ended (disconnect, sign-out, another session): every transfer stops.
+    /// The session ended (disconnect, sign-out, another session): every transfer stops,
+    /// and an unreported failure from that connection must not follow the reader into the next.
     public func cancelAll() {
         for id in Array(entries.keys) { cancel(id: id) }
+        unreported = nil
     }
 
     // MARK: - Transfers

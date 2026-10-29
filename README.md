@@ -278,8 +278,9 @@ Owner Gram downloads keep running when you switch to Agents. Returning while a d
 is running restores its progress ring; a file that finished while you were away opens
 from the download cache on the next tap without another transfer. Use **Cancel Download**
 in the message menu to stop it explicitly. Disconnecting, reconnecting, or switching
-sessions also cancels running downloads. This lifetime applies to the owner's Gram;
-guest file downloads still stop when their page disappears.
+sessions also cancels running downloads and discards errors deferred while you were away,
+so the next connection cannot show the previous connection's download failure. This lifetime
+applies to the owner's Gram; guest file downloads still stop when their page disappears.
 
 Gram's composer is the terminal's: attach, mic and send sit where they do in a pane. Type @ to
 send to one agent: a “Send to one agent” list opens above the composer, and picking one puts a
