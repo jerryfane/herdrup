@@ -104,7 +104,7 @@ private struct ConversationColumnResizing: ViewModifier {
 
     func body(content: Content) -> some View {
         content
-            // The width the column can take, for the UI tests (`chat-width-area`, `gram-width-area`).
+            // The width the column can take, for the UI tests (`gram-width-area`).
             .background(alignment: .top) { widthProbe("\(surface.rawValue)-width-area") }
             .overlay {
                 if sizeClass == .regular, available > 0 {
@@ -138,6 +138,8 @@ private struct ConversationColumnResizer: View {
     @State private var dragStartWidth: Double?
     @State private var readoutShown = false
     @State private var hideReadout: Task<Void, Never>?
+    /// A new readout per showing: see the overlay in `body`.
+    @State private var readoutShowing = 0
 
     /// The Mac: a pointer, so a narrower hit band and nothing drawn at rest.
     private static let onMac = ProcessInfo.processInfo.isiOSAppOnMac
@@ -164,9 +166,15 @@ private struct ConversationColumnResizer: View {
             handle(.trailing).offset(x: reach)
         }
         .frame(maxWidth: .infinity, maxHeight: .infinity)
+        // Each showing inserts a NEW readout (`id`). Re-showing the one that is fading out
+        // revived a view in its removal transition, and iOS 27 left it out for good: in CI
+        // 40850683066 a drag began 59 ms into the 0.15 s fade and the readout never came back.
+        // With a fresh identity the old one finishes fading while the new one fades in. It
+        // stays inserted and removed rather than kept transparent: an always-mounted readout
+        // stayed in the accessibility tree at rest despite `accessibilityHidden` (40865545206).
         .overlay(alignment: .top) {
             ZStack {
-                if readoutShown { readout.transition(.opacity) }
+                if readoutShown { readout.id(readoutShowing).transition(.opacity) }
             }
             .animation(reduceMotion ? nil : .easeOut(duration: 0.15), value: readoutShown)
         }
@@ -271,6 +279,7 @@ private struct ConversationColumnResizer: View {
     private func showReadout() {
         hideReadout?.cancel()
         hideReadout = nil
+        if !readoutShown { readoutShowing += 1 }
         readoutShown = true
     }
 
