@@ -458,8 +458,20 @@ case "$shard" in
       ipad) label=iPad; udid="$IPAD_UDID" ;;
       *)    label=iPhone; udid="$IPHONE_UDID" ;;
     esac
+    # The iPad as the ipad shard prepares it: boot, then the screen recorder, then the
+    # rounds. Focused iPad runs that went straight to the install (40822219713,
+    # 40823615938) hung in `simctl install` for its whole 5m on Xcode 27; the ipad shard,
+    # which starts the recorder first, installed the same build on the same device in
+    # 17 s (40794761077). The video is also the receipt a focused iPad run lacked.
+    if [ "$label" = iPad ]; then
+      boot_simulator "$udid" TestReceipts/iPad-focused-recording-boot.log || exit 1
+      xcrun simctl io "$udid" recordVideo TestReceipts/focused-iPad.mp4 \
+        > TestReceipts/focused-iPad-video.log 2>&1 &
+      recorder=$!
+    fi
     echo "::notice::focused dispatch: HerdrUITests/$ONLY_SUITE on $label only"
     run_suite "$label-$ONLY_SUITE" "$udid" 25m "-only-testing:HerdrUITests/$ONLY_SUITE" || failed=1
+    stop_recording
     ;;
   *)
     echo "::error::unknown shard $shard"
