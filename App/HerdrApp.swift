@@ -7580,18 +7580,11 @@ struct SettingsView: View {
     /// into a dead end. Refreshed on appear and on foreground (after a Settings trip).
     @State private var notifyAuth: UNAuthorizationStatus = .notDetermined
     @Environment(\.scenePhase) private var scenePhase
-    /// The connected daemon's version + any staged self-update, from `server.staged_update`.
-    /// Fetched by this view (`.task` below) with `try?`, so a daemon too old to know the method
-    /// (or a transient failure) simply leaves it nil — the version line and update callout then
-    /// don't render, exactly the pre-fork/older-daemon degrade the notify + accounts rows use.
+    /// The connected daemon's version + commit, from `server.staged_update` (its `staged` build is
+    /// retired: updates go through the herdr update card). Fetched by this view (`.task` below) with
+    /// `try?`, so a daemon too old to know the method (or a transient failure) simply leaves it nil —
+    /// the version line then doesn't render, the same degrade the notify + accounts rows use.
     @State private var stagedUpdate: StagedUpdate?
-    /// The "Update & restart the daemon?" confirmation (the apply restarts the daemon in place).
-    @State private var showUpdateConfirm = false
-    /// True while `server.apply_staged_update` is in flight and we re-poll for the swap to land.
-    @State private var applyingUpdate = false
-    /// The apply outcome, shown in an alert (nil = no alert). Distinguishes a clean update, a
-    /// partial disk-stale warning, a rolled-back failure, and an unconfirmed "still restarting".
-    @State private var updateResult: String?
     /// Settings → Shared access: guests, pending invites and the activity log, across machines.
     @StateObject private var guestAccess = GuestAccessModel()
     @Environment(\.guestMachineLabel) private var guestMachineLabel
@@ -7659,8 +7652,8 @@ struct SettingsView: View {
             // can still hold guests: read Shared access again once the profiles arrive.
             await loadGuestAccess()
         }
-        // Fetch the daemon version + any staged self-update. `try?` so an older daemon without
-        // `server.staged_update` leaves it nil (version line + update callout simply absent).
+        // Fetch the daemon version. `try?` so an older daemon without `server.staged_update`
+        // leaves it nil (the version line is simply absent).
         .task { stagedUpdate = try? await client.stagedUpdate() }
         // The Shared access row's summary; `try?`-style degrade lives in the model.
         .task { await loadGuestAccess() }
@@ -7722,29 +7715,6 @@ struct SettingsView: View {
             "Swap subscription",
             isPresented: $bulkResult.isPresent(),
             presenting: bulkResult
-        ) { _ in
-            Button("OK", role: .cancel) {}
-        } message: { result in
-            Text(result)
-        }
-        // Update & restart: confirm (it restarts the daemon in place — agents keep running via
-        // live-handoff), then apply and re-poll for the swap to land.
-        .confirmationDialog(
-            "Update & restart the daemon?",
-            isPresented: $showUpdateConfirm
-        ) {
-            Button("Update & restart") { applyUpdate() }
-            Button("Cancel", role: .cancel) {}
-        } message: {
-            if let staged = stagedUpdate?.staged {
-                Text("Swaps the daemon to build \(staged.sha) and restarts it in place. Your "
-                    + "agents keep running — their sessions are preserved across the restart.")
-            }
-        }
-        .alert(
-            "Daemon update",
-            isPresented: $updateResult.isPresent(),
-            presenting: updateResult
         ) { _ in
             Button("OK", role: .cancel) {}
         } message: { result in
@@ -8052,8 +8022,8 @@ struct SettingsView: View {
         }
     }
 
-    /// A quiet shortcut into Machines when the daemon has a staged update — the section that owns
-    /// the "Update & restart" action is one tap away (mirrors `glanceExhaustedRow`).
+    /// A quiet shortcut into Machines when the herdr update card asks for something — the section
+    /// that owns the card is one tap away (mirrors `glanceExhaustedRow`).
     private var glanceUpdateRow: some View {
         NavigationLink(value: SettingsSection.machines) {
             HStack(spacing: 10) {
@@ -8288,12 +8258,9 @@ struct SettingsView: View {
             }
             .settingsRowShell()
             .padding(.horizontal, 16).padding(.top, 10)   // align with the toggle/action rows
-            // The herdr update card replaces the staged-build callout on a server that can
-            // update itself; the callout stays for fleet servers that only stage builds.
+            // The herdr update card: signed in-app updates are the only update UI.
             if let serverUpdate, serverUpdate.card != .hidden {
                 ServerUpdateCardView(model: serverUpdate, host: host)
-            } else {
-                daemonUpdateCallout
             }
         }
         // After a herdr update the Connection line names the new build. Here, not on the
@@ -8303,14 +8270,12 @@ struct SettingsView: View {
         }
     }
 
-    /// True when the connected daemon has a newer build staged and ready to activate — a staged
-    /// build whose sha differs from what's running (HerdrKit's `updateAvailable`), so a stale/equal
-    /// manifest never shows a phantom update.
+    /// True when the herdr update card asks for something (the same cases the tab badge counts).
     private var daemonUpdateAvailable: Bool {
-        (stagedUpdate?.updateAvailable ?? false) || serverUpdate?.card.badgeKey != nil
+        serverUpdate?.card.badgeKey != nil
     }
 
-    /// The At a glance line for an update: the herdr update card's state, else a staged build.
+    /// The At a glance line for an update: the herdr update card's state.
     private var glanceUpdateText: String {
         switch serverUpdate?.card {
         case .available(_, let new, _, _, _, _)?: return "herdr \(new) is ready to install"
@@ -8319,95 +8284,6 @@ struct SettingsView: View {
         case .tooOld?: return "herdr needs a one-time update"
         default: return "Daemon update available"
         }
-    }
-
-    /// Shown only when the daemon has a staged self-update: an icon chip + "Update available" + the
-    /// staged build's id/date, then an "Update & restart" action (a spinner replaces it while the
-    /// apply is in flight). Mirrors `notifyCallout`'s shape, in its own hairline card.
-    @ViewBuilder
-    private var daemonUpdateCallout: some View {
-        if let staged = stagedUpdate?.staged {
-            HStack(alignment: .top, spacing: 10) {
-                Image(systemName: "arrow.down.circle")
-                    .font(.system(size: 13, weight: .semibold))
-                    .foregroundStyle(Palette.waiting)
-                    .frame(width: 26, height: 26)
-                    .background(Circle().fill(Palette.surfaceRaised))
-                VStack(alignment: .leading, spacing: 4) {
-                    Text("Update available")
-                        .font(Typography.app(13, .semibold)).foregroundStyle(Palette.textDim)
-                    Text("Build \(staged.sha) · staged \(String(staged.builtAt.prefix(10)))")
-                        .font(Typography.app(12)).foregroundStyle(Palette.textFaint)
-                        .fixedSize(horizontal: false, vertical: true)
-                    if applyingUpdate {
-                        HStack(spacing: 6) {
-                            ProgressView().controlSize(.small).tint(Palette.textDim)
-                            Text("Updating & restarting…")
-                                .font(Typography.app(13, .semibold)).foregroundStyle(Palette.textDim)
-                        }
-                        .padding(.top, 2)
-                    } else {
-                        Button("Update & restart") { showUpdateConfirm = true }
-                            .font(Typography.app(13, .semibold)).foregroundStyle(Palette.text)
-                            .padding(.top, 2)
-                    }
-                }
-                Spacer(minLength: 0)
-            }
-            .settingsRowShell()
-            .padding(.horizontal, 16).padding(.top, 10)
-        }
-    }
-
-    /// Activate the staged build. The daemon swaps its binary and re-execs via live-handoff, so the
-    /// one-shot apply call may return the `ok` ack OR drop mid-handoff — both mean "restart under
-    /// way", so we then re-poll `stagedUpdate()` until the applied build clears its staged manifest.
-    /// A server `APIError` is a real verdict, not a dropped socket, and is surfaced distinctly:
-    /// `apply_staged_update_disk_stale` = running-new/disk-old (a warning); anything else = the
-    /// handoff rolled back and the OLD build is still serving.
-    private func applyUpdate() {
-        guard !applyingUpdate else { return }
-        applyingUpdate = true
-        Task {
-            do {
-                try await client.applyStagedUpdate()
-            } catch let apiError as APIError {
-                applyingUpdate = false
-                if apiError.code == "apply_staged_update_disk_stale" {
-                    updateResult = "Updated, with a warning: the new build is running, but the daemon "
-                        + "couldn't update its on-disk copy, so a full restart would fall back to the "
-                        + "old build until re-applied."
-                } else {
-                    updateResult = "Update failed: \(apiError). Your daemon is unchanged and still "
-                        + "running the current build."
-                }
-                if let refreshed = try? await client.stagedUpdate() { stagedUpdate = refreshed }
-                return
-            } catch {
-                // Transport dropped mid-handoff — expected: the daemon replaced itself before it
-                // could answer on the single-shot socket. Fall through to confirm by re-polling.
-            }
-            let confirmed = await confirmUpdateApplied()
-            applyingUpdate = false
-            // Only overwrite on a SUCCESSFUL read: a failed read here means the daemon is still
-            // mid-restart, and blanking the state would wrongly hide the banner. The next `.task`
-            // (on the view reappearing) re-fetches the true state once the daemon is back.
-            if let refreshed = try? await client.stagedUpdate() { stagedUpdate = refreshed }
-            updateResult = confirmed
-                ? "Updated. The daemon restarted on the new build; your agents kept running."
-                : "Update sent — the daemon may still be restarting. Reopen Settings in a moment to "
-                    + "confirm the new build."
-        }
-    }
-
-    /// Poll `stagedUpdate()` until the applied build has cleared its staged manifest (`staged ==
-    /// nil`), tolerating the brief window where the daemon is mid-handoff and the socket refuses.
-    private func confirmUpdateApplied() async -> Bool {
-        for _ in 0..<12 {   // ~12 × 2s = 24s, comfortably past a few-second handoff
-            try? await Task.sleep(nanoseconds: 2_000_000_000)
-            if let current = try? await client.stagedUpdate(), current.staged == nil { return true }
-        }
-        return false
     }
 
     /// Saved machine profiles include ones not yet opted into federation. The
