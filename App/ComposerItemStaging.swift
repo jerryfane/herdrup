@@ -85,9 +85,23 @@ enum PastedFile {
         // copy from there, inside a security scope, because a document picked outside the
         // app's container is only readable while that scope is open.
         if type.conforms(to: .fileURL) {
-            return await withCheckedContinuation { continuation in
+            let objectResult: Staged? = await withCheckedContinuation { continuation in
                 _ = provider.loadObject(ofClass: URL.self) { url, _ in
-                    continuation.resume(returning: url.map(stageReferencedFile) ?? Staged())
+                    continuation.resume(returning: url.map(stageReferencedFile))
+                }
+            }
+            if let objectResult { return objectResult }
+            // A pasteboard item can advertise public.file-url bytes alongside its
+            // Finder icon without vending an NSURL object. Read that same reference,
+            // not the image representation or a temporary file containing URL text.
+            return await withCheckedContinuation { continuation in
+                provider.loadDataRepresentation(forTypeIdentifier: type.identifier) { data, _ in
+                    let source = data.flatMap { URL(dataRepresentation: $0, relativeTo: nil) }
+                    guard let source, source.isFileURL else {
+                        continuation.resume(returning: Staged())
+                        return
+                    }
+                    continuation.resume(returning: stageReferencedFile(source))
                 }
             }
         }
