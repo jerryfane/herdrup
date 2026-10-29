@@ -75,10 +75,54 @@ trap stop_recording EXIT
 # boot gets 10m; later readiness checks of the same device keep the shorter 5m.
 # Per device, because settings-gram cold-boots the iPad and then the iPhone.
 cold_booted=" "
+# Devices that bootstatus reported ready earlier in this job. A later round on one of them
+# asks CoreSimulator nothing: on Xcode 27, with the screen recorder running, the second
+# readiness check of an iPad that had just been reported ready hung its whole 5m in three
+# focused iPad runs in a row (40828227115, 40834877074 with empty logs; 40839462725, whose
+# stamped log shows the hang is the first command, `simctl list devices`, and a 60 s
+# bounded `simctl list` before it timed out too). Only `simctl shutdown` takes a device
+# out of this set (settings-gram, before its iPhone round); xcodebuild reports a device
+# that died some other way.
+ready_devices=" "
+# After bootstatus reports a device ready (and the screen recorder starts), CoreSimulator
+# can stop answering every simctl request for minutes on Xcode 27: the ipad shard of
+# 40827550901 waited 3.5 min for its second readiness check to print anything; focused
+# iPad runs waited past 5m in that check (above) and, with the check skipped, in
+# `simctl install` (40844294026, and 40822219713 / 40823615938 with no recorder at all).
+# So an install first waits until the service answers a cheap query. Each probe is
+# bounded so a wedged one is abandoned, and the busiest processes are logged while the
+# service is silent, as the receipt of what it is busy with. Free when it answers.
+service_settle_budget=900
+wait_for_simulator_service() {
+  local log="$1" start probe=0
+  start=$(date +%s)
+  while :; do
+    probe=$((probe + 1))
+    if "$TIMEOUT_BIN" --signal=TERM --kill-after=5s 30s xcrun simctl list devices >/dev/null 2>&1; then
+      echo "$(date -u +%FT%TZ) CoreSimulator answered after $(( $(date +%s) - start )) s ($probe probes)" | tee -a "$log"
+      return 0
+    fi
+    if [ $(( $(date +%s) - start )) -ge "$service_settle_budget" ]; then
+      echo "::error::CoreSimulator did not answer simctl within ${service_settle_budget}s of the boot; see $log"
+      return 1
+    fi
+    {
+      echo "$(date -u +%FT%TZ) probe $probe: simctl list did not answer in 30 s; busiest processes:"
+      ps -axo pid,etime,pcpu,rss,comm | sort -k3 -nr | head -8
+    } >>"$log" 2>&1
+  done
+}
 boot_simulator() {
   local udid="$1" log="$2" status=0 budget=10m
+  case "$ready_devices" in *" $udid "*)
+    echo "$(date -u +%FT%TZ) $udid was ready earlier in this job: no boot, no bootstatus" | tee "$log"
+    return 0
+    ;;
+  esac
   case "$cold_booted" in *" $udid "*) budget=5m ;; esac
   cold_booted="$cold_booted$udid "
+  # Each step is stamped in the log before it starts: simctl's own output is block-buffered
+  # into the pipe and lost when the timeout kills it, which left only empty logs to read.
   "$TIMEOUT_BIN" --signal=TERM --kill-after=15s "$budget" bash -c '
     # Boot only a device that is not booted; bootstatus is the readiness authority.
     # On Xcode 27, `simctl boot` of an iPad that had just finished booting hung with no
@@ -87,15 +131,19 @@ boot_simulator() {
     # exit=124 secs=307"), while bootstatus on the same iPad answered "Device already
     # booted". Xcode 26 rejected the same call at once ("Unable to boot device in current
     # state: Booted"), which this used to rely on.
-    if ! xcrun simctl list devices | grep -qF "($1) (Booted)"; then
+    echo "$(date -u +%FT%TZ) simctl list devices"
+    if ! xcrun simctl list devices | grep -F "($1)" | grep -qF "(Booted)"; then
+      echo "$(date -u +%FT%TZ) simctl boot $1"
       xcrun simctl boot "$1" || true
     fi
+    echo "$(date -u +%FT%TZ) simctl bootstatus $1 -b"
     exec xcrun simctl bootstatus "$1" -b
   ' _ "$udid" 2>&1 | tee "$log" || status=$?
   if [ "$status" -ne 0 ]; then
     echo "::error::simulator $udid failed to become ready within $budget (exit $status); see $log"
     return 1
   fi
+  ready_devices="$ready_devices$udid "
 }
 
 # Installs the app under test after boot and before xcodebuild's first launch, and fails
@@ -119,8 +167,10 @@ install_app_under_test() {
     echo "::error::cannot read CFBundleIdentifier from $app"
     return 1
   }
+  echo "$(date -u +%FT%TZ) waiting for CoreSimulator to answer" >"$log"
+  wait_for_simulator_service "$log" || return 1
   start=$(date +%s)
-  echo "$(date -u +%FT%TZ) install $bundle_id from $app on $udid" >"$log"
+  echo "$(date -u +%FT%TZ) install $bundle_id from $app on $udid" >>"$log"
   if ! "$TIMEOUT_BIN" --signal=TERM --kill-after=15s 5m \
       xcrun simctl install "$udid" "$app" >>"$log" 2>&1; then
     echo "::error::installing $bundle_id on $udid failed or timed out; see $log"
@@ -451,6 +501,7 @@ case "$shard" in
     # ~17% slower runner) spent 21.7 min in 36 finished cases and hit the old 25m with
     # two cases left; 35m leaves room for the suite to grow.
     xcrun simctl shutdown "$IPAD_UDID" >/dev/null 2>&1 || true
+    ready_devices="${ready_devices/ $IPAD_UDID / }"
     run_suite iPhoneGram "$IPHONE_UDID" 35m -only-testing:HerdrUITests/GramTests || failed=1
     ;;
   focused)
