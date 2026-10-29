@@ -301,6 +301,34 @@ sys.exit(1 if missing else 0)
 ' "$@"
 }
 
+# Herdrup Desktop's reference screenshots (DesktopReferenceShots, herdrup-desktop#16) on
+# one reference iPad. The pictures must be the same on every run, so the app starts from a
+# fresh install (no UserDefaults left by earlier rounds), the device is dark, and the status
+# bar is pinned: 9:41, full battery, charged, no cellular, three Wi-Fi bars. simctl takes
+# only a plain time here: it rejected both ISO date-times (`…Z` and `…+00:00`) as "non-ISO"
+# on this image (runs 40681584968, 40685403456). The override is listed into the receipts,
+# which design/reference/agent-list/manifest.json records, and cleared afterwards so later
+# rounds on the device see the real status bar.
+DESKTOP_REFERENCE_STATUS_BAR=(--time 9:41 --batteryLevel 100 --batteryState charged
+  --cellularMode notSupported --wifiBars 3)
+desktop_reference_round() {
+  local label="$1" udid="$2" bundle_id status=0
+  boot_simulator "$udid" "TestReceipts/$label-boot.log" || return 1
+  bundle_id=$(/usr/libexec/PlistBuddy -c 'Print :CFBundleIdentifier' "$APP_UNDER_TEST/Info.plist") || return 1
+  xcrun simctl uninstall "$udid" "$bundle_id" >/dev/null 2>&1 || true
+  xcrun simctl ui "$udid" appearance dark || return 1
+  xcrun simctl status_bar "$udid" override "${DESKTOP_REFERENCE_STATUS_BAR[@]}" || return 1
+  {
+    echo "xcrun simctl status_bar <udid> override ${DESKTOP_REFERENCE_STATUS_BAR[*]}"
+    xcrun simctl status_bar "$udid" list
+  } | tee "TestReceipts/$label-status-bar.txt"
+  run_suite "$label" "$udid" 15m -only-testing:HerdrUITests/DesktopReferenceShots || status=1
+  check_classes_ran "TestReceipts/$label-first.xcresult" DesktopReferenceShots || status=1
+  xcrun simctl status_bar "$udid" clear || true
+  xcrun simctl ui "$udid" appearance light || true
+  return "$status"
+}
+
 swiftterm_api() {
   local device="$1" udid="$2"
   (
@@ -397,7 +425,8 @@ case "$shard" in
     check_classes_ran TestReceipts/iPhoneAgentList-first.xcresult AgentFoldersTests NeedsYouPillTests || failed=1
     skip=(-skip-testing:HerdrUITests/GramTests -skip-testing:HerdrUITests/StatusMotionTests
       -skip-testing:HerdrUITests/ChatViewTests -skip-testing:HerdrUITests/ChatUXSmokeTests -skip-testing:HerdrUITests/PagingTests
-      -skip-testing:HerdrUITests/AgentFoldersTests -skip-testing:HerdrUITests/NeedsYouPillTests)
+      -skip-testing:HerdrUITests/AgentFoldersTests -skip-testing:HerdrUITests/NeedsYouPillTests
+      -skip-testing:HerdrUITests/DesktopReferenceShots)
     for class in "${TERMINAL_CLASSES[@]}"; do skip+=("-skip-testing:HerdrUITests/$class"); done
     # 40m: on the Xcode 27 image every class ran slower. Run 40728450580 logged "iPhoneApp
     # exceeded its 30m budget" on its 79th case; its 69 cases that passed there and on
@@ -405,6 +434,10 @@ case "$shard" in
     # took 25 min, so a green round now needs ~33 min.
     run_suite iPhoneApp "$IPHONE_UDID" 40m -only-testing:HerdrUITests "${skip[@]}" || failed=1
     swiftterm_api iPhone "$IPHONE_UDID" || failed=1
+    # Herdrup Desktop's 11-inch references; the 13-inch ones run in the ipad shard. This
+    # shard had the most room (31 min against the ipad shard's 60 in run 40655871305).
+    xcrun simctl shutdown "$IPHONE_UDID" >/dev/null 2>&1 || true
+    desktop_reference_round iPad11DesktopReference "$IPAD11_UDID" || failed=1
     ;;
   ipad)
     boot_simulator "$IPAD_UDID" TestReceipts/iPadRecording-boot.log || exit 1
@@ -436,6 +469,8 @@ case "$shard" in
     # iPhone half (no handles) runs in the iPhone app round.
     run_suite iPadGramColumn "$IPAD_UDID" 10m -only-testing:HerdrUITests/GramColumnTests || failed=1
     check_classes_ran TestReceipts/iPadGramColumn-first.xcresult GramColumnTests || failed=1
+    # Herdrup Desktop's 13-inch references, before AgentListChrome leaves a window behind.
+    desktop_reference_round iPadDesktopReference "$IPAD_UDID" || failed=1
     # Last of the app rounds: AgentListChromeTests shrinks the app into a window on purpose,
     # and iPadOS keeps that window for later launches, even across a reinstall. Run
     # 40537708095 (and 40552658219, which uninstalled the app after this round) ran
@@ -514,20 +549,30 @@ case "$shard" in
       ipad) label=iPad; udid="$IPAD_UDID" ;;
       *)    label=iPhone; udid="$IPHONE_UDID" ;;
     esac
-    # The iPad as the ipad shard prepares it: boot, then the screen recorder, then the
-    # rounds. Focused iPad runs that went straight to the install (40822219713,
-    # 40823615938) hung in `simctl install` for its whole 5m on Xcode 27; the ipad shard,
-    # which starts the recorder first, installed the same build on the same device in
-    # 17 s (40794761077). The video is also the receipt a focused iPad run lacked.
-    if [ "$label" = iPad ]; then
-      boot_simulator "$udid" TestReceipts/iPad-focused-recording-boot.log || exit 1
-      xcrun simctl io "$udid" recordVideo TestReceipts/focused-iPad.mp4 \
-        > TestReceipts/focused-iPad-video.log 2>&1 &
-      recorder=$!
+    if [ "$ONLY_SUITE" = DesktopReferenceShots ] && [ "$label" = iPad ]; then
+      # The references are a pair: both reference iPads, each under the pinned status bar.
+      echo "::notice::focused dispatch: HerdrUITests/DesktopReferenceShots on both reference iPads"
+      desktop_reference_round iPadDesktopReference "$IPAD_UDID" || failed=1
+      xcrun simctl shutdown "$IPAD_UDID" >/dev/null 2>&1 || true
+      # A shut-down device must be booted and checked again by any later round.
+      ready_devices="${ready_devices/ $IPAD_UDID / }"
+      desktop_reference_round iPad11DesktopReference "$IPAD11_UDID" || failed=1
+    else
+      # The iPad as the ipad shard prepares it: boot, then the screen recorder, then the
+      # rounds. Focused iPad runs that went straight to the install (40822219713,
+      # 40823615938) hung in `simctl install` for its whole 5m on Xcode 27; the ipad shard,
+      # which starts the recorder first, installed the same build on the same device in
+      # 17 s (40794761077). The video is also the receipt a focused iPad run lacked.
+      if [ "$label" = iPad ]; then
+        boot_simulator "$udid" TestReceipts/iPad-focused-recording-boot.log || exit 1
+        xcrun simctl io "$udid" recordVideo TestReceipts/focused-iPad.mp4 \
+          > TestReceipts/focused-iPad-video.log 2>&1 &
+        recorder=$!
+      fi
+      echo "::notice::focused dispatch: HerdrUITests/$ONLY_SUITE on $label only"
+      run_suite "$label-$ONLY_SUITE" "$udid" 25m "-only-testing:HerdrUITests/$ONLY_SUITE" || failed=1
+      stop_recording
     fi
-    echo "::notice::focused dispatch: HerdrUITests/$ONLY_SUITE on $label only"
-    run_suite "$label-$ONLY_SUITE" "$udid" 25m "-only-testing:HerdrUITests/$ONLY_SUITE" || failed=1
-    stop_recording
     ;;
   *)
     echo "::error::unknown shard $shard"

@@ -2,14 +2,19 @@ import HerdrKit
 import SwiftUI
 import UIKit
 
-/// What the `HostEditor` sheet is working on: a brand-new host, or an existing one.
+/// What the `HostEditor` sheet is working on: a brand-new host, an existing one, or an
+/// existing one whose key or password is not on this device.
 enum HostEditorTarget: Identifiable {
     case add
     case edit(SavedHost)
+    /// The host is listed but its secret is not in this device's Keychain. Secrets are
+    /// stored ThisDeviceOnly, so a phone set up from another phone gets the host list
+    /// (UserDefaults) without the keys; the editor asks for the secret and connects.
+    case missingSecret(SavedHost)
     var id: String {
         switch self {
         case .add: return "add"
-        case .edit(let h): return h.id.uuidString
+        case .edit(let h), .missingSecret(let h): return h.id.uuidString
         }
     }
 }
@@ -47,6 +52,11 @@ struct HostEditor: View {
     @State private var manualKey = ""
 
     private let editing: SavedHost?
+    /// Editing a host whose stored secret is absent: the secret is required again and
+    /// nothing on screen may claim one is saved.
+    private let secretMissing: Bool
+    /// Whether a blank secret field keeps a stored one.
+    private var hasSavedSecret: Bool { editing != nil && !secretMissing }
 
     init(target: HostEditorTarget, store: SavedHostsStore, onConnect: @escaping (SSHCredentials) -> Void) {
         self.target = target
@@ -55,12 +65,14 @@ struct HostEditor: View {
         switch target {
         case .add:
             editing = nil
+            secretMissing = false
             _nickname = State(initialValue: "")
             _host = State(initialValue: "")
             _username = State(initialValue: "")
             _authKind = State(initialValue: .key)
-        case .edit(let h):
+        case .edit(let h), .missingSecret(let h):
             editing = h
+            if case .missingSecret = target { secretMissing = true } else { secretMissing = false }
             _nickname = State(initialValue: h.nickname ?? "")
             _host = State(initialValue: h.host)
             _username = State(initialValue: h.username)
@@ -74,11 +86,11 @@ struct HostEditor: View {
     private var hostInvalid: Bool {
         !host.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty && endpoint == nil
     }
-    /// Add requires the chosen secret; edit keeps the existing one when the field is
-    /// left blank (whichever auth kind).
+    /// Add (and a host whose secret is missing) requires the chosen secret; edit keeps
+    /// the existing one when the field is left blank (whichever auth kind).
     private var canSave: Bool {
         guard endpoint != nil, !trimmedUser.isEmpty else { return false }
-        if editing != nil { return true }
+        if hasSavedSecret { return true }
         return authKind == .key ? !trimmedKey.isEmpty : !password.isEmpty
     }
 
@@ -96,6 +108,12 @@ struct HostEditor: View {
                 Palette.ground.ignoresSafeArea()
                 ScrollView {
                     VStack(spacing: 10) {
+                        if secretMissing {
+                            caption("This phone doesn't have the \(authKind == .key ? "key" : "password") "
+                                    + "for this host. Keys and passwords stay on the phone they were "
+                                    + "added on, so add it here to connect.", color: Palette.textDim)
+                                .padding(.bottom, 4)
+                        }
                         fieldRow("Nickname", text: $nickname, placeholder: "My Mac")
                         fieldRow("Host", text: $host, placeholder: "mac.tail-scale.ts.net")
                         if hostInvalid { caption("check host or host:port", color: Palette.died) }
@@ -104,7 +122,7 @@ struct HostEditor: View {
                         if authKind == .key { keyRow } else { passwordRow }
                         if let error { caption(error, color: Palette.died) }
 
-                        if editing == nil {
+                        if editing == nil || secretMissing {
                             primaryButton("Save & Connect") { saveAndConnect() }
                             Button("Save without connecting") { if save() { dismiss() } }
                                 .font(Typography.app(14)).foregroundStyle(Palette.textDim)
@@ -116,7 +134,7 @@ struct HostEditor: View {
                     .padding(20)
                 }
             }
-            .navigationTitle(editing == nil ? "Add host" : "Edit host")
+            .navigationTitle(editing == nil ? "Add host" : secretMissing ? "Reconnect" : "Edit host")
             .navigationBarTitleDisplayMode(.inline)
             .toolbar {
                 ToolbarItem(placement: .cancellationAction) {
@@ -192,7 +210,7 @@ struct HostEditor: View {
     private var passwordRow: some View {
         HStack {
             Text("Password").font(Typography.app(15)).foregroundStyle(Palette.textDim)
-            SecureField(editing == nil ? "password" : "saved · type to replace", text: $password)
+            SecureField(hasSavedSecret ? "saved · type to replace" : "password", text: $password)
                 .multilineTextAlignment(.trailing)
                 .textInputAutocapitalization(.never).autocorrectionDisabled()
                 .font(Typography.machine(15)).foregroundStyle(Palette.text)
@@ -209,11 +227,11 @@ struct HostEditor: View {
                 Text("Key").font(Typography.app(15)).foregroundStyle(Palette.textDim)
                 Spacer()
                 if !keyPEM.isEmpty {
-                    Text(editing == nil ? "ed25519 key" : "new key")
+                    Text(hasSavedSecret ? "new key" : "ed25519 key")
                         .font(Typography.machine(15)).foregroundStyle(Palette.text)
                     Image(systemName: "checkmark").font(.system(size: 12, weight: .bold))
                         .foregroundStyle(Palette.done)
-                } else if editing != nil {
+                } else if hasSavedSecret {
                     Text("saved · tap to replace").font(Typography.app(15)).foregroundStyle(Palette.textFaint)
                 } else {
                     Text("Add private key").font(Typography.app(15)).foregroundStyle(Palette.textFaint)

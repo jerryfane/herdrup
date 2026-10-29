@@ -1125,7 +1125,7 @@ public enum PaneHistoryError: Error, Equatable, Sendable {
     case unsupported
 }
 
-// MARK: - Server / staged self-update (server.staged_update / server.apply_staged_update)
+// MARK: - Server / ping and daemon version (server.staged_update)
 
 /// Feature flags returned by `ping`. Missing fields decode false so a newer app
 /// talking to an older daemon simply hides unsupported controls.
@@ -1159,6 +1159,10 @@ public struct ServerCapabilities: Decodable, Equatable, Sendable {
     public let agentAvatar: Bool
     /// `agent.groups.get` / `agent.groups.set`: the owner's agent folders and stars (#552).
     public let agentGroups: Bool
+    /// `server.update_check` / `update_apply` / `update_status`: the server updates itself to
+    /// the newest signed preview (jerryfane/herdr#336). False on older servers, which have to
+    /// be updated once by hand.
+    public let serverUpdate: Bool
 
     enum CodingKeys: String, CodingKey {
         case liveHandoff = "live_handoff"
@@ -1174,6 +1178,7 @@ public struct ServerCapabilities: Decodable, Equatable, Sendable {
         case agentAnswer = "agent_answer"
         case agentAvatar = "agent_avatar"
         case agentGroups = "agent_groups"
+        case serverUpdate = "server_update"
     }
 
     public init(from decoder: Decoder) throws {
@@ -1194,6 +1199,7 @@ public struct ServerCapabilities: Decodable, Equatable, Sendable {
         agentAnswer = try c.decodeIfPresent(Bool.self, forKey: .agentAnswer) ?? false
         agentAvatar = try c.decodeIfPresent(Bool.self, forKey: .agentAvatar) ?? false
         agentGroups = try c.decodeIfPresent(Bool.self, forKey: .agentGroups) ?? false
+        serverUpdate = try c.decodeIfPresent(Bool.self, forKey: .serverUpdate) ?? false
     }
 }
 
@@ -1208,67 +1214,28 @@ struct PingResult: Decodable {
     }
 }
 
-/// Result of `server.staged_update` (`type: "staged_update"`): the running daemon's version and
-/// protocol, plus the staged build when a build step has pre-staged a newer binary — `staged` is
-/// nil when nothing is staged. Mirrors `ResponseResult::StagedUpdate`
-/// (`src/api/schema/response.rs`); the internally-tagged `type` key is ignored on decode.
+/// Result of `server.staged_update` (`type: "staged_update"`), read only for the running daemon's
+/// version, protocol and commit — the Connection row's "herdr daemon" line. Mirrors
+/// `ResponseResult::StagedUpdate` (`src/api/schema/response.rs`); the internally-tagged `type` key
+/// and the retired `staged` build are ignored on decode (updates go through `server.update_check`).
 ///
 /// The version string is static across commits (`0.8.0`), so `runningSha` — the running binary's
-/// short git commit — is what actually identifies the build. An update is available when a build is
-/// staged whose `sha` differs from `runningSha` (see `updateAvailable`). `runningSha` is nil on an
-/// older daemon that predates the sha-reporting change.
+/// git commit — is what actually identifies the build. `runningSha` is nil on an older daemon that
+/// predates the sha-reporting change.
 public struct StagedUpdate: Decodable, Sendable, Equatable {
     public let runningVersion: String
     public let runningProtocol: Int
     public let runningSha: String?
-    public let staged: Staged?
-
-    /// The pre-staged build the daemon would activate on apply. `path` is intentionally not on the
-    /// wire (the daemon never exposes it), so it is absent here too.
-    public struct Staged: Decodable, Sendable, Equatable {
-        public let version: String
-        public let sha: String
-        public let builtAt: String
-        enum CodingKeys: String, CodingKey {
-            case version, sha
-            case builtAt = "built_at"
-        }
-    }
-
-    /// True when a staged build exists that differs from what's running. When the daemon reports its
-    /// commit (`runningSha`), require the shas to name DIFFERENT commits so a stale/equal manifest
-    /// never shows a phantom update; on an older daemon (no `runningSha`) fall back to "a build is
-    /// staged".
-    ///
-    /// The comparison is a PREFIX match, not equality, because the two values are written by
-    /// different producers at different lengths: the fleet build step records a short sha in
-    /// `staged-build.json`, while the daemon reports `build_info::commit()`, the full 40 characters.
-    /// Observed live on 2026-09-09: staged `5a244caa` against running
-    /// `5a244caa60b0c3a5742315c59d20ed81c05bc23e` - the same commit, shown as a permanent update.
-    /// Newer daemons also drop a same-commit staged build server-side; this keeps an older one from
-    /// crying wolf.
-    public var updateAvailable: Bool {
-        guard let staged else { return false }
-        guard let runningSha, !runningSha.isEmpty, !staged.sha.isEmpty else { return true }
-        // One-directional by construction: the staged value may ABBREVIATE the running
-        // sha, never the reverse. A staged sha LONGER than the running one cannot be a
-        // prefix of it, so it correctly reads as a different commit rather than being
-        // suppressed - no separate length guard is needed, and the test pins that case.
-        return !runningSha.lowercased().hasPrefix(staged.sha.lowercased())
-    }
 
     enum CodingKeys: String, CodingKey {
-        case staged
         case runningVersion = "running_version"
         case runningProtocol = "running_protocol"
         case runningSha = "running_sha"
     }
 }
 
-/// Ack of a `server.apply_staged_update` that returned cleanly (`type: "ok"`). Decoded as an empty
-/// object (the `type` tag is ignored). The apply re-execs the daemon via live-handoff, so the
-/// one-shot command socket may instead DROP mid-apply — callers treat both a returned ack and a
-/// transport drop as "restart initiated" and then re-poll `stagedUpdate()`.
+/// Ack of a command that returns `{ type: "ok" }` (e.g. `guest.revoke`). Decoded as an empty object
+/// (the `type` tag is ignored).
 struct OkAck: Decodable, Sendable {}
 
 // MARK: - Push status (notifications.status)

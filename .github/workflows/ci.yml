@@ -27,7 +27,7 @@ on:
         required: false
         default: ""
       only_device:
-        description: "Destination for a focused run: iphone or ipad."
+        description: "Destination for a focused run: iphone or ipad. DesktopReferenceShots on ipad runs on both reference iPads (13-inch and 11-inch)."
         required: false
         default: "iphone"
 
@@ -227,8 +227,17 @@ jobs:
               (device for device in pads if "iPad Pro" in device["name"] and "13-inch" in device["name"]),
               pads[0],
           )
+          # Herdrup Desktop's second reference size (DesktopReferenceShots): an 1180x820 pt
+          # iPad at @2x. The iPad Air 11-inch is that size, and so is the base iPad (A16);
+          # the iPad Pro 11-inch is not (1210x834).
+          ipad11 = next(
+              (device for device in pads if device["name"].startswith("iPad Air 11-inch")),
+              next((device for device in pads if device["name"].startswith("iPad (A16)")), None),
+          )
+          if ipad11 is None:
+              raise SystemExit(f"::error::{runtime} has no 1180x820 iPad (iPad Air 11-inch or iPad (A16)); no substitute or skip")
           with open(os.environ["GITHUB_ENV"], "a") as output:
-              for key, device in [("IPHONE_UDID", phones[0]), ("IPAD_UDID", ipad)]:
+              for key, device in [("IPHONE_UDID", phones[0]), ("IPAD_UDID", ipad), ("IPAD11_UDID", ipad11)]:
                   output.write(f"{key}={device['udid']}\n")
                   print(f"{runtime}: {key}={device['udid']} ({device['name']})")
           PY

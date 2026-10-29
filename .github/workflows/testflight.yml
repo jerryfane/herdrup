@@ -68,6 +68,17 @@ jobs:
         run: |
           echo "Xcodes present:"; ls -d /Applications/Xcode*.app || true
           sudo xcode-select -s /Applications/Xcode.app; xcodebuild -version
+          # Xcode.app is a symlink on the runner image. The image names pre-release copies
+          # Xcode_<v>_Release_Candidate.app / Xcode_<v>_beta.app (an RC's build number looks
+          # like a release's, 27B48), so the resolved app name is the release signal. Fail
+          # here rather than 20 minutes later at App Store Connect.
+          RESOLVED=$(cd /Applications/Xcode.app && pwd -P)
+          echo "Xcode.app resolves to $RESOLVED"
+          case "$RESOLVED" in
+            *[Bb]eta*|*Release_Candidate*)
+              echo "::error::/Applications/Xcode.app resolves to a pre-release Xcode ($RESOLVED); App Store Connect rejects its uploads."
+              exit 1 ;;
+          esac
           SDK=$(xcodebuild -showsdks | grep -oE 'iphoneos[0-9.]+' | sed 's/iphoneos//' | sort -V | tail -1)
           echo "newest iOS SDK: ${SDK:-<none>}"
           if [ -z "$SDK" ] || [ "$(printf '%s\n27.1\n' "$SDK" | sort -V | head -1)" != "27.1" ]; then
