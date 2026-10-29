@@ -2992,6 +2992,12 @@ struct TerminalHomeView: View {
         }
         .frame(width: DesignTokens.Size.rail)
         .padding(.top, 12)
+        // The top bars' clearance from the glass: on iPhone Duo's inner display held wide the
+        // status bar is on the side, so the rail starts at the window's top edge, and its
+        // expand button sat 12 pt from the glass, 4 pt above the terminal bar's controls
+        // beside it. It now keeps their 16 pt. No change where there is a status bar above
+        // or window chrome (iPad, Mac).
+        .topEdgeClearance(base: 12, rowHeight: DesignTokens.Size.topBarRow)
         .background(Palette.ground)
         .overlay(alignment: .trailing) {
             Rectangle().fill(Palette.hairlineQuiet).frame(width: 0.5).ignoresSafeArea()
