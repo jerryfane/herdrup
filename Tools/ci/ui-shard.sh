@@ -80,9 +80,9 @@ cold_booted=" "
 # readiness check of an iPad that had just been reported ready hung its whole 5m in three
 # focused iPad runs in a row (40828227115, 40834877074 with empty logs; 40839462725, whose
 # stamped log shows the hang is the first command, `simctl list devices`, and a 60 s
-# bounded `simctl list` before it timed out too). Only `simctl shutdown` takes a device
-# out of this set (settings-gram, before its iPhone round); xcodebuild reports a device
-# that died some other way.
+# bounded `simctl list` before it timed out too). `simctl shutdown` (settings-gram, before
+# its iPhone round) and a failed install take a device out of this set, so the next round
+# boots and checks it again; xcodebuild reports a device that died some other way.
 ready_devices=" "
 # After bootstatus reports a device ready (and the screen recorder starts), CoreSimulator
 # can stop answering every simctl request for minutes on Xcode 27: the ipad shard of
@@ -174,6 +174,11 @@ install_app_under_test() {
   if ! "$TIMEOUT_BIN" --signal=TERM --kill-after=15s 5m \
       xcrun simctl install "$udid" "$app" >>"$log" 2>&1; then
     echo "::error::installing $bundle_id on $udid failed or timed out; see $log"
+    # A failed install says nothing good about the device, so the next round must ask
+    # again. Run 40898152906: after 418 s of silence CoreSimulator died mid-install
+    # ("Mach error -308 - (ipc/mig) server died"); the device stayed in ready_devices, so
+    # all eight later iPad rounds skipped boot and failed their installs within seconds.
+    ready_devices="${ready_devices/ $udid / }"
     return 1
   fi
   echo "$(date -u +%FT%TZ) simctl install returned after $(( $(date +%s) - start )) s" >>"$log"
