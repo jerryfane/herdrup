@@ -23,11 +23,11 @@ final class DesktopReferenceShots: XCTestCase {
     /// The served states' fixtures (HerdrUITests/Fixtures/desktop-reference-<name>.json), by
     /// name, with their sha256.
     static let servedSHA256: [String: String] = [
-        "folders": "3caf0afb562d97779d07a4080dd4a92d1be414f308370baea9de2e5e226823b0",
-        "avatars": "c4db4b975cd231e89d95c711048089a5055769ef05c3386f7038472a2aa28514",
-        "sessions": "a7e1acbcb2de2be2d29309e7976e6d7bab2ac89a7123e8804a6d40ad3018cdd5",
-        "federated": "cbad3a2d6115309845b70d9d7a1db6793c356bb943dc4c754b7727b74405ebcf",
-        "needs-you": "851d7f7e03f8b31f8a932aa24f83cecbe0677184ed4afc2aacef6ff8f903df2e",
+        "folders": "7688f3779c18e297213dd1248be390728857c228460aa6ae04cf70b06650cf84",
+        "avatars": "1dcc6889466fecc87efd23bca7bc2dee6cdde450a4e75d601a7e5a28eb879592",
+        "sessions": "e600054d6595f7df0abeb3ed56cfa3f346c919cf093a18c32f9f20226dd328bd",
+        "federated": "0445d1690258871aac0048c1c9f77f71dfe0476808738fbc6744eb641ae1c2ad",
+        "needs-you": "101ad2cba65a1a12b77ed32ae3bfbbf13da2a34d90b5a75d9021a5bcfaee2856",
     ]
     /// The uploaded picture the avatars state serves (HerdrUITests/Fixtures/desktop-reference-avatar.png).
     static let avatarSHA256 = "e4d4139d5914062cd06d5b6cbd8ade1d5fddf83c20ee575d4d83b8d81de38a4a"

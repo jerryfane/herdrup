@@ -43,7 +43,8 @@
           "mascot": null,
           "sha256": "e4d4139d5914062cd06d5b6cbd8ade1d5fddf83c20ee575d4d83b8d81de38a4a",
           "updated_unix_ms": 1793094060000
-        }
+        },
+        "status_since_unix_ms": 1793180220000
       },
       {
         "pane_id": "w1:p2",
@@ -62,7 +63,8 @@
           "mascot": "cub",
           "sha256": null,
           "updated_unix_ms": 1793094060000
-        }
+        },
+        "status_since_unix_ms": 1793178240000
       },
       {
         "pane_id": "w1:p3",
@@ -75,7 +77,8 @@
         "agent": "omp",
         "agent_status": "working",
         "cwd": "/home/dev/quill",
-        "terminal_title_stripped": "π > drafting the changelog"
+        "terminal_title_stripped": "π > drafting the changelog",
+        "status_since_unix_ms": 1793172660000
       }
     ]
   },

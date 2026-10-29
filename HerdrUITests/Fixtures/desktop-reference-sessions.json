@@ -37,7 +37,8 @@
         "agent": "codex",
         "agent_status": "working",
         "cwd": "/home/dev/web",
-        "terminal_title_stripped": "⠋ running the test suite"
+        "terminal_title_stripped": "⠋ running the test suite",
+        "status_since_unix_ms": 1793180220000
       },
       {
         "pane_id": "w1:p2",
@@ -50,7 +51,8 @@
         "agent": "claude",
         "agent_status": "working",
         "cwd": "/home/dev/infra",
-        "terminal_title_stripped": "⠋ applying the terraform plan"
+        "terminal_title_stripped": "⠋ applying the terraform plan",
+        "status_since_unix_ms": 1793178240000
       },
       {
         "pane_id": "w2:p1",
@@ -63,7 +65,8 @@
         "agent": "omp",
         "agent_status": "idle",
         "cwd": "/home/dev/notes",
-        "terminal_title_stripped": "π > ready"
+        "terminal_title_stripped": "π > ready",
+        "status_since_unix_ms": 1793172660000
       }
     ]
   },
@@ -106,7 +109,8 @@
           "agent": "omp",
           "agent_status": "idle",
           "cwd": "/home/dev/blog",
-          "terminal_title_stripped": "π > ready"
+          "terminal_title_stripped": "π > ready",
+          "status_since_unix_ms": 1793180220000
         }
       ]
     },
@@ -124,7 +128,8 @@
           "agent": "claude",
           "agent_status": "blocked",
           "cwd": "/home/dev/api",
-          "terminal_title_stripped": "asking to run the migration"
+          "terminal_title_stripped": "asking to run the migration",
+          "status_since_unix_ms": 1793180220000
         },
         {
           "pane_id": "w1:p2",
@@ -137,7 +142,8 @@
           "agent": "claude",
           "agent_status": "blocked",
           "cwd": "/home/dev/deploy",
-          "terminal_title_stripped": "asking to push to production"
+          "terminal_title_stripped": "asking to push to production",
+          "status_since_unix_ms": 1793178240000
         },
         {
           "pane_id": "w1:p3",
@@ -150,7 +156,8 @@
           "agent": "codex",
           "agent_status": "working",
           "cwd": "/home/dev/build",
-          "terminal_title_stripped": "⠋ compiling"
+          "terminal_title_stripped": "⠋ compiling",
+          "status_since_unix_ms": 1793172660000
         }
       ]
     }

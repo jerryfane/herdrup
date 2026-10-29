@@ -37,7 +37,8 @@
         "agent": "codex",
         "agent_status": "working",
         "cwd": "/home/dev/web",
-        "terminal_title_stripped": "⠋ running the test suite"
+        "terminal_title_stripped": "⠋ running the test suite",
+        "status_since_unix_ms": 1793180220000
       },
       {
         "pane_id": "air/w1:p2",
@@ -53,7 +54,8 @@
         "terminal_title_stripped": "⠋ reading the crash logs",
         "machine_id": "air",
         "machine_label": "mcb-air",
-        "reachability": "reachable"
+        "reachability": "reachable",
+        "status_since_unix_ms": 1793178240000
       },
       {
         "pane_id": "studio/w1:p4",
@@ -69,7 +71,8 @@
         "last_known_status": "working",
         "machine_id": "studio",
         "machine_label": "mac-studio",
-        "reachability": "unreachable"
+        "reachability": "unreachable",
+        "status_since_unix_ms": 1793172660000
       },
       {
         "pane_id": "nas/w2:p1",
@@ -86,7 +89,8 @@
         "last_known_status": "blocked",
         "machine_id": "nas",
         "machine_label": "homelab",
-        "reachability": "degraded"
+        "reachability": "degraded",
+        "status_since_unix_ms": 1793148060000
       }
     ]
   }
