@@ -2,10 +2,15 @@ import CryptoKit
 import XCTest
 
 /// Herdrup Desktop's pixel-parity references (herdrup-desktop#16): the Agents home on iPad,
-/// landscape, over the desktop's fake herdr `agent.list`, in every state the list can show.
-/// Each state is one attachment, `ref-<device>-<state>.png`, with its conditions beside it
-/// in `ref-<device>-<state>.json`. design/reference/agent-list/README.md says how they
-/// become the committed references.
+/// landscape, over the desktop's fake herdr, in every state the list can show. Each state is
+/// one attachment, `ref-<device>-<state>.png`, with its conditions beside it in
+/// `ref-<device>-<state>.json`. design/reference/agent-list/README.md says how they become
+/// the committed references.
+///
+/// `populated` and its expansions serve the desktop's own cmd/fakeherdr/agents.json. The
+/// served states (folders, avatars, sessions, federated, needs you) serve
+/// HerdrUITests/Fixtures/desktop-reference-<state>.json, which the desktop's fake herdr
+/// serves too.
 ///
 /// CI pins the status bar (`simctl status_bar override`) before this class runs; the app
 /// (`HERDR_SCREENSHOT_MOCK=desktopref`) holds every animation still and pins its clock.
@@ -14,6 +19,18 @@ final class DesktopReferenceShots: XCTestCase {
     static let fixtureName = "desktop-reference-agents"
     static let fixtureSHA256 = "f912df090a009597e326cc7df873addc242be2400e8645f5c654c2b168a081e2"
     static let clock = "2026-10-28T09:41:00Z"
+
+    /// The served states' fixtures (HerdrUITests/Fixtures/desktop-reference-<name>.json), by
+    /// name, with their sha256.
+    static let servedSHA256: [String: String] = [
+        "folders": "3caf0afb562d97779d07a4080dd4a92d1be414f308370baea9de2e5e226823b0",
+        "avatars": "c4db4b975cd231e89d95c711048089a5055769ef05c3386f7038472a2aa28514",
+        "sessions": "a7e1acbcb2de2be2d29309e7976e6d7bab2ac89a7123e8804a6d40ad3018cdd5",
+        "federated": "cbad3a2d6115309845b70d9d7a1db6793c356bb943dc4c754b7727b74405ebcf",
+        "needs-you": "851d7f7e03f8b31f8a932aa24f83cecbe0677184ed4afc2aacef6ff8f903df2e",
+    ]
+    /// The uploaded picture the avatars state serves (HerdrUITests/Fixtures/desktop-reference-avatar.png).
+    static let avatarSHA256 = "e4d4139d5914062cd06d5b6cbd8ade1d5fddf83c20ee575d4d83b8d81de38a4a"
     static let contentSize = "UICTContentSizeCategoryL"
 
     /// The two reference iPads, by their landscape window in points.
@@ -79,12 +96,109 @@ final class DesktopReferenceShots: XCTestCase {
         capture(app, device: device, state: "all-expanded")
     }
 
+    /// Folders and stars (`agent_groups`): Herdr open with its two agents, Enyo closed, and
+    /// vetrina starred.
+    func testFolders() throws {
+        let (app, device) = try launch("folders", served: "folders")
+        let herdr = element(app, "agent-folder-herdr"), enyo = element(app, "agent-folder-enyo")
+        XCTAssertTrue(herdr.waitForExistence(timeout: 20), "the folders document should load")
+        XCTAssertTrue(enyo.waitForExistence(timeout: 10), "Enyo should be listed")
+        XCTAssertTrue(row(app, "w1:p1").waitForExistence(timeout: 10), "vetrina should be listed")
+        XCTAssertTrue(row(app, "w1:p1").label.contains("starred"), "vetrina should show its star, got \(row(app, "w1:p1").label)")
+        XCTAssertEqual(herdr.value as? String, "collapsed, 1 waiting, 0 stopped", "folders start closed")
+        herdr.tap()
+        if !poll(3, every: 0.25, { (herdr.value as? String)?.hasPrefix("expanded") == true }) { herdr.tap() }
+        XCTAssertTrue(poll(10, every: 0.25) { (herdr.value as? String)?.hasPrefix("expanded") == true },
+                      "tapping Herdr should open it")
+        for pane in ["w1:p2", "w1:p3"] {
+            XCTAssertTrue(row(app, pane).waitForExistence(timeout: 10), "open Herdr should show \(pane)")
+        }
+        XCTAssertTrue((enyo.value as? String)?.hasPrefix("collapsed") == true, "Enyo should stay closed")
+        XCTAssertFalse(row(app, "w2:p1").exists, "closed Enyo should hide enyo-review")
+        capture(app, device: device, state: "folders")
+    }
+
+    /// Avatars (`agent_avatar`): atlas's uploaded picture, nova's mascot, quill's initial tile.
+    func testAvatars() throws {
+        let (app, device) = try launch("avatars", served: "avatars")
+        for pane in ["w1:p1", "w1:p2", "w1:p3"] {
+            XCTAssertTrue(row(app, pane).waitForExistence(timeout: 20), "\(pane) should be listed")
+        }
+        XCTAssertTrue(avatar(app, in: row(app, "w1:p1"), "image", named: "Photo"), "atlas should show its picture")
+        XCTAssertTrue(avatar(app, in: row(app, "w1:p2"), "cub", named: "Cub"), "nova should show the Cub mascot")
+        XCTAssertTrue(avatar(app, in: row(app, "w1:p3"), "initial", named: "Initial Q"), "quill should show its initial tile")
+        capture(app, device: device, state: "avatars")
+    }
+
+    /// Session pills: default (this one), personal and work running, work with 2 waiting.
+    func testSessions() throws {
+        let (app, device) = try launch("sessions", served: "sessions")
+        XCTAssertTrue(row(app, "w1:p1").waitForExistence(timeout: 20), "the roster should load")
+        XCTAssertTrue(app.buttons["work, 2 need you"].waitForExistence(timeout: 20),
+                      "work's pill should count its 2 waiting agents")
+        XCTAssertTrue(app.buttons["personal"].exists, "personal should have a pill with no count")
+        XCTAssertTrue(app.buttons["default"].exists, "the default session should have a pill")
+        XCTAssertTrue(app.buttons["default"].isSelected, "the home is on the default session")
+        XCTAssertFalse(app.buttons["scratch"].exists, "a stopped session has no pill")
+        capture(app, device: device, state: "sessions")
+    }
+
+    /// Federated rows: mcb-air/scout reachable, mac-studio/render offline, homelab/backup
+    /// unconfirmed (degraded peer, last known blocked).
+    func testFederated() throws {
+        let (app, device) = try launch("federated", served: "federated")
+        for pane in ["w1:p1", "air/w1:p2", "studio/w1:p4", "nas/w2:p1"] {
+            XCTAssertTrue(row(app, pane).waitForExistence(timeout: 20), "\(pane) should be listed")
+        }
+        XCTAssertTrue(row(app, "air/w1:p2").label.contains("mcb-air/scout"),
+                      "a federated agent is named by its machine label, got \(row(app, "air/w1:p2").label)")
+        XCTAssertTrue(element(app, "agent-row-stale-marker").waitForExistence(timeout: 10),
+                      "the degraded peer's row should be marked stale")
+        capture(app, device: device, state: "federated")
+    }
+
+    /// The needs-you pill: scrolled to the end of the list, the 3 waiting rows are out of
+    /// sight and the pill under the top bar counts them.
+    func testNeedsYouPill() throws {
+        let (app, device) = try launch("needs-you", served: "needs-you")
+        XCTAssertTrue(row(app, "w1:p1").waitForExistence(timeout: 20), "the roster should load")
+        let pill = element(app, "needs-you-pill")
+        XCTAssertFalse(pill.exists, "no pill while the waiting rows are on screen")
+        // The end of the list, not a drag distance: the one scroll position every run, and
+        // the desktop, can reach exactly.
+        let roster = app.scrollViews["agent-roster-scroll"]
+        let last = row(app, "w2:p20")
+        for _ in 0..<10 where !(last.exists && last.isHittable) { roster.swipeUp() }
+        roster.swipeUp()
+        XCTAssertTrue(last.waitForHittable(timeout: 5), "the last row should be on screen")
+        XCTAssertTrue(pill.waitForExistence(timeout: 5), "the pill should show once the waiting rows are out of sight")
+        XCTAssertEqual(pill.label, "3 agents need you")
+        capture(app, device: device, state: "needs-you-pill")
+    }
+
+    /// The minimised sidebar: the rail's needs-you and working counts.
+    func testNeedsYouRail() throws {
+        let (app, device) = try launch("needs-you", served: "needs-you")
+        XCTAssertTrue(row(app, "w1:p1").waitForExistence(timeout: 20), "the roster should load")
+        let toggle = app.buttons["terminal-sidebar-toggle"]
+        XCTAssertTrue(toggle.waitForHittable(timeout: 10), "the sidebar's Minimise button should be on screen")
+        toggle.tap()
+        let count = app.descendants(matching: .any)["3 need you"]
+        XCTAssertTrue(count.waitForExistence(timeout: 10), "the rail should count 3 agents that need you")
+        XCTAssertTrue(app.descendants(matching: .any)["20 working"].exists, "the rail should count 20 working")
+        capture(app, device: device, state: "needs-you-rail")
+    }
+
     // MARK: Launch
+
+    /// The fixture the launched state serves and its sha256, for the capture's record.
+    private var served: (name: String, sha256: String)?
 
     /// Launches the mock in landscape at the default text size and returns the app and
     /// the device name for the attachments. Fails unless the app runs full screen on one
-    /// of the reference iPads at @2x, dark, with the clock pinned.
-    private func launch(_ state: String) throws -> (XCUIApplication, String) {
+    /// of the reference iPads at @2x, dark, with the clock pinned. `served` names the
+    /// state's fixture, desktop-reference-<served>.json; nil serves the desktop's agents.json.
+    private func launch(_ state: String, served name: String? = nil) throws -> (XCUIApplication, String) {
         guard UIDevice.current.userInterfaceIdiom == .pad else {
             throw XCTSkip("the desktop references are iPad screenshots")
         }
@@ -93,9 +207,17 @@ final class DesktopReferenceShots: XCTestCase {
         app.launchEnvironment = [
             "HERDR_SCREENSHOT_MOCK": "desktopref",
             "HERDR_DESKTOPREF_STATE": state,
-            "HERDR_DESKTOPREF_AGENT_LIST": try fixture(),
             "HERDR_MOCK_NOW": Self.clock,
         ]
+        if let name {
+            let sha256 = try XCTUnwrap(Self.servedSHA256[name], "no sha256 recorded for \(name)")
+            app.launchEnvironment["HERDR_DESKTOPREF_SERVED"] = try vendored("desktop-reference-\(name)", "json", sha256: sha256)
+            served = (name, sha256)
+        } else {
+            app.launchEnvironment["HERDR_DESKTOPREF_AGENT_LIST"] = try fixture()
+            served = nil
+        }
+        if name == "avatars" { try assertServedAvatarIsTheAsset() }
         app.launchArguments += ["-UIPreferredContentSizeCategoryName", Self.contentSize]
         app.launch()
 
@@ -114,12 +236,36 @@ final class DesktopReferenceShots: XCTestCase {
 
     /// The vendored fixture, checked against the sha256 the references record.
     private func fixture() throws -> String {
-        let url = try XCTUnwrap(Bundle(for: Self.self).url(forResource: Self.fixtureName, withExtension: "json"),
-                                "the vendored agent.list fixture should be in the test bundle")
+        try vendored(Self.fixtureName, "json", sha256: Self.fixtureSHA256)
+    }
+
+    /// A vendored file's bytes as UTF-8, checked against the sha256 the references record.
+    private func vendored(_ name: String, _ ext: String, sha256: String) throws -> String {
+        try XCTUnwrap(String(data: vendoredData(name, ext, sha256: sha256), encoding: .utf8))
+    }
+
+    private func vendoredData(_ name: String, _ ext: String, sha256: String) throws -> Data {
+        let url = try XCTUnwrap(Bundle(for: Self.self).url(forResource: name, withExtension: ext),
+                                "\(name).\(ext) should be in the test bundle")
         let data = try Data(contentsOf: url)
-        let digest = SHA256.hash(data: data).map { String(format: "%02x", $0) }.joined()
-        XCTAssertEqual(digest, Self.fixtureSHA256, "the vendored fixture is not the one the references name")
-        return try XCTUnwrap(String(data: data, encoding: .utf8))
+        XCTAssertEqual(Self.sha256(data), sha256, "the vendored \(name).\(ext) is not the one the references name")
+        return data
+    }
+
+    /// The avatars fixture serves exactly the committed picture, under its own sha256.
+    private func assertServedAvatarIsTheAsset() throws {
+        let png = try vendoredData("desktop-reference-avatar", "png", sha256: Self.avatarSHA256)
+        let served = try vendoredData("desktop-reference-avatars", "json",
+                                      sha256: try XCTUnwrap(Self.servedSHA256["avatars"]))
+        let object = try XCTUnwrap(try JSONSerialization.jsonObject(with: served) as? [String: Any])
+        let images = try XCTUnwrap(object["agent.avatar.get"] as? [String: Any])
+        let image = try XCTUnwrap(images[Self.avatarSHA256] as? [String: Any], "the picture is not served by its sha256")
+        let base64 = try XCTUnwrap(image["data_base64"] as? String)
+        XCTAssertEqual(Data(base64Encoded: base64), png, "the served picture is not desktop-reference-avatar.png")
+    }
+
+    private static func sha256(_ data: Data) -> String {
+        SHA256.hash(data: data).map { String(format: "%02x", $0) }.joined()
     }
 
     /// The probe's `key=value;…` accessibility value.
@@ -136,7 +282,26 @@ final class DesktopReferenceShots: XCTestCase {
     // MARK: Roster
 
     private func row(_ app: XCUIApplication, _ paneID: String) -> XCUIElement {
-        app.descendants(matching: .any)["agent-row-\(paneID)"]
+        element(app, "agent-row-\(paneID)")
+    }
+
+    private func element(_ app: XCUIApplication, _ identifier: String) -> XCUIElement {
+        app.descendants(matching: .any)[identifier]
+    }
+
+    /// Whether `row` draws the avatar `kind` (`agent-avatar-<kind>`, labelled `named`): by
+    /// that avatar inside the row, or, where the row merges its children into one element,
+    /// by the row's label (as AgentAvatarUITests checks). Waits for a picture to load.
+    private func avatar(_ app: XCUIApplication, in row: XCUIElement, _ kind: String, named: String) -> Bool {
+        poll(15, every: 0.25) {
+            guard row.exists else { return false }
+            let frame = row.frame
+            let inside = app.descendants(matching: .any).matching(identifier: "agent-avatar-\(kind)")
+                .allElementsBoundByIndex
+                .contains { frame.contains(CGPoint(x: $0.frame.midX, y: $0.frame.midY)) && $0.label.contains(named) }
+            let loading = app.descendants(matching: .any)["agent-avatar-loading"].exists
+            return inside || (!loading && row.label.contains(named))
+        }
     }
 
     /// The fixture as the roster first draws it: needs you (api-review, docs), the
@@ -215,7 +380,8 @@ final class DesktopReferenceShots: XCTestCase {
         var fields = conditions(app.otherElements["desktopref-probe"])
         fields["state"] = state
         fields["device"] = device
-        fields["fixtureSHA256"] = Self.fixtureSHA256
+        fields["fixture"] = served.map { "desktop-reference-\($0.name).json" } ?? "\(Self.fixtureName).json"
+        fields["fixtureSHA256"] = served?.sha256 ?? Self.fixtureSHA256
         fields["pixels"] = "\(pixels.0)x\(pixels.1)"
         let json = (try? JSONSerialization.data(withJSONObject: fields, options: [.sortedKeys, .prettyPrinted])) ?? Data()
         let record = XCTAttachment(uniformTypeIdentifier: "public.json", name: "\(name).json",

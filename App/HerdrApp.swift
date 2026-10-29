@@ -1920,7 +1920,8 @@ struct TerminalHomeView: View {
     /// initializer"). Both readers name `Self.sidebarMinimizedKey` so a rename cannot
     /// desync them — and the desync would be SILENT, since the layout would simply be
     /// born expanded while the preference said otherwise.
-    private static let sidebarMinimizedKey = "ui.sidebarMinimized"
+    /// Internal, not private, only so the DEBUG `desktopref` mock can start expanded.
+    static let sidebarMinimizedKey = "ui.sidebarMinimized"
     @State private var columnVisibility: NavigationSplitViewVisibility =
         UserDefaults.standard.bool(forKey: Self.sidebarMinimizedKey) ? .detailOnly : .all
     /// Whether the sidebar is MINIMISED to the icon rail, remembered across launches.
