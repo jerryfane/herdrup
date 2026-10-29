@@ -62,6 +62,8 @@ struct GuestPaneView: View {
     @State private var uploader = ComposerUploader()
     @State private var loadingAttachment = false
     @State private var showAttachSheet = false
+    /// A FILE drag is hovering the terminal (#575), which drops into this composer.
+    @State private var terminalDropTargeted = false
     @State private var findOpen = false
     @State private var findTerm = ""
     @State private var findGeneration = 0
@@ -197,16 +199,7 @@ struct GuestPaneView: View {
         .composerAttachPicker(
             isPresented: $showAttachSheet, loading: $loadingAttachment,
             room: { ComposerStaging.maxAttachments - attachments.count }
-        ) { outcome in
-            let picked = outcome.files.map {
-                ComposerAttachment(name: $0.name, mime: $0.mime,
-                                   isImage: $0.mime.hasPrefix("image/"), staged: $0.staged)
-            }
-            attachments += picked
-            // Upload at once, so Send only has to post them and prompt.
-            uploader.start(picked, client: client, into: $attachments)
-            note = outcome.note
-        }
+        ) { outcome in addPicked(outcome) }
         // Leaving the pane stops its uploads (a send waiting on one keeps it); closing it
         // for good releases the uploader, which cancels and discards them.
         .onDisappear { uploader.pause() }
@@ -446,11 +439,26 @@ struct GuestPaneView: View {
                     findRequest: showingChat ? nil : findRequest,
                     onFindResult: { index, total in
                         if !showingChat { findMatches = (index, total, false) }
-                    })
+                    },
+                    // A file dropped anywhere on the terminal joins the composer, under the
+                    // paperclip's own rule: only while the guest may attach (#575).
+                    fileDrop: showingTerminal && canAttach ? TerminalFileDrop(
+                        onTargetChange: { terminalDropTargeted = $0 },
+                        onDrop: { acceptDroppedFiles($0) }) : nil)
                     .id(streamGen)
                     .accessibilityIdentifier("guest-terminal")
                     // The owner's terminal inset.
                     .padding(.horizontal, 8)
+                    // The composer's drop highlight, around the whole terminal while a file
+                    // drag hovers it; never hit-tests.
+                    .overlay {
+                        if terminalDropTargeted && showingTerminal {
+                            RoundedRectangle(cornerRadius: 12)
+                                .strokeBorder(Palette.brand, lineWidth: 2)
+                                .allowsHitTesting(false)
+                                .accessibilityIdentifier("guest-terminal-drop-highlight")
+                        }
+                    }
                     // The owner's jump button while the guest reads history; a local scroll
                     // (view-only sends nothing).
                     .overlay(alignment: .bottom) {
@@ -501,6 +509,9 @@ struct GuestPaneView: View {
     // MARK: - Composer
 
     private var canCompose: Bool { availability == .running }
+    /// When the composer takes an attachment: the paperclip's own enabled state, which a
+    /// terminal drop shares.
+    private var canAttach: Bool { canCompose && !sending && !loadingAttachment }
 
     private var hasContent: Bool {
         !attachments.isEmpty || !reply.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
@@ -628,7 +639,7 @@ struct GuestPaneView: View {
         } actions: {
             HStack(spacing: 4) {
                 ComposerAttachButton(busy: loadingAttachment) { showAttachSheet = true }
-                    .disabled(!canCompose || sending || loadingAttachment)
+                    .disabled(!canAttach)
                     .accessibilityIdentifier("guest-attach-button")
                 MicButton(text: $reply, recording: $dictating)
                     .fixedSize()
@@ -659,6 +670,33 @@ struct GuestPaneView: View {
         .padding(.horizontal, 12)
         .opacity(canCompose ? 1 : 0.45)
         .disabled(!canCompose)
+    }
+
+    /// Staged picks or drops join the draft and start uploading at once, so Send only has
+    /// to post them and prompt.
+    private func addPicked(_ outcome: ComposerPickOutcome) {
+        let picked = outcome.files.map {
+            ComposerAttachment(name: $0.name, mime: $0.mime,
+                               isImage: $0.mime.hasPrefix("image/"), staged: $0.staged)
+        }
+        attachments += picked
+        uploader.start(picked, client: client, into: $attachments)
+        note = outcome.note
+    }
+
+    /// Files dropped on the terminal (#575), staged by the composer's paste and drop rule
+    /// (`PastedFile`) within the attachment cap, then added exactly as a paperclip pick.
+    private func acceptDroppedFiles(_ providers: [NSItemProvider]) -> Bool {
+        let files = TerminalFileDrop.files(in: providers)
+        guard canAttach, !files.isEmpty else { return false }
+        let room = ComposerStaging.maxAttachments - attachments.count
+        loadingAttachment = true
+        Task { @MainActor in
+            let outcome = await PastedFile.stageAll(files, room: room)
+            loadingAttachment = false
+            addPicked(outcome)
+        }
+        return true
     }
 
     private func attachmentChip(_ file: ComposerAttachment) -> some View {
