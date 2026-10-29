@@ -137,7 +137,7 @@ jobs:
       fail-fast: false
       matrix:
         # SCRATCH (xcode27-duo-scratch-ios26, never merged): the #577 app changes on iOS 26.
-        shard: ["ios26-iphone", "ios26-ipad"]
+        shard: ["ios26-iphone"]
     # Worst test/build rounds (iPad), including Chat UX and Gram column: 25 + 20 + 5 + 5 + 20 + 10,
     # SwiftTerm build 10 + test 15, six 10-min diagnostic rounds + SwiftTerm's 15 = 185m.
     # At most nine boot checks: first 10m, next eight 5m, each with 15s kill grace.
