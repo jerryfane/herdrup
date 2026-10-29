@@ -102,6 +102,13 @@ final class ServerUpdateUITests: XCTestCase {
         XCTAssertTrue(waitForTitle(app, "Update herdr on mac-mini"))
         XCTAssertTrue(app.staticTexts["Folders and avatars need herdr 0.9.5. mac-mini has 0.9.3."].exists)
         XCTAssertTrue(app.buttons["server-update-button"].exists)
+        // The one update UI sits right under the Connection row, where the retired staged-build
+        // card used to be.
+        let daemonLine = app.staticTexts.matching(NSPredicate(format: "label BEGINSWITH 'herdr daemon'")).firstMatch
+        XCTAssertTrue(daemonLine.waitForExistence(timeout: 10), "no daemon version line")
+        XCTAssertGreaterThan(card(app).frame.minY, daemonLine.frame.maxY,
+                             "the update card should sit under the Connection row")
+        XCTAssertFalse(app.buttons["Update & restart"].exists, "the retired staged-build card is gone")
         record(app, "available")
     }
 

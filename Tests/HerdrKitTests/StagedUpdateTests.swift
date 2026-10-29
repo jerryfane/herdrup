@@ -1,9 +1,10 @@
 import XCTest
 @testable import HerdrKit
 
-/// Decode tests for `server.staged_update` / `server.apply_staged_update` wire types. The JSON is
-/// built the way the daemon serializes `ResponseResult` — internally tagged with a `type` key and
-/// snake_case fields — so a wrong CodingKey or a missed tag-ignore fails here rather than on-device.
+/// Decode tests for the `server.staged_update` wire type, read only for the daemon's version line.
+/// The JSON is built the way the daemon serializes `ResponseResult` — internally tagged with a
+/// `type` key and snake_case fields — so a wrong CodingKey or a missed tag-ignore fails here rather
+/// than on-device.
 final class StagedUpdateTests: XCTestCase {
 
     private func decodeStaged(_ obj: [String: Any]) throws -> StagedUpdate {
@@ -11,9 +12,9 @@ final class StagedUpdateTests: XCTestCase {
         return try JSONDecoder().decode(StagedUpdate.self, from: data)
     }
 
-    /// A staged build present: nested object decodes, snake_case → camelCase maps, and the
-    /// internally-tagged `type` key is ignored (it has no field on the struct).
-    func testDecodesStagedUpdateWithAStagedBuild() throws {
+    /// The running version/protocol decode, snake_case → camelCase maps, and both the internally-
+    /// tagged `type` key and a staged build an older server may still report are ignored.
+    func testDecodesRunningVersionAndIgnoresAStagedBuild() throws {
         let update = try decodeStaged([
             "type": "staged_update",
             "running_version": "0.8.0",
@@ -26,22 +27,6 @@ final class StagedUpdateTests: XCTestCase {
         ])
         XCTAssertEqual(update.runningVersion, "0.8.0")
         XCTAssertEqual(update.runningProtocol, 20)
-        XCTAssertEqual(update.staged?.version, "0.8.0")
-        XCTAssertEqual(update.staged?.sha, "b3e34990")
-        XCTAssertEqual(update.staged?.builtAt, "2026-08-23T18:43:06Z",
-                       "built_at must map to builtAt — a wrong CodingKey fails here")
-    }
-
-    /// Nothing staged: the daemon omits `staged` (it is `skip_serializing_if = Option::is_none`), so
-    /// `staged` decodes to nil. This is the "no update available" state the UI keys off.
-    func testDecodesStagedUpdateWithNothingStaged() throws {
-        let update = try decodeStaged([
-            "type": "staged_update",
-            "running_version": "0.8.0",
-            "running_protocol": 20,
-        ])
-        XCTAssertNil(update.staged, "an omitted staged object is 'no update available'")
-        XCTAssertEqual(update.runningVersion, "0.8.0")
     }
 
     /// The full wire path: `{ id, result: { type: staged_update, ... } }` unwraps through
@@ -53,12 +38,12 @@ final class StagedUpdateTests: XCTestCase {
         "staged":{"version":"0.8.0","sha":"b3e34990","built_at":"2026-08-23T18:43:06Z"}}}
         """#
         let env = try JSONDecoder().decode(ResultEnvelope<StagedUpdate>.self, from: Data(line.utf8))
-        XCTAssertEqual(env.result.staged?.sha, "b3e34990")
+        XCTAssertEqual(env.result.runningVersion, "0.8.0")
     }
 
-    /// A clean apply returns `{ type: "ok" }`; `OkAck` decodes it by ignoring the tag. (The apply may
-    /// instead throw a transport error when the daemon drops mid-handoff — that path is the caller's.)
-    func testOkAckDecodesTheApplyAcknowledgement() throws {
+    /// A command that returns `{ type: "ok" }` (e.g. `guest.revoke`); `OkAck` decodes it by ignoring
+    /// the tag.
+    func testOkAckDecodesAnOkResult() throws {
         let data = try JSONSerialization.data(withJSONObject: ["type": "ok"])
         XCTAssertNoThrow(try JSONDecoder().decode(OkAck.self, from: data))
     }
@@ -75,56 +60,5 @@ final class StagedUpdateTests: XCTestCase {
             "type": "staged_update", "running_version": "0.8.0", "running_protocol": 20,
         ])
         XCTAssertNil(without.runningSha, "an older daemon omits running_sha")
-    }
-
-    /// `updateAvailable` is the button gate: true only when a staged build differs from what's
-    /// running. Nothing staged → false; a staged sha equal to running → false (no phantom); a
-    /// different staged sha → true; and with no running_sha (older daemon) it falls back to
-    /// "a build is staged".
-    func testUpdateAvailableComparesShas() throws {
-        func make(runningSha: String?, stagedSha: String?) throws -> StagedUpdate {
-            var obj: [String: Any] = [
-                "type": "staged_update", "running_version": "0.8.0", "running_protocol": 20,
-            ]
-            if let runningSha { obj["running_sha"] = runningSha }
-            if let stagedSha {
-                obj["staged"] = ["version": "0.8.0", "sha": stagedSha, "built_at": "2026-08-24T00:00:00Z"]
-            }
-            return try decodeStaged(obj)
-        }
-        XCTAssertFalse(try make(runningSha: "aaa", stagedSha: nil).updateAvailable, "nothing staged → false")
-        XCTAssertFalse(try make(runningSha: "aaa", stagedSha: "aaa").updateAvailable, "same sha → false (no phantom)")
-        XCTAssertTrue(try make(runningSha: "aaa", stagedSha: "bbb").updateAvailable, "different sha → true")
-        XCTAssertTrue(try make(runningSha: nil, stagedSha: "bbb").updateAvailable, "no running_sha → fall back to staged-present")
-
-        // The producers disagree on LENGTH: `staged-build.json` records a short sha, the daemon
-        // reports the full 40. Equality made that a permanent phantom update - observed live on
-        // 2026-09-09 with staged `5a244caa` against running
-        // `5a244caa60b0c3a5742315c59d20ed81c05bc23e`.
-        let full = "5a244caa60b0c3a5742315c59d20ed81c05bc23e"
-        XCTAssertFalse(
-            try make(runningSha: full, stagedSha: "5a244caa").updateAvailable,
-            "an abbreviated sha of the running commit is not an update"
-        )
-        XCTAssertFalse(
-            try make(runningSha: full, stagedSha: "5A244CAA").updateAvailable,
-            "git shas are hex: the match is case-insensitive"
-        )
-        XCTAssertTrue(
-            try make(runningSha: full, stagedSha: "5a244cab").updateAvailable,
-            "a one-character difference in the abbreviation is a different commit"
-        )
-        XCTAssertTrue(
-            try make(runningSha: full, stagedSha: full + "0000").updateAvailable,
-            "a staged sha longer than the running commit is not an abbreviation of it"
-        )
-        XCTAssertTrue(
-            try make(runningSha: full, stagedSha: "").updateAvailable,
-            "an unidentifiable staged build is surfaced rather than hidden"
-        )
-        XCTAssertTrue(
-            try make(runningSha: "", stagedSha: "5a244caa").updateAvailable,
-            "an empty running sha cannot identify the build either"
-        )
     }
 }
