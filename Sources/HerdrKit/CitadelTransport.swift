@@ -365,9 +365,10 @@ public actor CitadelTransport: HerdrTransport, MachineFederationTransport, Sessi
         herdrCommand(["api-bridge", "--multi"], session: session)
     }
 
-    /// The exec command line for a pane's `pane.input.stream`: `remote-api-bridge`
-    /// forwards stdin to the daemon socket for the channel's whole life, which
-    /// `api-bridge` does not.
+    /// The exec command line for a held byte stream to the daemon socket — a pane's
+    /// `pane.input.stream` and a gram attachment's `gram.upload.stream`:
+    /// `remote-api-bridge` forwards stdin to the daemon socket for the channel's whole
+    /// life, which `api-bridge` does not.
     static func inputStreamBridgeCommand(session: String?) -> String {
         herdrCommand(["remote-api-bridge"], session: session)
     }
@@ -641,11 +642,18 @@ public actor CitadelTransport: HerdrTransport, MachineFederationTransport, Sessi
     }
 
     /// Opens a streaming upload channel for one gram attachment: a dedicated SSH
-    /// exec channel running `herdr api-bridge --duplex`, over which
-    /// `GramUploadChannel` writes chunk frames to the daemon's
-    /// `gram.upload.stream`. Its own connection keeps upload backpressure off
-    /// the command socket and pane.stream firehose. `openLine` is the JSON
-    /// `gram.upload.stream` open request the `--duplex` bridge reads first.
+    /// exec channel running `herdr remote-api-bridge`, over which
+    /// `GramUploadChannel` writes the `gram.upload.stream` open line and then chunk
+    /// frames. Its own connection keeps upload backpressure off the command socket
+    /// and pane.stream firehose.
+    ///
+    /// NOT `api-bridge --duplex`: herdr removed `api-bridge` after its upstream rebase
+    /// (herdr 281341f5) and restored it WITHOUT `--duplex` (1956ea4e). Since then
+    /// `api-bridge` read `--duplex` as a base64 request and exited, every stream open
+    /// failed, and EVERY upload fell back to 48 KiB `gram.upload_chunk` round trips
+    /// (herdrup#573).
+    /// `remote-api-bridge` is older than `gram.upload.stream` itself, so every host
+    /// advertising `gram_upload_stream` has it.
     ///
     /// Deliberately NOT part of `HerdrTransport`: that protocol has two members,
     /// and a third would force an implementation into all 21 conformances (18 of
@@ -654,7 +662,7 @@ public actor CitadelTransport: HerdrTransport, MachineFederationTransport, Sessi
     public nonisolated func openUploadChannel(_ openLine: String) -> GramUploadChannel {
         GramUploadChannel(
             makeConnection: { try await self.makeConnection() },
-            command: Self.herdrCommand(["api-bridge", "--duplex"], session: credentials.session),
+            command: Self.inputStreamBridgeCommand(session: credentials.session),
             openLine: openLine
         )
     }
@@ -715,6 +723,17 @@ actor SSHConnectionCore {
         self.hostKeyValidator = hostKeyValidator
         self.connectTimeoutNanoseconds = connectTimeoutNanoseconds
     }
+
+    /// The SSH maximum packet size this client offers, which swift-nio-ssh ALSO uses
+    /// as every channel's receive window (`SSHChannelMultiplexer` opens each child
+    /// with `targetWindowSize: maximumPacketSize`). Its default, 128 KiB, let the
+    /// host have at most 128 KiB in flight per channel and topped every download at
+    /// 128 KiB per round trip — about 1 MB/s of file on a 100 ms link, whatever the
+    /// bandwidth (herdrup#573). 2 MiB is OpenSSH's own channel window
+    /// (`CHAN_SES_WINDOW_DEFAULT`), so a host now sends as fast as it would to `ssh`.
+    /// Nothing on the wire changes: the window and packet limit are what this side
+    /// advertises, and sshd sends each data packet at its own size, far below this.
+    static let maximumPacketSize = 2 * 1024 * 1024
 
     /// Returns the held client, connecting on first use or after a drop.
     ///
@@ -798,7 +817,8 @@ actor SSHConnectionCore {
                 port: port,
                 authenticationMethod: method,
                 hostKeyValidator: validator,
-                reconnect: .never
+                reconnect: .never,
+                protocolOptions: [.maximumPacketSize(SSHConnectionCore.maximumPacketSize)]
             )
         }
         do {

@@ -95,6 +95,94 @@ final class GramUploadChannelTests: XCTestCase {
         }
     }
 
+    /// A started channel whose daemon is played by the test: the connection never
+    /// resolves, so frames stay queued, and acks are fed through `handleLine`.
+    private func openedChannel() async throws -> GramUploadChannel {
+        let channel = stalledChannel(closeGrace: 200_000_000)
+        let start = Task { try await channel.start() }
+        // The open line's ack. `start` parks until it lands (or picks it up if it
+        // lands first), so no ordering between the two is needed.
+        await channel.handleLine(#"{"id":"t","result":{"type":"ok"}}"#)
+        try await start.value
+        return channel
+    }
+
+    /// herdrup#573: one frame in flight idled the link for a round trip per
+    /// 512 KiB. `maxFramesInFlight - 1` frames must now be written without waiting,
+    /// the next must park until the OLDEST ack, and `finish` until the last one.
+    func testFramesRideAheadOfTheirAcksUpToTheWindow() async throws {
+        let channel = try await openedChannel()
+        let window = GramUploadChannel.maxFramesInFlight
+        XCTAssertGreaterThan(window, 1)
+        for index in 0..<(window - 1) {
+            try await channel.sendChunk(offset: UInt64(index), dataBase64: "aGk=")
+        }
+
+        let returned = Locked(false)
+        let parked = Task {
+            try await channel.sendChunk(offset: UInt64(window), dataBase64: "aGk=")
+            returned.set(true)
+        }
+        try await Task.sleep(nanoseconds: 100_000_000)
+        XCTAssertFalse(returned.value, "a full window must wait for an ack")
+        await channel.handleLine(#"{"seq":1,"ok":true}"#)
+        try await parked.value
+        XCTAssertTrue(returned.value)
+
+        let finished = Locked(false)
+        let finish = Task {
+            try await channel.finish()
+            finished.set(true)
+        }
+        for seq in 2..<window {
+            await channel.handleLine(#"{"seq":\#(seq),"ok":true}"#)
+        }
+        try await Task.sleep(nanoseconds: 100_000_000)
+        XCTAssertFalse(finished.value, "finish must wait for the last frame's ack")
+        await channel.handleLine(#"{"seq":\#(window),"ok":true}"#)
+        try await finish.value
+        XCTAssertTrue(finished.value)
+        await channel.close()
+    }
+
+    /// With frames in flight a rejection can arrive while nobody waits on it; it
+    /// must surface on the next call instead of being lost.
+    func testAFrameErrorBetweenCallsIsThrownByTheNext() async throws {
+        let channel = try await openedChannel()
+        try await channel.sendChunk(offset: 0, dataBase64: "aGk=")
+        await channel.handleLine(#"{"seq":1,"error":{"code":"offset_mismatch","message":"bad offset"}}"#)
+        do {
+            try await channel.finish()
+            XCTFail("finish must rethrow the frame error")
+        } catch let error as GramUploadChannel.ChannelError {
+            XCTAssertEqual(error, .remoteError(APIError(code: "offset_mismatch", message: "bad offset")))
+        }
+        await channel.close()
+    }
+
+    /// Acks come in order; one for a later frame is a disagreement about what landed.
+    func testAnOutOfOrderAckIsFatal() async throws {
+        let channel = try await openedChannel()
+        try await channel.sendChunk(offset: 0, dataBase64: "aGk=")
+        try await channel.sendChunk(offset: 3, dataBase64: "aGk=")
+        await channel.handleLine(#"{"seq":2,"ok":true}"#)
+        do {
+            try await channel.finish()
+            XCTFail("an out-of-order ack must fail the upload")
+        } catch let GramUploadChannel.ChannelError.remoteError(error) {
+            XCTAssertEqual(error.code, "invalid_sequence")
+        }
+        await channel.close()
+    }
+
+    private final class Locked<Value: Sendable>: @unchecked Sendable {
+        private let lock = NSLock()
+        private var stored: Value
+        init(_ value: Value) { stored = value }
+        var value: Value { lock.lock(); defer { lock.unlock() }; return stored }
+        func set(_ value: Value) { lock.lock(); stored = value; lock.unlock() }
+    }
+
     /// Every `upload_id` is distinct, since the daemon keys its staging file and its
     /// single-writer claim on it — a repeat would collide with a live upload.
     func testMintedUploadIDsAreDistinctAndSafePathComponents() {

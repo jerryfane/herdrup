@@ -3,7 +3,7 @@ import Foundation
 import NIOCore
 
 /// A streaming upload channel for ONE gram attachment. Holds a single SSH
-/// exec channel running `herdr api-bridge --duplex` for the upload's lifetime and writes
+/// exec channel running `herdr remote-api-bridge` for the upload's lifetime and writes
 /// newline-delimited chunk frames to the daemon's `gram.upload.stream`, instead
 /// of one `herdr api-bridge` exec per chunk.
 ///
@@ -17,11 +17,15 @@ import NIOCore
 ///
 /// 1. The encoder must not escape `/`. Base64 is slash-dense (an all-`0xFF` chunk
 ///    is ALL `/`), and JSONEncoder's default escaping nearly doubles those bytes.
-/// 2. `sendChunk` AWAITS the daemon's ack. Fire-and-forget is right for
-///    keystrokes and catastrophic for a 100 MB file: the whole point of streaming
-///    from disk is that resident memory stays at one chunk, which an unbounded
-///    queue would undo. The ack is also the only place a rejected chunk can
-///    surface, since an upload has no echo channel.
+/// 2. `sendChunk` keeps at most `maxFramesInFlight` frames unacked, and `finish`
+///    waits for the last ack. Fire-and-forget is right for keystrokes and
+///    catastrophic for a 100 MB file: the whole point of streaming from disk is
+///    that resident memory stays at a few chunks, which an unbounded queue would
+///    undo. The acks are also the only place a rejected chunk can surface, since an
+///    upload has no echo channel. One frame in flight, though, idles the link for a
+///    round trip per 512 KiB — about 2 MB/s at 120 ms (herdrup#573) — and the
+///    daemon reads frames in order off one connection, so it needs no change to
+///    take several.
 /// 3. `remoteError` carries a DECODED `APIError`, because the caller must tell
 ///    "this daemon has no such method" (fall back) from "offset mismatch" or
 ///    "another stream owns this upload" (do not).
@@ -88,9 +92,21 @@ public actor GramUploadChannel {
     private var openOutcome: Result<Void, Error>?
     private var openSettled = false
 
-    // Frames are strictly sequential, so ONE ack slot suffices.
+    /// Frames are acked in order, so the frames written but not yet acked are a
+    /// FIFO of their sequence numbers.
+    private var unacked: [UInt64] = []
+    /// The one caller parked until at most `waitingFor` frames are unacked:
+    /// `sendChunk` waiting for window space, or `finish` for the last ack.
     private var ackContinuation: CheckedContinuation<Void, Error>?
-    private var pendingSeq: UInt64?
+    private var waitingFor = 0
+    /// A frame error the daemon sent while nobody was parked, rethrown by the
+    /// next `sendChunk` or `finish` rather than lost.
+    private var frameFailure: Error?
+
+    /// How many chunk frames may be written ahead of their acks: a few round trips'
+    /// worth of a 512 KiB frame keeps a 100 ms link busy, and bounds what is resident
+    /// to ~4 × 700 KB of encoded frames.
+    static let maxFramesInFlight = 4
 
     /// How long [`closeAndWait`] may wait for the SSH session to go away before the
     /// runner is cancelled. Injectable for the same reason
@@ -148,9 +164,11 @@ public actor GramUploadChannel {
         }
     }
 
-    /// Writes one chunk frame and awaits its ack, so a large file cannot queue in
-    /// memory and a rejected chunk surfaces at the chunk that caused it.
+    /// Writes one chunk frame, then waits while `maxFramesInFlight` frames are
+    /// unacked, so a large file cannot queue in memory and a rejected chunk surfaces
+    /// within a few chunks of the one that caused it. Call `finish` after the last.
     public func sendChunk(offset: UInt64, dataBase64: String) async throws {
+        if let frameFailure { throw frameFailure }
         guard live, let framesCont else { throw ChannelError.closedBeforeFrameAck }
         seq &+= 1
         let frameSeq = seq
@@ -161,18 +179,34 @@ public actor GramUploadChannel {
         buffer.writeString(line)
         buffer.writeInteger(UInt8(ascii: "\n"))
 
+        try Task.checkCancellation()
+        unacked.append(frameSeq)
+        framesCont.yield(buffer)
+        try await awaitAcks(untilAtMost: Self.maxFramesInFlight - 1)
+    }
+
+    /// Waits for the daemon to ack every frame written so far, so the caller knows
+    /// the whole file is staged and every rejection has surfaced. Call it after the
+    /// last `sendChunk` and before `closeAndWait`.
+    public func finish() async throws {
+        if let frameFailure { throw frameFailure }
+        try await awaitAcks(untilAtMost: 0)
+    }
+
+    private func awaitAcks(untilAtMost limit: Int) async throws {
+        guard unacked.count > limit else { return }
+        guard live else { throw ChannelError.closedBeforeFrameAck }
         // A cancelled upload must not leave this task parked forever: nothing else
-        // resumes the ack (the resumers are an ack line, a frame error, `close()` and
+        // resumes the wait (the resumers are an ack line, a frame error, `close()` and
         // `markDead()`), and the caller's `defer`-based close cannot run while it is
-        // suspended here. Cancelling tears the channel down, which resumes the ack
+        // suspended here. Cancelling tears the channel down, which resumes the wait
         // with `closedBeforeFrameAck`.
         try Task.checkCancellation()
         try await withTaskCancellationHandler {
             try await withCheckedThrowingContinuation {
                 (continuation: CheckedContinuation<Void, Error>) in
-                pendingSeq = frameSeq
+                waitingFor = limit
                 ackContinuation = continuation
-                framesCont.yield(buffer)
             }
         } onCancel: {
             Task { await self.close() }
@@ -337,7 +371,9 @@ public actor GramUploadChannel {
         markDead()
     }
 
-    private func handleLine(_ line: String) {
+    /// One stdout line from the daemon. Internal so tests can play the daemon's
+    /// acks without an SSH connection.
+    func handleLine(_ line: String) {
         guard let wire = decode(line) else { return }
 
         if !openSettled {
@@ -353,28 +389,33 @@ public actor GramUploadChannel {
 
         if let error = wire.error {
             // A frame error is terminal: staging is append-only, so the daemon
-            // closes the channel and the upload cannot continue on it.
-            resumeAck(.failure(ChannelError.remoteError(apiError(from: error))))
-            markDead()
+            // closes the channel and the upload cannot continue on it. Kept for the
+            // next call too: with frames in flight nobody may be parked right now.
+            fail(ChannelError.remoteError(apiError(from: error)))
             return
         }
 
         guard wire.ok == true, let seq = wire.seq else { return }
-        guard seq == pendingSeq else {
-            // An ack for a frame we are not waiting on means the channel and the
-            // client disagree about ordering; treat it as fatal rather than
+        guard seq == unacked.first else {
+            // An ack out of order, or for a frame never written, means the channel
+            // and the client disagree about ordering; treat it as fatal rather than
             // silently accepting a chunk that may not have landed.
-            resumeAck(
-                .failure(
-                    ChannelError.remoteError(
-                        APIError(
-                            code: "invalid_sequence",
-                            message: "ack for seq \(seq) while awaiting \(pendingSeq.map(String.init) ?? "none")"
-                        ))))
-            markDead()
+            fail(
+                ChannelError.remoteError(
+                    APIError(
+                        code: "invalid_sequence",
+                        message: "ack for seq \(seq) while awaiting \(unacked.first.map(String.init) ?? "none")"
+                    )))
             return
         }
-        resumeAck(.success(()))
+        unacked.removeFirst()
+        if unacked.count <= waitingFor { resumeAck(.success(())) }
+    }
+
+    private func fail(_ error: Error) {
+        if frameFailure == nil { frameFailure = error }
+        resumeAck(.failure(error))
+        markDead()
     }
 
     private func decode(_ line: String) -> WireLine? {
@@ -400,7 +441,6 @@ public actor GramUploadChannel {
     private func resumeAck(_ result: Result<Void, Error>) {
         guard let continuation = ackContinuation else { return }
         ackContinuation = nil
-        pendingSeq = nil
         continuation.resume(with: result)
     }
 
