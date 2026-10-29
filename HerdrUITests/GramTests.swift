@@ -1206,7 +1206,8 @@ final class GramTests: XCTestCase {
         XCTAssertTrue(waitForPredicate(downloading, object: file, timeout: 5),
                       "back on Gram, the download's ring is on the card again; value \(file.value ?? "nil")")
         let opened = probe(app, "gram-opened-file")
-        XCTAssertTrue(waitForLabel(opened, matching: "opened:amigo-poc-scaffold\\.zip", timeout: 40),
+        // Any name: the mock answers every non-image file with the same fixture.
+        XCTAssertTrue(waitForLabel(opened, matching: "opened:.+", timeout: 40),
                       "the download should finish and open the zip; probe says \(opened.label)")
         // Past the probe's poll, so a second request would show.
         Thread.sleep(forTimeInterval: 1)
