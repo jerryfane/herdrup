@@ -159,11 +159,9 @@ struct GramView: View {
     /// Messages with a mark-read in flight, so a re-`onAppear` (scroll) does not fire
     /// a duplicate `gram.mark_read`.
     @State private var markingRead: Set<String> = []
-    /// Free-text filter over the visible section, when the host does not own it (iPhone).
-    /// A transient view concern, unlike `showingSaved`, which the sidebar owns.
+    /// Free-text filter when the host does not supply shared search state.
     @State private var localSearch = ""
-    /// The filter in force: the host's sidebar field when it passes `searchText` (iPad and
-    /// Mac), else this page's own header field.
+    /// Shared across sidebar and compact header when the host supplies `searchText`.
     private var search: String {
         get { searchText?.wrappedValue ?? localSearch }
         nonmutating set {
@@ -174,6 +172,8 @@ struct GramView: View {
     /// Whether the header's search field is showing (iPhone, or a host without a sidebar
     /// field): the magnifier-then-field the terminal header uses (`InlineSearchField`).
     @State private var searchOpen = false
+    /// A query entered in the sidebar must remain visible and clearable after narrowing.
+    private var searchFieldIsOpen: Bool { searchOpen || !search.isEmpty }
     @FocusState private var searchFocused: Bool
     /// The "N unread" rule: where it sits (the oldest unread message) and how many there
     /// were. Captured before the first mark-read of a visit, so reading the messages does not
@@ -624,7 +624,7 @@ struct GramView: View {
                     headerTrailing
                 }
             }
-            if offersOwnSearch, searchOpen { searchField.frame(maxWidth: 420) }
+            if offersOwnSearch, searchFieldIsOpen { searchField.frame(maxWidth: 420) }
         }
         .padding(.horizontal, 16)
         .padding(.top, 8)
@@ -649,15 +649,16 @@ struct GramView: View {
 
     private var canFilter: Bool { showingSaved || phase == .loaded }
 
-    /// Whether this page draws its own search control: only where there is something to
-    /// filter, and never when the host's sidebar owns the search (`searchText`).
-    private var offersOwnSearch: Bool { canFilter && searchText == nil }
+    /// Shared state does not imply a visible sidebar: compact layouts own their controls.
+    private var offersOwnSearch: Bool {
+        canFilter && (searchText == nil || hSizeClass != .regular)
+    }
 
     /// Opens the field and takes focus, or closes it and clears the term — clearing is
     /// what restores the unfiltered list, so a hidden field can never leave the list
     /// silently filtered.
     private func toggleSearch() {
-        if searchOpen {
+        if searchFieldIsOpen {
             searchOpen = false
             search = ""
             searchFocused = false
@@ -667,13 +668,11 @@ struct GramView: View {
         }
     }
 
-    /// Gram is the active page whenever this view is mounted, so one hidden responder
-    /// command is enough. Reuses the terminal's shortcut pattern: Command-F opens search,
-    /// or moves focus back into an already-open field. A host that owns the search field
-    /// (`searchText`) owns Command-F too.
+    /// Command-F opens search or focuses the visible field. Only a regular-width host
+    /// supplying shared search state owns the sidebar shortcut instead.
     private var gramKeyboardShortcuts: some View {
         Button("Find in Gram") {
-            if searchOpen { searchFocused = true } else { toggleSearch() }
+            if searchFieldIsOpen { searchFocused = true } else { toggleSearch() }
         }
         .keyboardShortcut("f", modifiers: .command)
         .frame(width: 0, height: 0)
@@ -713,7 +712,7 @@ struct GramView: View {
                     headerTrailing
                 }
             }
-            if searchOpen { searchField }
+            if offersOwnSearch, searchFieldIsOpen { searchField }
         }
         .padding(.horizontal, 16)
         .padding(.top, 4)
@@ -743,7 +742,7 @@ struct GramView: View {
     private var headerTrailing: some View {
         HStack(spacing: 0) {
             if offersOwnSearch {
-                InlineSearchToggle(isOpen: searchOpen, identifier: "gram-search",
+                InlineSearchToggle(isOpen: searchFieldIsOpen, identifier: "gram-search",
                                    target: CGSize(width: 40, height: 44)) { toggleSearch() }
             }
             // A filled bookmark means the Saved section is showing.

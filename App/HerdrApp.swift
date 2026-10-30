@@ -2637,10 +2637,9 @@ struct TerminalHomeView: View {
                 .keyboardShortcut("-", modifiers: .command)
             Button("Reset zoom") { terminalFontSize = 12.5 }
                 .keyboardShortcut("0", modifiers: .command)
-            // ⌘F on Gram puts the cursor in the sidebar search. Registered only while Gram is
-            // the section: the terminal's own ⌘F lives on the front pane, which is not
-            // presented then, so the two bindings never compete.
-            if selectedTab == .gram {
+            // The sidebar owns Gram's ⌘F only at regular width. The compact header
+            // registers its own shortcut against the same search state.
+            if selectedTab == .gram && hSizeClass == .regular {
                 Button("Search Gram") { focusGramSearch() }
                     .keyboardShortcut("f", modifiers: .command)
             }

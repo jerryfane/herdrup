@@ -65,4 +65,45 @@ final class DuoTransitionTests: TerminalInteractionTestCase {
             attach("gram-\(layout)")
         }
     }
+
+    func testGramSearchRemainsEditableAcrossCompactRegularTransitions() throws {
+        try start()
+        try XCTUnwrap(onscreen("Gram", requiringHittable: true)).tap()
+        XCTAssertTrue(app.staticTexts["clientloop"].waitForExistence(timeout: 10))
+
+        let sidebarField = app.textFields["gram-search-field"]
+        XCTAssertTrue(sidebarField.waitForExistence(timeout: 5))
+        sidebarField.tap()
+        sidebarField.typeText("zzzz")
+        XCTAssertTrue(app.staticTexts["No matches"].waitForExistence(timeout: 5))
+        XCTAssertTrue(app.staticTexts["clientloop"].waitForNonExistence(timeout: 5))
+
+        transition("compact")
+        let compactField = app.textFields.matching(identifier: "gram-search-field")
+        XCTAssertTrue(poll(5, every: 0.1) {
+            compactField.allElementsBoundByIndex.contains { $0.isHittable }
+        })
+        let retained = try XCTUnwrap(compactField.allElementsBoundByIndex.first { $0.isHittable })
+        XCTAssertEqual(retained.value as? String, "zzzz")
+        XCTAssertTrue(app.staticTexts["No matches"].exists)
+        attach("gram-search-compact")
+
+        let toggle = app.buttons["gram-search"]
+        XCTAssertTrue(toggle.isHittable)
+        toggle.tap()
+        XCTAssertTrue(app.staticTexts["clientloop"].waitForExistence(timeout: 5))
+        XCTAssertFalse(compactField.allElementsBoundByIndex.contains { $0.isHittable })
+
+        toggle.tap()
+        let reopened = try XCTUnwrap(compactField.allElementsBoundByIndex.first { $0.isHittable })
+        reopened.tap()
+        reopened.typeText("zzzz")
+        XCTAssertTrue(app.staticTexts["No matches"].waitForExistence(timeout: 5))
+        transition("regular")
+        XCTAssertEqual(sidebarField.value as? String, "zzzz")
+        XCTAssertTrue(sidebarField.isHittable)
+        app.buttons["Clear search"].firstMatch.tap()
+        XCTAssertTrue(app.staticTexts["clientloop"].waitForExistence(timeout: 5))
+        attach("gram-search-regular")
+    }
 }
