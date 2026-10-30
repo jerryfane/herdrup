@@ -107,6 +107,10 @@ struct RootView: View {
     @State private var openGuest: GuestAccess?
     /// Whether launch already decided to open the only shared machine.
     @State private var didAutoOpenGuest = false
+    /// The connection's Gram downloads (#574): here, above the tab view and the split view,
+    /// so a download started on the Gram page keeps going on Agents. Cancelled when the
+    /// connection goes (`disconnect`, `reconnect`, `switchSession`).
+    @State private var gramDownloads = GramDownloadStore()
 
     #if DEBUG
     /// One stable driver instance for the whole stress-test process. Recreating it
@@ -125,7 +129,14 @@ struct RootView: View {
         return Group {
             #if DEBUG
             if let mock = ScreenshotMock.mode {
-                mockView(mock)
+                if ProcessInfo.processInfo.environment["HERDR_DESKTOPREF_CAPTURE"] == "1" {
+                    let _ = DesktopReferenceMock.prepared
+                    mockView(mock)
+                        .transaction { $0.disablesAnimations = true; $0.animation = nil }
+                        .overlay(alignment: .topLeading) { DesktopReferenceProbe().frame(width: 1, height: 1) }
+                } else {
+                    mockView(mock)
+                }
             } else {
                 liveContent
             }
@@ -134,6 +145,7 @@ struct RootView: View {
             #endif
         }
         .preferredColorScheme(.dark)
+        .environment(\.gramDownloads, gramDownloads)
         .fullScreenCover(item: $invites.pending) { pending in
             inviteAccept(pending.invite)
         }
@@ -334,8 +346,16 @@ struct RootView: View {
             TerminalHomeView(client: HerdrClient(transport: ForgetCapableMockTransport()), onDisconnect: {},
                              onTrustHostKey: { _ in false }, livePaneIDs: MockWireFixtures.demoLivePaneIDs)
         case .needsYou:
-            TerminalHomeView(client: HerdrClient(transport: NeedsYouMockTransport()), onDisconnect: {},
-                             onTrustHostKey: { _ in false })
+            VStack(spacing: 0) {
+                if NeedsYouMockTransport.manualWaiting {
+                    Button("Start waiting") { NeedsYouMockTransport.startWaiting() }
+                        .accessibilityIdentifier("fixture-start-waiting")
+                        .buttonStyle(.bordered)
+                        .padding(8)
+                }
+                TerminalHomeView(client: HerdrClient(transport: NeedsYouMockTransport()), onDisconnect: {},
+                                 onTrustHostKey: { _ in false })
+            }
         case .folders:
             let _ = AgentFoldersMockTransport.prepared
             TerminalHomeView(client: HerdrClient(transport: AgentFoldersMockTransport()), onDisconnect: {},
@@ -349,6 +369,7 @@ struct RootView: View {
             // every capture of a state is the same picture. See DesktopReferenceMock.
             let _ = DesktopReferenceMock.prepared
             TerminalHomeView(client: HerdrClient(transport: DesktopReferenceMockTransport()), onDisconnect: {},
+                             host: DesktopReferenceMock.state == .settings ? "reference-hub" : "",
                              onTrustHostKey: { _ in false })
                 .transaction { $0.disablesAnimations = true; $0.animation = nil }
                 .overlay(alignment: .topLeading) { DesktopReferenceProbe().frame(width: 1, height: 1) }
@@ -640,6 +661,9 @@ struct RootView: View {
         // Downloaded gram files are readable without a connection, so they must not
         // survive the session that fetched them.
         GramView.Downloads.invalidate()
+        // And the downloads still running end with it (#574: they outlive the Gram page,
+        // not the connection). After the epoch bump, so one landing now is refused.
+        gramDownloads.cancelAll()
     }
 
     /// Drops and re-establishes the connection with the RETAINED credentials —
@@ -650,6 +674,9 @@ struct RootView: View {
         guard let creds = credentials else { return }
         let closing = transport
         Task { await closing?.close() }
+        // The running Gram downloads ride the closed transport: end them, so the page
+        // offers a fresh open on the new connection instead of a ring that only fails.
+        gramDownloads.cancelAll()
         let newTransport = CitadelTransport(credentials: creds, hostKeyPolicy: pins)
         let newClient = HerdrClient(transport: newTransport)
         transport = newTransport
@@ -680,6 +707,8 @@ struct RootView: View {
         transport = scoped
         client = newClient
         session += 1
+        // Another herdr server, whose message ids are not these: the downloads go too.
+        gramDownloads.cancelAll()
         registerPush(with: newClient, credentials: creds)      // each session is its own herdr server
         registerActivityPush(with: newClient)
     }
@@ -846,7 +875,7 @@ struct ConnectView: View {
                     .accessibilityIdentifier("shared-machine-row")
                 }
             }
-            .settingsGroup()
+            .settingsGroup(outline: true)
         }
     }
 
@@ -1007,7 +1036,7 @@ struct ConnectView: View {
             }
             .frame(maxWidth: .infinity, alignment: .leading)
             .padding(.horizontal, 18).padding(.vertical, 14)
-            .settingsGroup()
+            .settingsGroup(outline: true)
 
             Text("Then, on your computer, run:")
                 .font(connectFont(13)).foregroundStyle(Palette.textDim)
@@ -1067,7 +1096,7 @@ struct ConnectView: View {
                     savedHostRow(saved)
                 }
             }
-            .settingsGroup()
+            .settingsGroup(outline: true)
         }
     }
 
@@ -1920,7 +1949,8 @@ struct TerminalHomeView: View {
     /// initializer"). Both readers name `Self.sidebarMinimizedKey` so a rename cannot
     /// desync them — and the desync would be SILENT, since the layout would simply be
     /// born expanded while the preference said otherwise.
-    private static let sidebarMinimizedKey = "ui.sidebarMinimized"
+    /// Internal, not private, only so the DEBUG `desktopref` mock can start expanded.
+    static let sidebarMinimizedKey = "ui.sidebarMinimized"
     @State private var columnVisibility: NavigationSplitViewVisibility =
         UserDefaults.standard.bool(forKey: Self.sidebarMinimizedKey) ? .detailOnly : .all
     /// Whether the sidebar is MINIMISED to the icon rail, remembered across launches.
@@ -2608,48 +2638,19 @@ struct TerminalHomeView: View {
         .accessibilityHidden(true)
     }
 
-    /// The iPad Settings sidebar index: one row per grouped destination (Machines /
-    /// Accounts / Notifications / App & About), each selecting the detail rendered in the
-    /// split's detail column (violet selection highlight as today).
-    @ViewBuilder
+    /// The iPad Settings sidebar (proposal B, #572): the root list itself — machine card,
+    /// suggestions, Your herd, Preferences with their inline pickers, Help and About — whose
+    /// page rows select the detail column's page, the selected one filled `surfaceRaised`.
     private var settingsIndex: some View {
-        VStack(spacing: 4) {
-            // App & About first (owner request), then the config sections. Explicit order
-            // rather than `SettingsSection.allCases` so it's local to the sidebar and the
-            // enum's declaration order stays untouched.
-            ForEach([SettingsSection.about, .machines, .accounts, .notifications, .sharedAccess, .appearance], id: \.self) { section in
-                Button {
-                    settingsAnchor = section
-                } label: {
-                    HStack(spacing: 12) {
-                        Image(systemName: section.icon)
-                            .font(.system(size: 15, weight: .medium))
-                            .foregroundStyle(settingsAnchor == section ? Palette.brand : Palette.textDim)
-                            .frame(width: 22)
-                        Text(section.label)
-                            .font(Typography.app(15, settingsAnchor == section ? .semibold : .regular))
-                            .foregroundStyle(settingsAnchor == section ? Palette.text : Palette.textDim)
-                        Spacer(minLength: 0)
-                        if section == .machines, serverUpdate?.card.badgeKey != nil {
-                            Text("Update")
-                                .font(Typography.app(11, .semibold)).foregroundStyle(Palette.waiting)
-                                .padding(.horizontal, 8).padding(.vertical, 3)
-                                .background(Capsule().fill(Palette.waiting.opacity(0.12)))
-                                .overlay(Capsule().stroke(Palette.waiting.opacity(0.5), lineWidth: 1))
-                                .accessibilityIdentifier("machines-update-pill")
-                        }
-                    }
-                    .padding(.horizontal, 12).padding(.vertical, 11)
-                    .background(settingsAnchor == section ? Palette.surfaceRaised : Color.clear,
-                                in: RoundedRectangle(cornerRadius: 10))
-                    .contentShape(Rectangle())
-                }
-                .buttonStyle(.plain)
-                .hoverEffect(.highlight)
-            }
-        }
-        .padding(.horizontal, 10).padding(.top, 6)
-        Spacer(minLength: 0)
+        SettingsView(
+            client: client,
+            agents: agents,
+            host: host,
+            connected: error == nil && !loading,
+            canReconnect: rejectedFingerprint == nil,
+            onReconnect: onReconnect,
+            serverUpdate: serverUpdate,
+            sidebarSelection: $settingsAnchor)
     }
 
     /// Gram's sidebar column, as the design draws it: the shared section bar (Back, the small
@@ -6804,7 +6805,7 @@ struct TerminalPaneContent: View {
         if type.conforms(to: .fileURL) {
             loadingReplyAttachment = true
             ctrlArmed = false
-            _ = provider.loadObject(ofClass: URL.self) { url, _ in
+            let stage: @Sendable (URL?) -> Void = { url in
                 var refusal: String?
                 let attachment: ComposerAttachment? = url.flatMap { source in
                     let scoped = source.startAccessingSecurityScopedResource()
@@ -6844,6 +6845,18 @@ struct TerminalPaneContent: View {
                 Task { @MainActor in
                     finishReplyAttachmentPaste(attachment)
                     if let refusal { actionNote = refusal }
+                }
+            }
+            _ = provider.loadObject(ofClass: URL.self) { url, _ in
+                if let url {
+                    stage(url)
+                    return
+                }
+                // Finder can supply file-url bytes without vending an NSURL object.
+                // Resolve that reference instead of attaching its icon or URL text.
+                provider.loadDataRepresentation(forTypeIdentifier: type.identifier) { data, _ in
+                    let source = data.flatMap { URL(dataRepresentation: $0, relativeTo: nil) }
+                    stage(source?.isFileURL == true ? source : nil)
                 }
             }
             return true
@@ -7392,18 +7405,15 @@ struct TerminalPaneContent: View {
     }
 }
 
-/// Settings (screen 05): connection status, notification preferences, and the
-/// trouble actions. Preferences persist locally via @AppStorage; wiring them to
-/// real push delivery is a follow-up, so they record intent, not delivery.
-/// A jump target within Settings. The iPad sidebar index uses it to scroll the detail pane's
-/// SettingsView to a section; iPhone tabs and modal presentations leave it nil (no scrolling).
-/// The Settings index→detail destinations (redesign #144). `machines` folds
-/// Connection + Federation (the box you talk to and the boxes it aggregates);
-/// `accounts` and `notifications` each own a screen; `about` bundles the light
-/// sections (Trouble / Help / Support / About) — rendered INLINE on the iPhone
-/// index, and as a single "App & About" detail on the iPad split.
+/// Settings (proposal B, #572): the connected machine as a card, "suggestions" for what
+/// waits, then short grouped lists with inline pickers. Preferences persist locally via
+/// @AppStorage.
+/// The pages Settings opens. On iPhone each is a NavigationStack push from the root list;
+/// on the iPad split the sidebar IS the root list and each selects the detail column.
+/// `machines` is the machine's profile page (hero, the herdr update card, Connection,
+/// Federation); Gestures and the outbound links are not pages.
 enum SettingsSection: Hashable, CaseIterable {
-    case machines, accounts, notifications, sharedAccess, about, appearance
+    case machines, accounts, notifications, sharedAccess, textSize, typingLatency, support
 
     var label: String {
         switch self {
@@ -7411,19 +7421,22 @@ enum SettingsSection: Hashable, CaseIterable {
         case .accounts:      return "Accounts"
         case .notifications: return "Notifications"
         case .sharedAccess:  return "Shared access"
-        case .about:         return "App & About"
-        case .appearance:    return "Text & typing"
+        case .textSize:      return "Text size"
+        case .typingLatency: return "Typing latency"
+        case .support:       return "Support the project"
         }
     }
 
+    /// The 24 pt glyph each row leads with.
     var icon: String {
         switch self {
         case .machines:      return "server.rack"
         case .accounts:      return "key.horizontal"
         case .notifications: return "bell"
         case .sharedAccess:  return "person.2"
-        case .about:         return "info.circle"
-        case .appearance:    return "textformat.size"
+        case .textSize:      return "textformat.size"
+        case .typingLatency: return "gauge.with.needle"
+        case .support:       return "heart"
         }
     }
 }
@@ -7538,13 +7551,17 @@ struct SettingsView: View {
     /// Nil when Settings is a persistent tab (no close button); a modal sheet passes
     /// one and the header shows an xmark — mirrors GramView's nav-agnostic contract.
     var onClose: (() -> Void)?
-    /// iPad only: which grouped detail the sidebar index selected, rendered directly in
-    /// the split's detail column (no NavigationStack — the split view IS the nav). Nil =
-    /// iPhone (and the screenshot mock): the whole index → detail flow in a NavigationStack.
+    /// iPad only: the page the sidebar selected, rendered directly in the split's detail
+    /// column (no NavigationStack — the split view IS the nav). Nil = iPhone (and the
+    /// screenshot mock): the whole root → page flow in a NavigationStack.
     var detail: SettingsSection? = nil
     /// The connected machine's herdr update (herdrup#565): the card in Machines. Nil for
     /// guests and in screenshot fixtures drawn without it.
     var serverUpdate: ServerUpdateModel? = nil
+    /// iPad only: this instance is the split's SIDEBAR, the root list itself (machine card,
+    /// suggestions, groups, inline pickers). Its page rows write the selection the detail
+    /// column renders, and the selected row is filled `surfaceRaised`.
+    var sidebarSelection: Binding<SettingsSection?>? = nil
 
     @AppStorage("notify.needsInput") private var notifyNeedsInput = true
     @AppStorage("notify.dies") private var notifyDies = true
@@ -7576,9 +7593,6 @@ struct SettingsView: View {
     /// The gestures tutorial, opened from the Help row (its persistent home now that
     /// it's no longer a tab). Presented as a child sheet over Settings.
     @State private var showGestures = false
-    /// Trouble → Typing latency: pushed on the iPhone index, a sheet over the iPad split
-    /// (whose detail column has no NavigationStack to push onto).
-    @State private var showTypingLatency = false
     /// The recorder's per-(machine, network) numbers as of the page's last refresh.
     @State private var latencyReports: [TypingLatencyReport] = []
     /// "Copied ✓" feedback on the Typing latency page's Copy report row.
@@ -7618,19 +7632,20 @@ struct SettingsView: View {
     var body: some View {
         Group {
             if let detail {
-                // iPad split: the sidebar is the index, so render ONLY the selected
-                // group's detail here (no NavigationStack — the split view IS the nav).
+                // iPad split: the sidebar is the root list, so render ONLY the selected
+                // page here (no NavigationStack — the split view IS the nav).
                 detailColumn(detail)
-                    // Typing latency has no sidebar entry: it opens over the split.
-                    .sheet(isPresented: $showTypingLatency) {
-                        typingLatencyDetail(showBack: true)
-                            .presentationDetents([.large])
-                            .presentationDragIndicator(.visible)
+            } else if sidebarSelection != nil {
+                // iPad split sidebar: the root list, under the column's own top bar.
+                ScrollView { rootList }
+                    // Pages it does not show change what the list says (an account signed
+                    // in on the Accounts page, say): read the accounts again on each pick.
+                    .onChange(of: sidebarSelection?.wrappedValue) { _, _ in
+                        Task { accounts = (try? await client.accountsList()) ?? accounts }
                     }
             } else {
-                // iPhone (and the screenshot mock): the index → detail flow. A
-                // NavigationStack whose root is the AT A GLANCE / MANAGE index; the
-                // MANAGE rows push the same detail bodies the iPad renders inline.
+                // iPhone (and the screenshot mock): a NavigationStack whose root is the
+                // list; its page rows push the same pages the iPad renders inline.
                 indexStack
             }
         }
@@ -7758,12 +7773,11 @@ struct SettingsView: View {
         }
     }
 
-    // MARK: Index → detail (iPhone NavigationStack)
+    // MARK: Root list → pages (iPhone NavigationStack)
 
-    /// The iPhone Settings index: an AT A GLANCE status card and a MANAGE group of
-    /// drill-in rows above the fold, the light sections (Trouble / Help / Support /
-    /// About) inline below. The MANAGE rows are value-based `NavigationLink`s; the one
-    /// `navigationDestination` renders the shared detail bodies with a back button.
+    /// The iPhone Settings root: the list a NavigationStack starts on. Its page rows are
+    /// value-based `NavigationLink`s; the one `navigationDestination` renders the shared
+    /// page bodies with a back button.
     private var indexStack: some View {
         NavigationStack {
             ZStack {
@@ -7772,30 +7786,7 @@ struct SettingsView: View {
                     header
                     Divider().overlay(Palette.hairlineQuiet)
                     ScrollView {
-                        SettingsIndexContent {
-                            // Grouped subviews keep this builder under SwiftUI's 10-child
-                            // ViewBuilder ceiling (8 children + the footers Group = 9, so
-                            // one slot left: the next section needs its own Group).
-                            VStack(alignment: .leading, spacing: 0) {
-                                atAGlanceSection
-                                manageSection
-                                Group {
-                                    appearanceSection
-                                    typingSection
-                                    chatSection
-                                }
-                                previewsSection
-                                troubleSection
-                                helpSection
-                                supportSection
-                                aboutSection
-                                Group {
-                                    versionFooter
-                                    githubFooter
-                                }
-                            }
-                            .padding(.bottom, 16)
-                        }
+                        SettingsIndexContent { rootList }
                     }
                 }
             }
@@ -7803,14 +7794,28 @@ struct SettingsView: View {
             .navigationDestination(for: SettingsSection.self) { section in
                 detailScreen(section, showBack: true)
             }
-            .navigationDestination(isPresented: $showTypingLatency) {
-                typingLatencyDetail(showBack: true)
-            }
         }
     }
 
-    /// The iPad detail column: one group's detail, on the app ground, no back button
-    /// (the sidebar index is the navigation).
+    /// Proposal B's root (#572): the machine card, the suggestions that wait, then Your herd,
+    /// Preferences, Help and About as short groups over the version footer. The iPhone
+    /// NavigationStack root and the iPad sidebar are this same list.
+    private var rootList: some View {
+        VStack(alignment: .leading, spacing: 0) {
+            machineCard
+            suggestionsGroup
+            herdGroup
+            preferencesGroup
+            helpGroup
+            aboutGroup
+            versionFooter
+        }
+        .padding(.top, 14)
+        .padding(.bottom, 16)
+    }
+
+    /// The iPad detail column: one page, on the app ground, no back button (the sidebar
+    /// list is the navigation).
     private func detailColumn(_ section: SettingsSection) -> some View {
         ZStack {
             Palette.ground.ignoresSafeArea()
@@ -7818,10 +7823,8 @@ struct SettingsView: View {
         }
     }
 
-    /// Maps a grouped destination to its detail body. Machines folds Connection +
-    /// Federation; Accounts and Notifications reuse their section views verbatim; About
-    /// bundles the light sections (only reached as a destination on iPad — inline on the
-    /// iPhone index).
+    /// Maps a page to its body. Accounts, Notifications and Shared access reuse their
+    /// section views verbatim.
     @ViewBuilder
     private func detailScreen(_ section: SettingsSection, showBack: Bool) -> some View {
         switch section {
@@ -7829,25 +7832,33 @@ struct SettingsView: View {
         case .accounts:      accountsDetail(showBack: showBack)
         case .notifications: notificationsDetail(showBack: showBack)
         case .sharedAccess:  sharedAccessDetail(showBack: showBack)
-        case .about:         aboutDetail(showBack: showBack)
-        case .appearance:    appearanceDetail(showBack: showBack)
+        case .textSize:      textSizeDetail(showBack: showBack)
+        case .typingLatency: typingLatencyDetail(showBack: showBack)
+        case .support:       supportDetail(showBack: showBack)
         }
     }
 
-    /// iPad/Mac "Text & typing": the same controls the iPhone index shows inline, given
-    /// their own split-view detail so the settings are reachable on regular-width layouts.
-    private func appearanceDetail(showBack: Bool) -> some View {
-        detailScaffold(title: "Text & typing", subtitle: "Text size, instant typing and omp chat", showBack: showBack) {
+    /// Preferences › Text size: the app and terminal text sliders.
+    private func textSizeDetail(showBack: Bool) -> some View {
+        detailScaffold(title: "Text size", subtitle: "", showBack: showBack) {
             appearanceControls
-            typingSection
-            chatSection
         }
     }
 
+    /// Settings › Machines, the machine's profile page: the hero, the herdr update card
+    /// exactly as shipped (#566), Connection (the trouble actions, beside the machine they
+    /// act on), then Federation with the herd's reach as its footer. The title carries no
+    /// subtitle: the hero says it.
     private func machinesDetail(showBack: Bool) -> some View {
-        detailScaffold(title: "Machines", subtitle: machinesSubtitle, showBack: showBack) {
+        detailScaffold(title: "Machines", subtitle: "", showBack: showBack) {
+            machineHero
+            // The herdr update card: signed in-app updates are the only update UI.
+            if let serverUpdate, serverUpdate.card != .hidden {
+                ServerUpdateCardView(model: serverUpdate, host: host)
+            }
             connectionSection
             federationSection
+            federationFooter
         }
     }
 
@@ -7962,19 +7973,11 @@ struct SettingsView: View {
         await guestAccess.load(client: client, machines: machines)
     }
 
-    /// iPad "App & About": the light sections that stay inline on the iPhone index.
-    private func aboutDetail(showBack: Bool) -> some View {
-        detailScaffold(title: "App & About", subtitle: "Previews, trouble, help, support & legal",
-                       showBack: showBack) {
-            previewsSection
-            troubleSection
-            helpSection
+    /// About › Support the project: the tip jar. Its root row shows only once StoreKit has
+    /// products, so the page is never reached empty.
+    private func supportDetail(showBack: Bool) -> some View {
+        detailScaffold(title: "Support the project", subtitle: "", showBack: showBack) {
             supportSection
-            aboutSection
-            Group {
-                versionFooter
-                githubFooter
-            }
         }
     }
 
@@ -8023,161 +8026,397 @@ struct SettingsView: View {
         }
     }
 
-    // MARK: AT A GLANCE (index status card)
+    // MARK: Root: the machine card and suggestions (proposal B)
 
-    /// The first card answers "is anything wrong?" in three lines: the connection, any
-    /// exhausted account (a shortcut into Accounts), and the machines/agents reach.
-    private var atAGlanceSection: some View {
-        VStack(alignment: .leading, spacing: 0) {
-            sectionLabel("AT A GLANCE")
-            VStack(spacing: 0) {
-                glanceConnectionRow
-                if let exhausted = exhaustedAccounts.first {
-                    rowDivider
-                    glanceExhaustedRow(exhausted)
-                }
-                rowDivider
-                glanceMachinesRow
-                if daemonUpdateAvailable {
-                    rowDivider
-                    glanceUpdateRow
-                }
-            }
-            .settingsGroup()
-            .padding(.horizontal, 16).padding(.top, 10)
-        }
+    /// What the machine is called: the saved nickname when there is one, else the host.
+    private var machineName: String { guestMachineLabel.isEmpty ? host : guestMachineLabel }
+
+    /// "Connected · 14 agents". The machine count and reach are the Federation footer's.
+    private var machineCardStatus: String {
+        var parts = [connected ? "Connected" : "Disconnected"]
+        parts.append("\(agents.count) agent\(agents.count == 1 ? "" : "s")")
+        return parts.joined(separator: " · ")
     }
 
-    /// A quiet shortcut into Machines when the herdr update card asks for something — the section
-    /// that owns the card is one tap away (mirrors `glanceExhaustedRow`).
-    private var glanceUpdateRow: some View {
-        NavigationLink(value: SettingsSection.machines) {
-            HStack(spacing: 10) {
-                Circle().fill(Palette.waiting).frame(width: 8, height: 8)
-                Text(glanceUpdateText)
-                    .font(Typography.app(14)).foregroundStyle(Palette.textDim).lineLimit(1)
-                Spacer(minLength: 0)
-                Image(systemName: "chevron.right")
-                    .font(.system(size: 12, weight: .semibold)).foregroundStyle(Palette.textFaint)
-            }
-            .padding(.horizontal, 18).padding(.vertical, 13)
-            .contentShape(Rectangle())
-        }
-        .buttonStyle(.plain)
+    /// "herdr 0.9.3 · 4c1e9a2": the daemon's own version and commit (distinct from the app
+    /// version in the footer), once `server.staged_update` has answered — nil on a daemon too
+    /// old to report it. The version is static across commits, so the sha names the build.
+    private var machineVersionLine: String? {
+        guard let running = stagedUpdate?.runningVersion else { return nil }
+        return stagedUpdate?.runningSha.map { "herdr \(running) · \($0)" } ?? "herdr \(running)"
     }
 
-    private var glanceConnectionRow: some View {
-        HStack(spacing: 10) {
-            Circle().fill(connected ? Palette.done : Palette.died).frame(width: 8, height: 8)
-            Text(connected ? "Connected" : "Disconnected")
-                .font(Typography.app(15, .semibold)).foregroundStyle(Palette.text).layoutPriority(1)
-            Text(host).font(Typography.machine(13)).foregroundStyle(Palette.textFaint)
-                .lineLimit(1).truncationMode(.middle)
-            Spacer(minLength: 0)
-        }
-        .padding(.horizontal, 18).padding(.vertical, 13)
+    /// The avatar disc look (`AgentIdentity`) for a machine: `agentGradient.default` and the
+    /// name's first letter, never an empty disc.
+    private func machineDisc(size: CGFloat) -> some View {
+        let first = machineName.trimmingCharacters(in: .whitespaces).prefix(1).uppercased()
+        return Text(first.isEmpty ? "?" : first)
+            .font(Typography.app(size * 0.43, .bold)).foregroundStyle(.white)
+            .frame(width: size, height: size)
+            .background(Circle().fill(AgentIdentity.gradient(for: nil)))
+            .accessibilityHidden(true)
     }
 
-    /// The amber shortcut line — a `NavigationLink` into the Accounts detail, since the
-    /// section that owns the problem is one tap away.
-    private func glanceExhaustedRow(_ account: CredentialAccount) -> some View {
-        NavigationLink(value: SettingsSection.accounts) {
-            HStack(spacing: 10) {
-                Circle().fill(Palette.waiting).frame(width: 8, height: 8)
-                Text("\(account.label) is exhausted")
-                    .font(Typography.app(14)).foregroundStyle(Palette.textDim).lineLimit(1)
-                Spacer(minLength: 0)
-                Image(systemName: "chevron.right")
-                    .font(.system(size: 12, weight: .semibold)).foregroundStyle(Palette.textFaint)
-            }
-            .padding(.horizontal, 18).padding(.vertical, 13)
-            .contentShape(Rectangle())
-        }
-        .buttonStyle(.plain)
-    }
-
-    private var glanceMachinesRow: some View {
-        let reach = machinesReachability
-        return HStack(spacing: 10) {
-            Text("\(machineCount) machine\(machineCount == 1 ? "" : "s") · \(agents.count) agent\(agents.count == 1 ? "" : "s")")
-                .font(Typography.machine(13)).foregroundStyle(Palette.textFaint)
-            Spacer(minLength: 0)
-            Text(reach.text).font(Typography.machine(13)).foregroundStyle(reach.color)
-        }
-        .padding(.horizontal, 18).padding(.vertical, 13)
-    }
-
-    // MARK: MANAGE (drill-in rows)
-
-    /// The three drill-in rows → Machines / Accounts / Notifications, each a value-based
-    /// `NavigationLink` with a one-line live summary and a status trailing.
-    private var manageSection: some View {
-        VStack(alignment: .leading, spacing: 0) {
-            sectionLabel("MANAGE")
-            VStack(spacing: 0) {
-                manageRow(.machines, subtitle: machinesSubtitle) { manageMachinesTrailing }
-                rowDivider
-                manageRow(.accounts, subtitle: accountsSubtitle) { manageAccountsTrailing }
-                rowDivider
-                manageRow(.notifications, subtitle: "Push alerts from this machine") { manageNotifyTrailing }
-                rowDivider
-                manageRow(.sharedAccess, subtitle: "People you share an agent with") { manageSharedTrailing }
-            }
-            .settingsGroup()
-            .padding(.horizontal, 16).padding(.top, 10)
-        }
-    }
-
-    private func manageRow<Trailing: View>(
-        _ section: SettingsSection, subtitle: String, @ViewBuilder trailing: () -> Trailing
-    ) -> some View {
-        NavigationLink(value: section) {
-            HStack(spacing: 12) {
-                VStack(alignment: .leading, spacing: 3) {
-                    Text(section.label).font(Typography.app(17)).foregroundStyle(Palette.text)
-                    Text(subtitle).font(Typography.app(13)).foregroundStyle(Palette.textDim).lineLimit(1)
+    /// The connected machine leads the root, like the Apple Account card: the 60 pt disc,
+    /// the name, its connection and herd, and the daemon build. It opens Machines (the
+    /// iPad sidebar fills it `surfaceRaised` while Machines is the detail).
+    private var machineCard: some View {
+        let title = DesignTokens.Text.MachineCardTitle.self
+        let shape = RoundedRectangle(cornerRadius: DesignTokens.Radius.group)
+        return pageLink(.machines) {
+            HStack(spacing: 14) {
+                machineDisc(size: DesignTokens.Size.machineCardAvatar)
+                VStack(alignment: .leading, spacing: 0) {
+                    Text(machineName)
+                        .font(Typography.app(title.size, title.weight)).foregroundStyle(Palette.text)
+                        .lineLimit(1).truncationMode(.middle)
+                    Text(machineCardStatus)
+                        .font(Typography.app(15)).foregroundStyle(connected ? Palette.textDim : Palette.died)
+                        .lineLimit(1)
+                    if let machineVersionLine {
+                        Text(machineVersionLine)
+                            .font(Typography.machine(DesignTokens.Text.CardSubtitle.size))
+                            .foregroundStyle(Palette.textFaint).lineLimit(1)
+                            .padding(.top, 2)
+                    }
                 }
                 Spacer(minLength: 8)
-                trailing()
-                Image(systemName: "chevron.right")
-                    .font(.system(size: 12, weight: .semibold)).foregroundStyle(Palette.textFaint)
+                rowChevron
             }
-            .padding(.horizontal, 18).padding(.vertical, 12)
-            .frame(minHeight: 52)
-            .contentShape(Rectangle())
+            .padding(.horizontal, 16).padding(.vertical, 14)
+            .background(isSelected(.machines) ? Palette.surfaceRaised : Palette.surface, in: shape)
+            .contentShape(shape)
+        }
+        // Read as the page it opens, then the machine: "Machines, mac-mini, Connected · …".
+        .accessibilityLabel(Text("Machines, \(machineName), \(machineCardStatus)"))
+        .accessibilityIdentifier("settings-machine-card")
+        .padding(.horizontal, DesignTokens.Space.screenInset)
+    }
+
+    /// Apple-style suggestions under the card, only while something waits: the herdr update
+    /// (amber count) and an exhausted account (red count), each opening the page that acts
+    /// on it. Replaces At a glance's update and exhausted lines.
+    @ViewBuilder
+    private var suggestionsGroup: some View {
+        let exhausted = exhaustedAccounts
+        if daemonUpdateAvailable || !exhausted.isEmpty {
+            VStack(spacing: 0) {
+                if daemonUpdateAvailable {
+                    suggestionRow(.machines, title: updateSuggestionTitle, subtitle: updateSuggestionSubtitle,
+                                  systemImage: "arrow.down.circle", count: 1, tint: Palette.waiting,
+                                  identifier: "settings-suggestion-update")
+                    if !exhausted.isEmpty { glyphDivider }
+                }
+                if let first = exhausted.first {
+                    suggestionRow(.accounts,
+                                  title: exhausted.count == 1 ? first.label : "\(exhausted.count) accounts are exhausted",
+                                  subtitle: exhausted.count == 1
+                                      ? "Exhausted. Its agents can move to another account."
+                                      : "Their agents can move to another account.",
+                                  systemImage: SettingsSection.accounts.icon, count: exhausted.count,
+                                  tint: Palette.died, identifier: "settings-suggestion-exhausted")
+                }
+            }
+            .settingsGroup()
+            .padding(.horizontal, DesignTokens.Space.screenInset)
+            .padding(.top, 20)
+        }
+    }
+
+    /// One suggestion: a glyph row with a count badge. Its texts are one element, so the
+    /// account named here is not a second "Claude Pro (personal)" beside the Accounts page.
+    private func suggestionRow(
+        _ section: SettingsSection, title: String, subtitle: String?, systemImage: String,
+        count: Int, tint: Color, identifier: String
+    ) -> some View {
+        pageLink(section) {
+            glyphRow(title, systemImage: systemImage, subtitle: subtitle) {
+                CountPill(count: count, fill: tint)
+                rowChevron
+            }
+            .accessibilityElement(children: .combine)
+        }
+        .accessibilityIdentifier(identifier)
+    }
+
+    /// The update suggestion's title: the herdr update card's state (the same cases the tab's
+    /// "1" counts).
+    private var updateSuggestionTitle: String {
+        switch serverUpdate?.card {
+        case .available(_, let new, _, _, _, _)?: return "Update herdr to \(new)"
+        case .restartPending(let new, _)?: return "herdr \(new) finishes on next restart"
+        case .failed?: return "herdr update needs attention"
+        case .tooOld?: return "herdr needs a one-time update"
+        default: return "Update herdr"
+        }
+    }
+
+    /// Why the update matters, in the card's own words: "Folders and avatars need it".
+    private var updateSuggestionSubtitle: String? {
+        switch serverUpdate?.card {
+        case .available(_, _, let missing, _, _, _)?:
+            return missing.isEmpty
+                ? "A newer herdr is ready for \(machineName)"
+                : "\(ServerUpdateCardView.sentence(missing)) need\(missing.count == 1 ? "s" : "") it"
+        case .restartPending?: return "Restarting herdr closes terminals. Your layout comes back."
+        case .failed?: return "Open Machines for the update status and next steps."
+        case .tooOld?: return "This version can't update itself from the app."
+        default: return nil
+        }
+    }
+
+    // MARK: Root groups (proposal B)
+
+    /// Your herd: Accounts, Shared access and Notifications with their live values. The
+    /// machine card is the fourth (Machines).
+    private var herdGroup: some View {
+        rootGroup("YOUR HERD") {
+            pageRow(.accounts, value: accounts.isEmpty ? "None" : "\(accounts.count)")
+            glyphDivider
+            pageRow(.sharedAccess, value: sharedAccessValue)
+            glyphDivider
+            pageRow(.notifications, value: notifyManageValue, valueTint: notifyManageTint)
+        }
+    }
+
+    /// "1 person" / "2 invites" for the Shared access row; the page header keeps the full
+    /// "N people · N agents · N invites" summary.
+    private var sharedAccessValue: String {
+        let people = guestAccess.people.count
+        if people > 0 { return "\(people) \(people == 1 ? "person" : "people")" }
+        let invites = guestAccess.invites.count
+        if invites > 0 { return "\(invites) invite\(invites == 1 ? "" : "s")" }
+        return guestAccess.summary
+    }
+
+    /// Preferences: Text size opens its page; instant typing and omp chat are inline menu
+    /// pickers and script in previews an inline switch, each with its footer as the subtitle.
+    private var preferencesGroup: some View {
+        rootGroup("PREFERENCES") {
+            pageRow(.textSize, value: "\(Int((uiFontScale * 100).rounded()))% · \(String(format: "%g", terminalFontSize)) pt")
+            glyphDivider
+            glyphRow("Instant typing", systemImage: "keyboard",
+                     subtitle: "Shows what you type at once and checks it against the server.") {
+                menuPicker("Instant typing", value: predictiveEchoLabel, identifier: "settings-instant-typing") {
+                    Picker("Instant typing", selection: $predictiveEcho) {
+                        Text("Auto").tag(PredictionEngine.Mode.auto.rawValue)
+                        Text("Always").tag(PredictionEngine.Mode.always.rawValue)
+                        Text("Off").tag(PredictionEngine.Mode.off.rawValue)
+                    }
+                }
+            }
+            glyphDivider
+            // "omp agents open in": Chat (default) or Terminal (#481). The page's switch
+            // overrides it per agent for the session.
+            glyphRow("omp agents open in", systemImage: "bubble.left.and.bubble.right",
+                     subtitle: "Claude Code and Codex agents always open in the terminal.") {
+                menuPicker("omp agents open in", value: ompOpensIn == ChatPreference.terminal ? "Terminal" : "Chat",
+                           identifier: "settings-omp-opens-in") {
+                    Picker("omp agents open in", selection: $ompOpensIn) {
+                        Text("Chat").tag(ChatPreference.chat)
+                        Text("Terminal").tag(ChatPreference.terminal)
+                    }
+                }
+            }
+            glyphDivider
+            previewsRow
+        }
+    }
+
+    private var predictiveEchoLabel: String {
+        switch PredictiveEchoSetting.mode(predictiveEcho) {
+        case .always: return "Always"
+        case .off: return "Off"
+        default: return "Auto"
+        }
+    }
+
+    /// Help: the gestures tutorial, the typing-latency page and the issue tracker.
+    private var helpGroup: some View {
+        rootGroup("HELP") {
+            actionGlyphRow("Gestures", systemImage: "hand.draw", subtitle: "How to move around the app") {
+                showGestures = true
+            }
+            glyphDivider
+            pageRow(.typingLatency)
+            glyphDivider
+            linkGlyphRow("Report a bug or request a feature", systemImage: "exclamationmark.bubble",
+                         url: URL(string: "https://github.com/themartianapp/herdrup/issues")!)
+        }
+    }
+
+    /// About: the tip jar (only once StoreKit has products, so it is invisible before the
+    /// App Store Connect products exist), the community, the legal pages and the source.
+    private var aboutGroup: some View {
+        rootGroup("ABOUT") {
+            if hasTipProducts {
+                pageRow(.support)
+                glyphDivider
+            }
+            discordRow
+            glyphDivider
+            linkGlyphRow("Privacy Policy", systemImage: "lock.shield",
+                         url: URL(string: "https://herdrup.themartian.app/legal/privacy")!)
+            glyphDivider
+            linkGlyphRow("Terms of Service", systemImage: "doc.text",
+                         url: URL(string: "https://herdrup.themartian.app/legal/terms")!)
+            glyphDivider
+            linkGlyphRow("Open source on GitHub", systemImage: "chevron.left.forwardslash.chevron.right",
+                         url: URL(string: "https://github.com/themartianapp/herdrup")!)
+        }
+    }
+
+    private var hasTipProducts: Bool {
+        if case .loaded(let products) = tipStore.loadState { return !products.isEmpty }
+        return false
+    }
+
+    // MARK: Root row anatomy (proposal B)
+
+    /// A titled root group: the micro-label header (x = 32, 22 pt above, 8 below), then the
+    /// rows in one `settingsGroup`, inset 16.
+    private func rootGroup<Rows: View>(_ title: String, @ViewBuilder rows: () -> Rows) -> some View {
+        VStack(alignment: .leading, spacing: 0) {
+            Text(title).font(Typography.microLabel).tracking(DesignTokens.Text.MicroLabel.tracking)
+                .foregroundStyle(Palette.textFaint)
+                .frame(maxWidth: .infinity, alignment: .leading)
+                .padding(.horizontal, 32).padding(.top, 22).padding(.bottom, 8)
+            VStack(spacing: 0) { rows() }
+                .settingsGroup()
+                .padding(.horizontal, DesignTokens.Space.screenInset)
+        }
+    }
+
+    /// B's one row anatomy: today's `richActionRow` 24 pt glyph column, 12 pt to a Geist 17
+    /// label with an optional Geist 14 textDim subtitle that wraps, then the trailing value
+    /// or control. Min 52 pt; the group separates rows from x = 52 (`glyphDivider`).
+    private func glyphRow<Glyph: View, Trailing: View>(
+        _ label: String, subtitle: String? = nil, selected: Bool = false,
+        @ViewBuilder glyph: () -> Glyph, @ViewBuilder trailing: () -> Trailing
+    ) -> some View {
+        HStack(spacing: 12) {
+            glyph()
+                .foregroundStyle(Palette.textDim)
+                .frame(width: 24, height: 24)
+                .accessibilityHidden(true)
+            VStack(alignment: .leading, spacing: 1) {
+                Text(label).font(Typography.app(17)).foregroundStyle(Palette.text)
+                if let subtitle {
+                    Text(subtitle).font(Typography.app(14)).foregroundStyle(Palette.textDim)
+                        .fixedSize(horizontal: false, vertical: true)
+                }
+            }
+            .padding(.vertical, 11)
+            Spacer(minLength: 8)
+            trailing()
+        }
+        .padding(.horizontal, 16)
+        .frame(maxWidth: .infinity, minHeight: 52, alignment: .leading)
+        .background(selected ? Palette.surfaceRaised : Color.clear)
+        .contentShape(Rectangle())
+    }
+
+    /// A glyph row led by an SF Symbol.
+    private func glyphRow<Trailing: View>(
+        _ label: String, systemImage: String, subtitle: String? = nil, selected: Bool = false,
+        @ViewBuilder trailing: () -> Trailing
+    ) -> some View {
+        glyphRow(label, subtitle: subtitle, selected: selected, glyph: {
+            Image(systemName: systemImage).font(.system(size: 18))
+        }, trailing: trailing)
+    }
+
+    /// The separator between glyph rows, from x = 52 (16 inset + 24 glyph + 12 gap).
+    private var glyphDivider: some View {
+        Rectangle().fill(Palette.hairlineQuiet).frame(height: 1).padding(.leading, 52)
+    }
+
+    /// The page-row chevron (textFaint). The iPad sidebar draws none: its selection says it.
+    @ViewBuilder private var rowChevron: some View {
+        if sidebarSelection == nil {
+            Image(systemName: "chevron.right")
+                .font(.system(size: 12.5, weight: .semibold)).foregroundStyle(Palette.textFaint)
+        }
+    }
+
+    /// The leaving-the-app mark on an outbound link row.
+    private var externalGlyph: some View {
+        Image(systemName: "arrow.up.right")
+            .font(.system(size: 12, weight: .semibold)).foregroundStyle(Palette.textFaint)
+    }
+
+    private func isSelected(_ section: SettingsSection) -> Bool {
+        sidebarSelection?.wrappedValue == section
+    }
+
+    /// A row that opens a page: a `NavigationLink` on iPhone; on the iPad sidebar a button
+    /// that selects the detail column's page.
+    @ViewBuilder
+    private func pageLink<Label: View>(_ section: SettingsSection, @ViewBuilder label: () -> Label) -> some View {
+        let content = label()
+        if let sidebarSelection {
+            Button { sidebarSelection.wrappedValue = section } label: { content }
+                .buttonStyle(.plain)
+                .hoverEffect(.highlight)
+                .accessibilityAddTraits(sidebarSelection.wrappedValue == section ? .isSelected : [])
+        } else {
+            NavigationLink(value: section) { content }
+                .buttonStyle(.plain)
+        }
+    }
+
+    /// A page row: the section's glyph and label, an optional live value, the chevron.
+    private func pageRow(
+        _ section: SettingsSection, value: String = "", valueTint: Color = Palette.textDim
+    ) -> some View {
+        pageLink(section) {
+            glyphRow(section.label, systemImage: section.icon, selected: isSelected(section)) {
+                if !value.isEmpty {
+                    Text(value).font(Typography.app(15)).monospacedDigit()
+                        .foregroundStyle(valueTint).lineLimit(1)
+                }
+                rowChevron
+            }
+        }
+    }
+
+    /// A glyph row that acts in place (Gestures opens its sheet).
+    private func actionGlyphRow(
+        _ label: String, systemImage: String, subtitle: String? = nil, _ action: @escaping () -> Void
+    ) -> some View {
+        Button(action: action) {
+            glyphRow(label, systemImage: systemImage, subtitle: subtitle) { rowChevron }
         }
         .buttonStyle(.plain)
     }
 
-    @ViewBuilder private var manageMachinesTrailing: some View {
-        if daemonUpdateAvailable {
-            Text("Update")
-                .font(Typography.app(11, .semibold)).foregroundStyle(Palette.waiting)
-                .padding(.horizontal, 8).padding(.vertical, 3)
-                .background(Capsule().fill(Palette.waiting.opacity(0.12)))
-                .overlay(Capsule().stroke(Palette.waiting.opacity(0.5), lineWidth: 1))
+    /// A glyph row that opens an external URL in the system browser.
+    private func linkGlyphRow(_ label: String, systemImage: String, url: URL) -> some View {
+        Button { openURL(url) } label: {
+            glyphRow(label, systemImage: systemImage) { externalGlyph }
         }
-        Text("\(agents.count) agent\(agents.count == 1 ? "" : "s")")
-            .font(Typography.machine(12)).foregroundStyle(Palette.textDim)
-        Circle().fill(machinesReachability.color).frame(width: 8, height: 8)
+        .buttonStyle(.plain)
     }
 
-    @ViewBuilder private var manageAccountsTrailing: some View {
-        if !exhaustedAccounts.isEmpty {
-            Text("\(exhaustedAccounts.count) exhausted")
-                .font(Typography.app(11, .semibold)).foregroundStyle(Palette.died)
-                .padding(.horizontal, 8).padding(.vertical, 3)
-                .background(Capsule().fill(Palette.died.opacity(0.12)))
-                .overlay(Capsule().stroke(Palette.died.opacity(0.5), lineWidth: 1))
+    /// Picker(.menu) as B draws it: the value and a chevron.up.chevron.down, Geist 17 textDim,
+    /// trailing; the menu lists the choices with a checkmark.
+    private func menuPicker<Choices: View>(
+        _ title: String, value: String, identifier: String, @ViewBuilder choices: () -> Choices
+    ) -> some View {
+        let items = choices()
+        return Menu {
+            items
+        } label: {
+            HStack(spacing: 3) {
+                Text(value).font(Typography.app(17))
+                Image(systemName: "chevron.up.chevron.down").font(.system(size: 13, weight: .medium))
+            }
+            .foregroundStyle(Palette.textDim)
+            .fixedSize()
         }
-    }
-
-    @ViewBuilder private var manageSharedTrailing: some View {
-        Text(guestAccess.summary).font(Typography.machine(12)).foregroundStyle(Palette.textDim)
-    }
-
-    @ViewBuilder private var manageNotifyTrailing: some View {
-        Text(notifyManageValue).font(Typography.machine(12)).foregroundStyle(notifyManageTint)
+        .accessibilityLabel(Text(title))
+        .accessibilityValue(Text(value))
+        .accessibilityIdentifier(identifier)
     }
 
     // MARK: Index summaries (computed from live state)
@@ -8188,13 +8427,6 @@ struct SettingsView: View {
 
     /// This box + its federated peers.
     private var machineCount: Int { machinePeers.count + 1 }
-
-    /// "This box only" / "This box + N peers" — the Machines row + detail subtitle.
-    private var machinesSubtitle: String {
-        let n = machinePeers.count
-        if n == 0 { return "This box only" }
-        return "This box + \(n) federated peer\(n == 1 ? "" : "s")"
-    }
 
     /// Aggregate reachability across the peers, worst case wins — a word + its colour.
     private var machinesReachability: (text: String, color: Color) {
@@ -8207,22 +8439,6 @@ struct SettingsView: View {
     }
 
     private var exhaustedAccounts: [CredentialAccount] { accounts.filter { !$0.active } }
-
-    /// The distinct account kinds, in first-seen order (for "claude, codex, kimi").
-    private var accountKinds: [String] {
-        var seen = Set<String>(); var out: [String] = []
-        for account in accounts where !seen.contains(account.kind) {
-            seen.insert(account.kind); out.append(account.kind)
-        }
-        return out
-    }
-
-    /// "N subscriptions · claude, codex, kimi" — the Accounts MANAGE-row subtitle.
-    private var accountsSubtitle: String {
-        guard !accounts.isEmpty else { return "None configured yet" }
-        let n = accounts.count
-        return "\(n) subscription\(n == 1 ? "" : "s") · \(accountKinds.joined(separator: ", "))"
-    }
 
     /// "N subscriptions · M exhausted" — the Accounts detail-header subtitle (amber when
     /// any is exhausted).
@@ -8244,9 +8460,9 @@ struct SettingsView: View {
     /// "N of 4 alerts on" — the Notifications detail-header subtitle.
     private var notifyHeaderSubtitle: String { "\(notifyOnCount) of 4 alerts on" }
 
-    /// "N on · blocked" (amber) when iOS is blocking, else "N of 4 on".
+    /// "N on · blocked" (amber) when iOS is blocking, else "N of 4".
     private var notifyManageValue: String {
-        notifyBlocked ? "\(notifyOnCount) on · blocked" : "\(notifyOnCount) of 4 on"
+        notifyBlocked ? "\(notifyOnCount) on · blocked" : "\(notifyOnCount) of 4"
     }
     private var notifyManageTint: Color { notifyBlocked ? Palette.waiting : Palette.textDim }
 
@@ -8260,56 +8476,75 @@ struct SettingsView: View {
         }
     }
 
+    /// The Machines hero: the 88 pt disc, 12 pt to the name (Geist 24/700), the connection
+    /// with its dot, and the daemon build in Plex 12. The Connection status row it replaces
+    /// said the same.
+    private var machineHero: some View {
+        let title = DesignTokens.Text.MachineHeroTitle.self
+        return VStack(spacing: 0) {
+            machineDisc(size: 88)
+            Text(machineName)
+                .font(Typography.app(title.size, title.weight)).foregroundStyle(Palette.text)
+                .lineLimit(1).truncationMode(.middle)
+                .padding(.top, 12)
+            HStack(spacing: 6) {
+                Circle().fill(connected ? Palette.done : Palette.died).frame(width: 8, height: 8)
+                Text(connected ? "Connected" : "Disconnected")
+                    .font(Typography.app(15)).foregroundStyle(Palette.textDim)
+            }
+            .padding(.top, 2)
+            if let machineVersionLine {
+                Text(machineVersionLine)
+                    .font(Typography.machine(DesignTokens.Text.CardSubtitle.size))
+                    .foregroundStyle(Palette.textFaint)
+                    .padding(.top, 2)
+            }
+        }
+        .frame(maxWidth: .infinity)
+        .multilineTextAlignment(.center)
+        .padding(.horizontal, 16).padding(.top, 6).padding(.bottom, 6)
+        .accessibilityElement(children: .combine)
+        .accessibilityIdentifier("settings-machine-hero")
+    }
+
+    /// Machines › Connection: the trouble actions, beside the machine they act on. Reconnect
+    /// is withheld (with its reason) while a host key is rejected.
     private var connectionSection: some View {
         VStack(alignment: .leading, spacing: 0) {
             sectionLabel("CONNECTION")
-            VStack(alignment: .leading, spacing: 6) {
-                HStack(spacing: 10) {
-                    Circle().fill(connected ? Palette.done : Palette.died).frame(width: 8, height: 8)
-                    Text(connected ? "Connected" : "Disconnected")
-                        .font(Typography.app(15, .semibold)).foregroundStyle(Palette.text).layoutPriority(1)
-                    Text(host).font(Typography.machine(13)).foregroundStyle(Palette.textFaint)
-                        .lineLimit(1).truncationMode(.middle)
-                    Spacer(minLength: 0)
-                }
-                // The connected daemon's own version + commit (distinct from the app version in the
-                // footer). Only shown once `server.staged_update` has answered — absent on an older
-                // daemon. The version is static across commits, so the sha is what identifies the
-                // build; a daemon too old to report it shows just the version.
-                if let running = stagedUpdate?.runningVersion {
-                    Text(stagedUpdate?.runningSha.map { "herdr daemon \(running) · \($0)" }
-                        ?? "herdr daemon \(running)")
-                        .font(Typography.machine(12)).foregroundStyle(Palette.textFaint)
-                }
+            VStack(spacing: 0) {
+                groupedActionRow("Reconnect now", enabled: canReconnect,
+                                 note: "verify the host key first") { onReconnect() }
+                rowDivider
+                groupedActionRow(copied ? "Copied ✓" : "Copy diagnostics") { copyDiagnostics() }
             }
-            .settingsRowShell()
-            .padding(.horizontal, 16).padding(.top, 10)   // align with the toggle/action rows
-            // The herdr update card: signed in-app updates are the only update UI.
-            if let serverUpdate, serverUpdate.card != .hidden {
-                ServerUpdateCardView(model: serverUpdate, host: host)
-            }
+            .settingsGroup()
+            .padding(.horizontal, DesignTokens.Space.screenInset)
         }
-        // After a herdr update the Connection line names the new build. Here, not on the
-        // body's long modifier chain, which is at the type checker's limit.
+        // After a herdr update the hero names the new build. Here, not on the body's long
+        // modifier chain, which is at the type checker's limit.
         .onChange(of: serverUpdate?.completedUpdates ?? 0) { _, _ in
             Task { stagedUpdate = try? await client.stagedUpdate() }
         }
     }
 
+    /// The herd's reach under Federation: "2 machines · 14 agents · some slow".
+    private var federationFooter: some View {
+        let reach = machinesReachability
+        return HStack(spacing: 0) {
+            Text("\(machineCount) machine\(machineCount == 1 ? "" : "s") · \(agents.count) agent\(agents.count == 1 ? "" : "s") · ")
+                .foregroundStyle(Palette.textFaint)
+            Text(reach.text).foregroundStyle(reach.color)
+        }
+        .font(Typography.app(13))
+        .padding(.horizontal, 32).padding(.top, 8)
+        .accessibilityElement(children: .combine)
+        .accessibilityIdentifier("settings-federation-reach")
+    }
+
     /// True when the herdr update card asks for something (the same cases the tab badge counts).
     private var daemonUpdateAvailable: Bool {
         serverUpdate?.card.badgeKey != nil
-    }
-
-    /// The At a glance line for an update: the herdr update card's state.
-    private var glanceUpdateText: String {
-        switch serverUpdate?.card {
-        case .available(_, let new, _, _, _, _)?: return "herdr \(new) is ready to install"
-        case .restartPending(let new, _)?: return "herdr \(new) finishes on next restart"
-        case .failed?: return "herdr update didn't finish"
-        case .tooOld?: return "herdr needs a one-time update"
-        default: return "Daemon update available"
-        }
     }
 
     /// Saved machine profiles include ones not yet opted into federation. The
@@ -8323,10 +8558,11 @@ struct SettingsView: View {
         }
         VStack(alignment: .leading, spacing: 0) {
             sectionLabel("FEDERATION")
-            if machines.isEmpty && extraPeers.isEmpty {
-                federationEmpty
-            } else {
-                VStack(spacing: 0) {
+            // One group, as proposal B draws it: the machines, then "How to add a machine".
+            VStack(spacing: 0) {
+                if machines.isEmpty && extraPeers.isEmpty {
+                    federationEmpty
+                } else {
                     ForEach(Array(machines.enumerated()), id: \.element.id) { index, machine in
                         savedMachineRow(machine, peer: peers.first { $0.alias == machine.profileID })
                         if index < machines.count - 1 || !extraPeers.isEmpty { rowDivider }
@@ -8336,13 +8572,14 @@ struct SettingsView: View {
                         if index < extraPeers.count - 1 { rowDivider }
                     }
                 }
-                .settingsGroup()
-                .padding(.horizontal, 16).padding(.top, 10)
+                rowDivider
+                actionGlyphRow("How to add a machine", systemImage: "plus.circle",
+                               subtitle: "Connect another computer to your home box") {
+                    showFederationSetup = true
+                }
             }
-            richActionRow("How to add a machine", systemImage: "plus.circle",
-                          subtitle: "Connect another computer to your home box") {
-                showFederationSetup = true
-            }
+            .settingsGroup()
+            .padding(.horizontal, DesignTokens.Space.screenInset)
         }
     }
 
@@ -8422,8 +8659,6 @@ struct SettingsView: View {
         }
         .frame(maxWidth: .infinity, alignment: .leading)
         .padding(.horizontal, 18).padding(.vertical, 14)
-        .settingsGroup()
-        .padding(.horizontal, 16).padding(.top, 10)
     }
 
     /// One peer: an identity chip keyed on the alias (the same gradient+glyph the
@@ -8946,112 +9181,36 @@ struct SettingsView: View {
     /// applies the new size in place via its own `@AppStorage` observer).
     @AppStorage("terminal.fontSize") private var terminalFontSize: Double = 12.5
     /// Whether a RECEIVED html/svg preview may run script. OFF by default — see
-    /// `previewsSection` and `HtmlWebView`.
+    /// `previewsRow` and `HtmlWebView`.
     @AppStorage(WebViewPolicy.javaScriptDefaultsKey) private var previewJavaScript = false
 
-    /// "HTML previews" — the one switch that loosens how a RECEIVED html/svg attachment
+    /// "Run JavaScript in previews" — the one switch that loosens how a RECEIVED html/svg attachment
     /// is rendered. Off by default and stated plainly, because the document is written
     /// by whoever sent it: script stays off unless the reader turns it on for this
     /// device. The row under the switch has to be accurate about what stays true, and
     /// what does not: remote loads and navigation are still blocked, but a script can
     /// signal that the file was opened by a route no URL rule sees.
-    private var previewsSection: some View {
-        VStack(alignment: .leading, spacing: 0) {
-            sectionLabel("HTML PREVIEWS")
-            VStack(spacing: 0) {
-                groupedToggleRow("Run JavaScript", $previewJavaScript)
-                rowDivider
-                HStack(alignment: .top, spacing: 10) {
-                    Image(systemName: previewJavaScript ? "exclamationmark.triangle" : "lock.shield")
-                        .font(.system(size: 13, weight: .semibold))
-                        .foregroundStyle(previewJavaScript ? Palette.waiting : Palette.textDim)
-                        .frame(width: 26, height: 26)
-                        .background(Circle().fill(Palette.surfaceRaised))
-                    Text(previewJavaScript
-                         ? "Scripts in a previewed file will run. It still can't load anything from the network or open another page, but a file written to do so could signal that you opened it. Applies to the next preview you open."
-                         : "Scripts in a previewed file are ignored, and it can't load anything from the network. Turn this on only for a file you trust that needs to be interactive.")
-                        .font(Typography.app(12)).foregroundStyle(Palette.textFaint)
-                        .fixedSize(horizontal: false, vertical: true)
-                    Spacer(minLength: 0)
-                }
-                .padding(.horizontal, 18).padding(.vertical, 12)
-            }
-            .settingsGroup()
-            .padding(.horizontal, 16).padding(.top, 10)
-        }
-    }
-
-    /// "Text size" section for the iPhone index: a heading over the shared controls.
-    private var appearanceSection: some View {
-        VStack(alignment: .leading, spacing: 0) {
-            sectionLabel("TEXT SIZE")
-            appearanceControls
-        }
-    }
-
-    /// "omp agents open in": Chat (default) or Terminal (#481). The page's switch overrides
-    /// it per agent for the session.
-    private var chatSection: some View {
-        VStack(alignment: .leading, spacing: 0) {
-            sectionLabel("OMP CHAT")
-            VStack(alignment: .leading, spacing: 0) {
-                HStack(spacing: 12) {
-                    Text("omp agents open in").font(Typography.app(17)).foregroundStyle(Palette.text)
-                    Spacer(minLength: 8)
-                    Picker("omp agents open in", selection: $ompOpensIn) {
-                        Text("Chat").tag(ChatPreference.chat)
-                        Text("Terminal").tag(ChatPreference.terminal)
-                    }
-                    .pickerStyle(.segmented)
+    private var previewsRow: some View {
+        Button { previewJavaScript.toggle() } label: {
+            glyphRow("Run JavaScript in previews",
+                     systemImage: previewJavaScript ? "exclamationmark.triangle" : "chevron.left.forwardslash.chevron.right",
+                     subtitle: previewJavaScript
+                         ? "On: scripts in a previewed file will run. A file written to do so could signal that you opened it."
+                         : "Off: scripts in a previewed file are ignored.") {
+                Toggle("", isOn: .constant(previewJavaScript))
                     .labelsHidden()
-                    .fixedSize()
-                    .accessibilityIdentifier("settings-omp-opens-in")
-                }
-                .padding(.horizontal, 18).padding(.vertical, 8)
-                .frame(minHeight: 52)
-                rowDivider
-                Text("Chat shows omp's replies, thinking and steps as a conversation. Claude Code and Codex agents always open in the terminal.")
-                    .font(Typography.app(12)).foregroundStyle(Palette.textFaint)
-                    .fixedSize(horizontal: false, vertical: true)
-                    .padding(.horizontal, 18).padding(.vertical, 12)
+                    .tint(Palette.brand)
+                    .allowsHitTesting(false)
+                    .accessibilityHidden(true)
             }
-            .settingsGroup()
-            .padding(.horizontal, 16).padding(.top, 10)
         }
+        .buttonStyle(.plain)
+        .accessibilityValue(Text(previewJavaScript ? "on" : "off"))
+        .accessibilityIdentifier("settings-preview-javascript")
     }
 
-    /// "Typing": instant typing (predictive local echo, `PredictionEngine`).
-    private var typingSection: some View {
-        VStack(alignment: .leading, spacing: 0) {
-            sectionLabel("TYPING")
-            VStack(alignment: .leading, spacing: 0) {
-                HStack(spacing: 12) {
-                    Text("Instant typing").font(Typography.app(17)).foregroundStyle(Palette.text)
-                    Spacer(minLength: 8)
-                    Picker("Instant typing", selection: $predictiveEcho) {
-                        Text("Auto").tag(PredictionEngine.Mode.auto.rawValue)
-                        Text("Always").tag(PredictionEngine.Mode.always.rawValue)
-                        Text("Off").tag(PredictionEngine.Mode.off.rawValue)
-                    }
-                    .pickerStyle(.segmented)
-                    .labelsHidden()
-                    .fixedSize()
-                }
-                .padding(.horizontal, 18).padding(.vertical, 8)
-                .frame(minHeight: 52)
-                rowDivider
-                Text("Shows what you type at once and checks it against the server. Off: wait for the server's echo.")
-                    .font(Typography.app(12)).foregroundStyle(Palette.textFaint)
-                    .fixedSize(horizontal: false, vertical: true)
-                    .padding(.horizontal, 18).padding(.vertical, 12)
-            }
-            .settingsGroup()
-            .padding(.horizontal, 16).padding(.top, 10)
-        }
-    }
-
-    /// The two text-size controls — app chrome scale + terminal font — shared by the
-    /// iPhone inline `appearanceSection` and the iPad/Mac `appearanceDetail`. Both live
+    /// The two text-size controls — app chrome scale + terminal font — on the Preferences ›
+    /// Text size page, the same on every layout. Both live
     /// here so the setting reads the same on every layout.
     @ViewBuilder
     private var appearanceControls: some View {
@@ -9137,17 +9296,7 @@ struct SettingsView: View {
         .disabled(!enabled)
     }
 
-    private var troubleSection: some View {
-        VStack(alignment: .leading, spacing: 0) {
-            sectionLabel("TROUBLE")
-            actionRow("Reconnect now", enabled: canReconnect,
-                      note: "verify the host key first") { onReconnect() }
-            actionRow(copied ? "Copied ✓" : "Copy diagnostics") { copyDiagnostics() }
-            actionRow("Typing latency") { showTypingLatency = true }
-        }
-    }
-
-    // MARK: Typing latency (Trouble → Typing latency)
+    // MARK: Typing latency (Help → Typing latency)
 
     /// Key-to-screen numbers from `TypingLatencyRecorder`, one block per machine and
     /// network, with the report the owner pastes back. Refreshed every second while open
@@ -9198,29 +9347,6 @@ struct SettingsView: View {
             build: info?["CFBundleVersion"] as? String)
         latencyCopied = true
         Task { try? await Task.sleep(nanoseconds: 2_000_000_000); latencyCopied = false }
-    }
-
-    private var helpSection: some View {
-        VStack(alignment: .leading, spacing: 0) {
-            sectionLabel("HELP")
-            richActionRow("Gestures", systemImage: "hand.draw",
-                          subtitle: "How to move around the app") { showGestures = true }
-            linkRow("Report a bug or request a feature", systemImage: "exclamationmark.bubble",
-                    url: URL(string: "https://github.com/jerryfane/herdrup/issues")!)
-        }
-    }
-
-    /// Outbound links to the public web pages. Distinguished from in-app rows by the
-    /// `arrow.up.right` trailing glyph (leaving the app), set inside `linkRow`.
-    private var aboutSection: some View {
-        VStack(alignment: .leading, spacing: 0) {
-            sectionLabel("ABOUT")
-            discordRow
-            linkRow("Privacy Policy", systemImage: "lock.shield",
-                    url: URL(string: "https://herdrup.themartian.app/legal/privacy")!)
-            linkRow("Terms of Service", systemImage: "doc.text",
-                    url: URL(string: "https://herdrup.themartian.app/legal/terms")!)
-        }
     }
 
     /// The tip jar (StoreKit 2). Renders ONLY when products are loaded — `.idle`,
@@ -9300,9 +9426,9 @@ struct SettingsView: View {
         return "Dinner"
     }
 
-    /// The app names itself here — "herdrup mobile <version> (<build>)" — with the
-    /// design's one-line stance. Version + build come from the bundle (MARKETING_VERSION
-    /// / CFBundleVersion), so they track the shipped build, not a hardcoded string.
+    /// The root's footer: "herdrup mobile <version> (<build>)" with the design's one-line
+    /// stance under it. Version + build come from the bundle (MARKETING_VERSION /
+    /// CFBundleVersion), so they track the shipped build, not a hardcoded string.
     private var versionFooter: some View {
         let short = Bundle.main.infoDictionary?["CFBundleShortVersionString"] as? String ?? "-"
         let build = Bundle.main.infoDictionary?["CFBundleVersion"] as? String ?? "-"
@@ -9316,52 +9442,41 @@ struct SettingsView: View {
         .padding(.top, 28)
     }
 
-    /// The open-source affordance, at the very bottom — a quiet capsule, deliberately
-    /// not a card row: it says "the app IS open source", not "here's a setting". No
-    /// official GitHub SF Symbol exists; the code-brackets glyph reads as "source" and
-    /// sidesteps the Octocat trademark.
-    private var githubFooter: some View {
-        Button {
-            openURL(URL(string: "https://github.com/jerryfane/herdrup")!)
-        } label: {
-            HStack(spacing: 6) {
-                Image(systemName: "chevron.left.forwardslash.chevron.right")
-                    .font(.system(size: 12, weight: .semibold))
-                Text("Open source on GitHub").font(Typography.app(12, .medium))
-            }
-            .foregroundStyle(Palette.textDim)
-            .padding(.horizontal, 14).padding(.vertical, 8)
-            .background(Capsule().stroke(Palette.hairline, lineWidth: 1))
-        }
-        .buttonStyle(.plain)
-        .frame(maxWidth: .infinity)
-        .padding(.top, 14)
-    }
-
-    /// #357: today's uppercase labels as small spaced-out caps, without the trailing rule.
+    /// A page's section header: `text.microLabel` caps at x = 32, 22 pt above and 8 below
+    /// (proposal B's group headers, the same as the root's).
     private func sectionLabel(_ text: String) -> some View {
-        Text(text).font(Typography.microLabel).tracking(1.4).foregroundStyle(Palette.textFaint)
+        Text(text).font(Typography.microLabel).tracking(DesignTokens.Text.MicroLabel.tracking)
+            .foregroundStyle(Palette.textFaint)
             .frame(maxWidth: .infinity, alignment: .leading)
-            .padding(.horizontal, 34).padding(.top, 22).padding(.bottom, 4)
+            .padding(.horizontal, 32).padding(.top, 22).padding(.bottom, 8)
     }
 
+    /// An action row (proposal B): a brand Geist 17/600 label and no chevron, since it acts
+    /// in place; a disabled one dims and says why.
     private func actionRow(_ label: String, enabled: Bool = true, note: String? = nil, _ action: @escaping () -> Void) -> some View {
+        groupedActionRow(label, enabled: enabled, note: note, action)
+            .settingsGroup()
+            .padding(.horizontal, 16).padding(.top, 10)
+    }
+
+    /// `actionRow`'s row on its own, for a group holding several (Machines › Connection).
+    private func groupedActionRow(_ label: String, enabled: Bool = true, note: String? = nil, _ action: @escaping () -> Void) -> some View {
         Button { if enabled { action() } } label: {
             HStack {
                 VStack(alignment: .leading, spacing: 2) {
-                    Text(label).font(Typography.app(17)).foregroundStyle(enabled ? Palette.text : Palette.textFaint)
+                    Text(label).font(Typography.app(17, .semibold)).foregroundStyle(enabled ? Palette.brand : Palette.textFaint)
                     if !enabled, let note {
                         Text(note).font(Typography.app(11)).foregroundStyle(Palette.textFaint)
                     }
                 }
                 Spacer()
-                Image(systemName: "chevron.right").font(.system(size: 12, weight: .semibold)).foregroundStyle(Palette.textFaint)
             }
-            .settingsRowShell()
+            .padding(.horizontal, 18).padding(.vertical, 12)
+            .frame(maxWidth: .infinity, minHeight: 52, alignment: .leading)
+            .contentShape(Rectangle())
         }
         .buttonStyle(.plain)
         .disabled(!enabled)
-        .padding(.horizontal, 16).padding(.top, 10)
     }
 
     /// An icon-led row with an ALWAYS-visible subtitle (unlike `actionRow`, whose
@@ -9413,14 +9528,6 @@ struct SettingsView: View {
         .padding(.horizontal, 16).padding(.top, 10)
     }
 
-    /// A `richActionRow` that opens an external URL in the system browser, marked with
-    /// the leaving-the-app glyph.
-    private func linkRow(_ label: String, systemImage: String, url: URL) -> some View {
-        richActionRow(label, systemImage: systemImage, trailingGlyph: "arrow.up.right") {
-            openURL(url)
-        }
-    }
-
     /// The community invite, with Discord's official symbol.
     ///
     /// The mark is `Shared/Assets.xcassets/DiscordMark.imageset`, downscaled from
@@ -9438,8 +9545,8 @@ struct SettingsView: View {
     /// Free ships under CC BY 4.0 with attribution already in the bundle, but CC BY
     /// grants no trademark rights, and the row was tinting a third-party redraw grey.
     private var discordRow: some View {
-        richActionRow("Join the Discord", trailingGlyph: "arrow.up.right",
-                      action: { openURL(Self.discordInvite) }) {
+        Button { openURL(Self.discordInvite) } label: {
+            glyphRow("Join the Discord", glyph: {
             // DISCORD'S OWN ASSET, IN DISCORD'S OWN COLOUR, and both halves are the point.
             //
             // This was a Font Awesome redraw taken from the bundled Nerd Fonts subset,
@@ -9460,7 +9567,9 @@ struct SettingsView: View {
                 .resizable()
                 .scaledToFit()
                 .frame(width: 18)
+            }, trailing: { externalGlyph })
         }
+        .buttonStyle(.plain)
         .accessibilityIdentifier("settings-discord")
     }
 
@@ -9584,22 +9693,25 @@ private extension View {
             .contentShape(RoundedRectangle(cornerRadius: 12))
     }
 
-    /// `rowShell` for a Settings row (#357): a single-row group, min 52 pt.
+    /// `rowShell` for a Settings row (#357): a single-row group, min 52 pt, drawn without
+    /// the outline like every Settings group since proposal B (#572).
     func settingsRowShell() -> some View {
         self
             .padding(.horizontal, 18).padding(.vertical, 12)
             .frame(maxWidth: .infinity, minHeight: 52, alignment: .leading)
             .settingsGroup()
-            .contentShape(RoundedRectangle(cornerRadius: 18))
+            .contentShape(RoundedRectangle(cornerRadius: DesignTokens.Radius.group))
     }
 
-    /// One Settings group (#357 "HerdrUp voice"): a `surface` inset group, radius 18, with
-    /// a 1 pt `hairlineQuiet` outline.
-    func settingsGroup() -> some View {
-        self
+    /// One inset group (#357 "HerdrUp voice"): `surface`, radius 18, clipping its rows. The
+    /// connect screen passes `outline: true` to keep the 1 pt `hairlineQuiet` outline; Settings
+    /// (proposal B, #572) drops the stroke.
+    func settingsGroup(outline: Bool = false) -> some View {
+        let shape = RoundedRectangle(cornerRadius: DesignTokens.Radius.group)
+        return self
             .background(Palette.surface)
-            .clipShape(RoundedRectangle(cornerRadius: 18))
-            .overlay(RoundedRectangle(cornerRadius: 18).stroke(Palette.hairlineQuiet, lineWidth: 1))
+            .clipShape(shape)
+            .overlay { if outline { shape.stroke(Palette.hairlineQuiet, lineWidth: 1) } }
     }
 }
 

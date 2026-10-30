@@ -158,6 +158,8 @@ struct SavedGramRow: View {
     var downloadProgress: (received: Int, total: Int)?
     var onOpenFile: () -> Void
     var onSaveFile: () -> Void
+    /// Ends the reader's own open or save of this file, as the inbox's menu does.
+    var onCancelDownload: () -> Void
     var onUnsave: () -> Void
 
     /// #354: never joined (Saved is a list of separate keepsakes). Your saved posts sit on the
@@ -197,7 +199,11 @@ struct SavedGramRow: View {
     @StableMenuBuilder
     private var menu: [StableMenuItem] {
         if saved.file != nil {
-            StableMenuItem("Save to Files", systemImage: "square.and.arrow.down", action: onSaveFile)
+            if isDownloadingFile {
+                StableMenuItem("Cancel Download", systemImage: "xmark.circle", action: onCancelDownload)
+            } else {
+                StableMenuItem("Save to Files", systemImage: "square.and.arrow.down", action: onSaveFile)
+            }
         }
         if !saved.text.isEmpty {
             StableMenuItem("Copy", systemImage: "doc.on.doc") {

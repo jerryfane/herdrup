@@ -1,0 +1,97 @@
+{
+  "state": "federated",
+  "ping": {
+    "type": "pong",
+    "version": "0.9.5",
+    "protocol": 22,
+    "capabilities": {
+      "live_handoff": true,
+      "pane_input_stream": true,
+      "gram_upload_stream": true,
+      "agent_session_transfer": true,
+      "agent_session_transfer_harnesses": [
+        "claude",
+        "codex",
+        "omp"
+      ],
+      "events_v2": true,
+      "agent_forget": true,
+      "api_bridge_multi": true,
+      "pane_history": true,
+      "agent_transcript": true,
+      "agent_answer": true,
+      "agent_avatar": true
+    }
+  },
+  "agent.list": {
+    "type": "agent_list",
+    "agents": [
+      {
+        "pane_id": "w1:p1",
+        "terminal_id": "t1",
+        "workspace_id": "w1",
+        "tab_id": "w1:t1",
+        "focused": false,
+        "revision": 20,
+        "name": "web",
+        "agent": "codex",
+        "agent_status": "working",
+        "cwd": "/home/dev/web",
+        "terminal_title_stripped": "⠋ running the test suite",
+        "status_since_unix_ms": 1793180220000
+      },
+      {
+        "pane_id": "air/w1:p2",
+        "terminal_id": "t2",
+        "workspace_id": "air/w1",
+        "tab_id": "air/w1:t1",
+        "focused": false,
+        "revision": 21,
+        "name": "air/scout",
+        "agent": "claude",
+        "agent_status": "working",
+        "cwd": "/Users/dev/scout",
+        "terminal_title_stripped": "⠋ reading the crash logs",
+        "machine_id": "air",
+        "machine_label": "mcb-air",
+        "reachability": "reachable",
+        "status_since_unix_ms": 1793178240000
+      },
+      {
+        "pane_id": "studio/w1:p4",
+        "terminal_id": "t3",
+        "workspace_id": "studio/w1",
+        "tab_id": "studio/w1:t1",
+        "focused": false,
+        "revision": 22,
+        "name": "studio/render",
+        "agent": "claude",
+        "agent_status": "unknown",
+        "cwd": "/Users/dev/render",
+        "last_known_status": "working",
+        "machine_id": "studio",
+        "machine_label": "mac-studio",
+        "reachability": "unreachable",
+        "status_since_unix_ms": 1793172660000
+      },
+      {
+        "pane_id": "nas/w2:p1",
+        "terminal_id": "t4",
+        "workspace_id": "nas/w2",
+        "tab_id": "nas/w2:t1",
+        "focused": false,
+        "revision": 23,
+        "name": "nas/backup",
+        "agent": "omp",
+        "agent_status": "unknown",
+        "cwd": "/srv/backup",
+        "terminal_title_stripped": "asking to prune old snapshots",
+        "last_known_status": "blocked",
+        "machine_id": "nas",
+        "machine_label": "homelab",
+        "reachability": "degraded",
+        "status_since_unix_ms": 1793148060000
+      }
+    ]
+  }
+}

@@ -29,7 +29,8 @@ struct GuestSettingsView: View {
                 .padding(.horizontal, 16).padding(.vertical, 12)
                 ScrollView {
                     VStack(spacing: 0) {
-                        GuestShellStyle.section("Shared with you").padding(.top, 14).padding(.bottom, 8)
+                        sharedAgentCard.padding(.top, 14)
+                        GuestShellStyle.section("Shared with you").padding(.top, 20).padding(.bottom, 8)
                         GuestShellStyle.card {
                             GuestShellStyle.keyValue("Machine") { value(access.machineLabel) }
                             GuestShellStyle.divider
@@ -85,6 +86,39 @@ struct GuestSettingsView: View {
         } message: {
             Text("\(access.agentName) disappears from this phone.")
         }
+    }
+
+    /// Proposal B's header card (#572), for the one thing a guest has: the shared agent. The
+    /// avatar disc look (`AgentIdentity`), its name (`text.machineCardTitle`), who shared it,
+    /// and the machine it runs on. The rows below keep every detail.
+    private var sharedAgentCard: some View {
+        let title = DesignTokens.Text.MachineCardTitle.self
+        let size = DesignTokens.Size.machineCardAvatar
+        let first = access.agentName.prefix(1).uppercased()
+        return HStack(spacing: 14) {
+            Text(first.isEmpty ? "?" : first)
+                .font(Typography.app(size * 0.43, .bold)).foregroundStyle(.white)
+                .frame(width: size, height: size)
+                .background(Circle().fill(AgentIdentity.gradient(for: nil)))
+                .accessibilityHidden(true)
+            VStack(alignment: .leading, spacing: 0) {
+                Text(access.agentName)
+                    .font(Typography.app(title.size, title.weight)).foregroundStyle(Palette.text)
+                    .lineLimit(1)
+                Text("Shared by \(access.ownerName)")
+                    .font(Typography.app(15)).foregroundStyle(Palette.textDim).lineLimit(1)
+                Text(access.machineLabel)
+                    .font(Typography.machine(DesignTokens.Text.CardSubtitle.size))
+                    .foregroundStyle(Palette.textFaint).lineLimit(1)
+                    .padding(.top, 2)
+            }
+            Spacer(minLength: 0)
+        }
+        .padding(.horizontal, 16).padding(.vertical, 14)
+        .background(Palette.surface, in: RoundedRectangle(cornerRadius: DesignTokens.Radius.group))
+        .padding(.horizontal, DesignTokens.Space.screenInset)
+        .accessibilityElement(children: .combine)
+        .accessibilityIdentifier("guest-settings-agent-card")
     }
 
     private func value(_ text: String) -> some View {

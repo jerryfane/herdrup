@@ -1,0 +1,181 @@
+{
+  "state": "gram",
+  "ping": {
+    "type": "pong",
+    "version": "0.9.5",
+    "protocol": 22,
+    "capabilities": {
+      "live_handoff": true,
+      "pane_input_stream": true,
+      "gram_upload_stream": true,
+      "agent_session_transfer": true,
+      "agent_session_transfer_harnesses": [
+        "claude",
+        "codex",
+        "omp"
+      ],
+      "events_v2": true,
+      "agent_forget": true,
+      "api_bridge_multi": true,
+      "pane_history": true,
+      "agent_transcript": true,
+      "agent_answer": true,
+      "agent_avatar": true
+    }
+  },
+  "agent.list": {
+    "type": "agent_list",
+    "agents": [
+      {
+        "pane_id": "w1:p1",
+        "terminal_id": "t1",
+        "workspace_id": "w1",
+        "tab_id": "w1:t1",
+        "focused": false,
+        "revision": 20,
+        "name": "vetrina",
+        "agent": "codex",
+        "agent_status": "idle",
+        "cwd": "/home/dev/reference",
+        "terminal_title_stripped": "Ready",
+        "status_since_unix_ms": 1793180220000
+      },
+      {
+        "pane_id": "hetzner-1/w1:p2",
+        "terminal_id": "t2",
+        "workspace_id": "w1",
+        "tab_id": "w1:t1",
+        "focused": false,
+        "revision": 21,
+        "name": "hetzner-1/clientloop",
+        "agent": "claude",
+        "agent_status": "idle",
+        "cwd": "/home/dev/reference",
+        "terminal_title_stripped": "Ready",
+        "status_since_unix_ms": 1793178240000,
+        "machine_id": "hetzner-1",
+        "machine_label": "hetzner-1",
+        "reachability": "reachable"
+      },
+      {
+        "pane_id": "w1:p3",
+        "terminal_id": "t3",
+        "workspace_id": "w1",
+        "tab_id": "w1:t1",
+        "focused": false,
+        "revision": 22,
+        "name": "clientloop",
+        "agent": "claude",
+        "agent_status": "idle",
+        "cwd": "/home/dev/reference",
+        "status_since_unix_ms": 1793172660000,
+        "terminal_title_stripped": "Ready"
+      }
+    ]
+  },
+  "gram.list": {
+    "type": "gram_list",
+    "messages": [
+      {
+        "id": "gr-owner",
+        "direction": "owner_to_agent",
+        "from": "owner",
+        "text": "Great, ship it.",
+        "created_unix_ms": 1793179920000,
+        "read_by_owner": true,
+        "to": "vetrina"
+      },
+      {
+        "id": "gr-unread",
+        "direction": "agent_to_owner",
+        "from": "vetrina",
+        "text": "Ready for review. One last check before we ship.",
+        "created_unix_ms": 1793179800000,
+        "read_by_owner": false
+      },
+      {
+        "id": "gr-file",
+        "direction": "agent_to_owner",
+        "from": "hetzner-1/clientloop",
+        "text": "The capture handoff is attached.",
+        "created_unix_ms": 1793179680000,
+        "read_by_owner": true,
+        "machine_label": "hetzner-1",
+        "file": {
+          "name": "reference-handoff.txt",
+          "size": 72,
+          "mime": "text/plain",
+          "sha256": "4c3350b942e6ef80fd67b0c1487a342f95c51c6619bd9b9427cf7be4fe787738"
+        }
+      },
+      {
+        "id": "gr-image",
+        "direction": "agent_to_owner",
+        "from": "vetrina",
+        "text": "Landscape preview for the reference set.",
+        "created_unix_ms": 1793179560000,
+        "read_by_owner": true,
+        "file": {
+          "name": "reference-landscape.png",
+          "size": 1667,
+          "mime": "image/png",
+          "sha256": "7928e844972b9d112dad441d0b55501f93cc06a205ef42c02436c442e36ae7f8"
+        }
+      },
+      {
+        "id": "gr-local",
+        "direction": "agent_to_owner",
+        "from": "clientloop",
+        "text": "Lint is clean on my branch.",
+        "created_unix_ms": 1793179440000,
+        "read_by_owner": true
+      },
+      {
+        "id": "gr-code",
+        "direction": "agent_to_owner",
+        "from": "hetzner-1/clientloop",
+        "text": "Reproduce the preview:\n```sh\ncd ~/src/herdrup\npnpm install\npnpm dev\n```",
+        "created_unix_ms": 1793179320000,
+        "read_by_owner": true,
+        "machine_label": "hetzner-1"
+      },
+      {
+        "id": "gr-long",
+        "direction": "agent_to_owner",
+        "from": "vetrina",
+        "text": "Deployment notes.\nThe desktop layout is ready.\nNavigation stays on the left.\nMessages keep their original order.\nImages keep their aspect ratio.\nDocuments show a file card.\nSearch covers the loaded inbox.\nSaved keeps a local copy.\nComposer attachments are staged.\nAmbiguous names need a choice.\nReady for your review.",
+        "created_unix_ms": 1793179200000,
+        "read_by_owner": true
+      }
+    ],
+    "unread_count": 1,
+    "has_more": false
+  },
+  "gram.get_file": {
+    "gr-image": {
+      "type": "gram_file_content",
+      "name": "reference-landscape.png",
+      "mime": "image/png",
+      "size": 1667,
+      "data_base64": "iVBORw0KGgoAAAANSUhEUgAAAeAAAADwCAIAAABXFyDtAAAGSklEQVR42u3UCVoUVxiG0VpKTJgHmWcVaCBiVBKc4xSQaKKSsAcXlg1lE0E7MUBD00UP9Vfd8zxnBd9/75t907cOQECZCQAEGgCBBqhEoGsABJRd66sBEFB2rb8GQEACDRA30BsABCTQAFED/W3/BgABCTRA2EAPbAIQkEADCDQAuQL93cAmAAEdB3oLgIAEGiBsoAe3AAhIoAGiBrpv8HsAAhJoAIEGQKABKhHoodsABJT1D90GICCBBhBoAHIGehuAgAQaIGqgB4a3AQhIoAHiBvoOAAEJNIBAA5Ar0IPDdwAIKBsc+QGAgAQaQKABEGigS/7+61PrzNVuoIdG7gI0l6vLjQx4NQINdDHNMt1eoEfvAjTqYJpPZdq2LRNooHd11ui8gb4HcFJX6/xfo+18uWx49B5AXQ/SfJLBmxNooJg6a7RAA3HrrNGXBXrsPkCRgbb/BQQaKLLOGt0s0CNj94GUFV7nOodoJNCgzp80Omygd4BkBQu0i5wi0KDOGh020OM7QJoiBtpdTshGx3eABAWsc53TfHUc6B+BBAUOtOv8S6BBoAVaoAF11miBBgS6CoEeu/4TkJrggXagOoEGgRZogQYEWqAFGhDoagR6F0hN+EC70WfZ+PVdIDXBA+1Addn4xC6QmuiBdqMvBBoEWqDjBvoBkJrwgXajzwQaBFqgowb6+sQDIDXBA+1AdQINAi3QYQM9+RBITfRAu9EXAg0arc4CDQi0QOcK9MTkQyBBYQPtNF8dB/oRkKaQdXaX/wk0CLRAhw301CMgWbHq7CKnCTQItEBHDfTk1GMgZUHq7BCNBBp4rM4CDWi0Ogs0INBVCPT0E4BjxdTZ8hfLpqafANT1uM4Gb06ggQIybWSBBiI22rytB/opQKOu1dm2rRJooEeZNmbuQE/PPAVors00G/BqBBroVqnN1X6gnwEQkEADCDQAuQI9M/MMgICymdmfAQhIoAEEGgCBBqhCoGdnnwMQkEADhA303HMAAhJogLiBfgFAQNnc3AsAAhJoAIEGIF+g518CEJBAA0QN9Pz8SwACEmiAuIF+BUBAAg0QNtALrwAIKFtYeAVAQMeBfg1AQAININAACDRAFQK9uPgLAAEJdJFWt39rZBZAoGN1WamBs4EeWNs+ySKFd1mpgfMD3dDrPdpx5ShfHGurQiouCfQZS4t7tKLjXW5kZKi8fIE+2+ulPU7qQZfPKbXloaLaCrReFxVlsQaBbrPX+xUWqsvnlXofKLsuBrqSvQ7eZaUGge6A5aX9sihdlC9Sos2B5QIDHb/XlemyUoNAd7TXy2+KUuEun1Pq4nYGLhU00D3udVJRFmsQ6BL0WpSVGgS6u1aW3+QiwS3KOyzQWVUIdEOvDxqpbduxPgB6rIKBPkNblRoEWq8TK/XKAdBVyQVar8UaBFqvU3Rj5VegUwRar5UaBFqvxRoQaL1WahBo9PpKpb7xFriUQOt1wW7eeAucS6D1WqlBoNFrpQaB1usKxfodJEug9VqpQaDR6064dfMdJEKg9VqsQaDR6y6WGipIoPVaqUGg0WuxBoFGr0+5CaUk0Hqdklu/Q4kINKn22v9HoNFrpQaBRq+VGoGGqvd67dZ7KJxAo9dKjUCj16Uu9ep76DGBRq/FmkBOfhyBRq/bKfUHaFOTnyLQ6HUHrK9+gBa1/jUEGr0Wa6IUWaDRa6UmaJEFGr3ueanXPlJtXXrtAo1eizVRiizQ6HUItbWPlEgh71mg0WulJkqRBRq9jhzrQ4oS8MUKNHqt1IoclEBD6F7X1g/plNK9SYGG0vR6Y/2QXMr+CAUaytfrjfU/OFfFXp1AQ4l7rcjVfmYCDRXptSILNBC914os0ED0Xm/W/iwjD0agIa1eK7JAA9F7rcgCDUTvtSILNFCCXm/WjjrL4QQa9LrDtmpHV+M0Ag30qNdbG0fNGV+ggeJ7rcgCDcTqtQEFGojSaxMJNBCl10YQaAAEGkCgARBoAIEGQKABEGgAgQZAoAEEGgCBBkCgAQQaAIEGEGgABBpAoAEQaAAEGkCgARBoAIEGQKABEGgAgQZAoAEEGgCBBkCgAQQaAIEGEGgABBpAoAEQaAAEGkCgARBoAIEGQKABEGgAgQZAoAEEGgCBBhBoAAQaAIEGEGgAOukfpL0EmIevW3MAAAAASUVORK5CYII="
+    },
+    "gr-file": {
+      "type": "gram_file_content",
+      "name": "reference-handoff.txt",
+      "mime": "text/plain",
+      "size": 72,
+      "data_base64": "RGVza3RvcCByZWZlcmVuY2UgaGFuZG9mZgpJbWFnZSBhbmQgbWVzc2FnZSBmaXh0dXJlcyBhcmUgZGV0ZXJtaW5pc3RpYy4K"
+    }
+  },
+  "gram.upload.fixture": {
+    "name": "picked-notes.txt",
+    "mime": "text/plain",
+    "size": 28,
+    "sha256": "7f1443b5dcf6acdf1043e6b7c8fe24e84dc5635ce6c0491eb1a79917c0cda0c9",
+    "data_base64": "cGlja2VkIHRocm91Z2ggdGhlIHBhcGVyY2xpcA=="
+  },
+  "accounts.list": {
+    "type": "accounts_list",
+    "accounts": []
+  }
+}

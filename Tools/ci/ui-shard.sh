@@ -75,31 +75,56 @@ trap stop_recording EXIT
 # boot gets 10m; later readiness checks of the same device keep the shorter 5m.
 # Per device, because settings-gram cold-boots the iPad and then the iPhone.
 cold_booted=" "
-# Devices that bootstatus reported ready earlier in this job. A later round on one of them
-# asks CoreSimulator nothing: on Xcode 27, with the screen recorder running, the second
+# Devices that bootstatus reported ready earlier in this job. Do not repeat bootstatus
+# for a still-booted device: on Xcode 27, with the screen recorder running, the second
 # readiness check of an iPad that had just been reported ready hung its whole 5m in three
 # focused iPad runs in a row (40828227115, 40834877074 with empty logs; 40839462725, whose
 # stamped log shows the hang is the first command, `simctl list devices`, and a 60 s
-# bounded `simctl list` before it timed out too). `simctl shutdown` (settings-gram, before
-# its iPhone round) and a failed install take a device out of this set, so the next round
-# boots and checks it again; xcodebuild reports a device that died some other way.
+# bounded `simctl list` before it timed out too). This cache is not current device state:
+# run 40994033942 saw cached-ready iPhones shut down before later installs. Reuse the
+# bounded service probe below before returning readiness to any caller.
 ready_devices=" "
 # After bootstatus reports a device ready (and the screen recorder starts), CoreSimulator
 # can stop answering every simctl request for minutes on Xcode 27: the ipad shard of
 # 40827550901 waited 3.5 min for its second readiness check to print anything; focused
 # iPad runs waited past 5m in that check (above) and, with the check skipped, in
 # `simctl install` (40844294026, and 40822219713 / 40823615938 with no recorder at all).
-# So an install first waits until the service answers a cheap query. Each probe is
-# bounded so a wedged one is abandoned, and the busiest processes are logged while the
-# service is silent, as the receipt of what it is busy with. Free when it answers.
+# So readiness includes waiting until the service answers a cheap query, before install
+# or any other simulator operation. Each probe is bounded so a wedged one is abandoned,
+# and the busiest processes are logged while the service is silent. Free when it answers.
 service_settle_budget=900
 wait_for_simulator_service() {
-  local log="$1" start probe=0
+  local log="$1" udid="$2" start probe=0 inventory
+  simulator_device_state=
   start=$(date +%s)
   while :; do
     probe=$((probe + 1))
-    if "$TIMEOUT_BIN" --signal=TERM --kill-after=5s 30s xcrun simctl list devices >/dev/null 2>&1; then
+    if inventory=$("$TIMEOUT_BIN" --signal=TERM --kill-after=5s 30s xcrun simctl list devices --json 2>>"$log"); then
       echo "$(date -u +%FT%TZ) CoreSimulator answered after $(( $(date +%s) - start )) s ($probe probes)" | tee -a "$log"
+      if ! simulator_device_state=$(printf '%s\n' "$inventory" | python3 -c '
+import json, sys
+try:
+    devices = json.load(sys.stdin)["devices"]
+    if not isinstance(devices, dict) or any(not isinstance(group, list) for group in devices.values()):
+        raise ValueError("invalid devices inventory")
+    matches = [device for group in devices.values() for device in group if device.get("udid") == sys.argv[1]]
+    if len(matches) != 1:
+        raise ValueError("target missing or duplicated in device inventory")
+    device = matches[0]
+    if device.get("isAvailable") is not True:
+        raise ValueError("target is unavailable")
+    state = device.get("state")
+    if state not in ("Booted", "Shutdown"):
+        raise ValueError("target has unsupported or missing state: %r" % state)
+    print(state)
+except (ValueError, KeyError, TypeError, AttributeError) as error:
+    print("invalid simulator inventory for %s: %s" % (sys.argv[1], error), file=sys.stderr)
+    sys.exit(1)
+' "$udid" 2>>"$log"); then
+        echo "::error::cannot determine current simulator state for $udid; see $log"
+        return 1
+      fi
+      echo "$(date -u +%FT%TZ) $udid current state: $simulator_device_state" >>"$log"
       return 0
     fi
     if [ $(( $(date +%s) - start )) -ge "$service_settle_budget" ]; then
@@ -113,10 +138,21 @@ wait_for_simulator_service() {
   done
 }
 boot_simulator() {
-  local udid="$1" log="$2" status=0 budget=10m
+  local udid="$1" log="$2" status=0 budget=10m simulator_device_state=
+  echo "$(date -u +%FT%TZ) checking simulator readiness for $udid" >"$log"
   case "$ready_devices" in *" $udid "*)
-    echo "$(date -u +%FT%TZ) $udid was ready earlier in this job: no boot, no bootstatus" | tee "$log"
-    return 0
+    # Reuse the service-settle query instead of trusting historical bootstatus.
+    # Its state result is caller-local, never a second persistent readiness cache.
+    if ! wait_for_simulator_service "$log" "$udid"; then
+      ready_devices="${ready_devices/ $udid / }"
+      return 1
+    fi
+    if [ "$simulator_device_state" = Booted ]; then
+      echo "$(date -u +%FT%TZ) $udid is still Booted: no boot, no bootstatus" | tee -a "$log"
+      return 0
+    fi
+    ready_devices="${ready_devices/ $udid / }"
+    echo "$(date -u +%FT%TZ) $udid is Shutdown; invalidated cached readiness" >>"$log"
     ;;
   esac
   case "$cold_booted" in *" $udid "*) budget=5m ;; esac
@@ -138,9 +174,15 @@ boot_simulator() {
     fi
     echo "$(date -u +%FT%TZ) simctl bootstatus $1 -b"
     exec xcrun simctl bootstatus "$1" -b
-  ' _ "$udid" 2>&1 | tee "$log" || status=$?
+  ' _ "$udid" 2>&1 | tee -a "$log" || status=$?
   if [ "$status" -ne 0 ]; then
     echo "::error::simulator $udid failed to become ready within $budget (exit $status); see $log"
+    return 1
+  fi
+  # Bootstatus alone does not prove CoreSimulator is answering or that the target
+  # stayed booted. Settle once here for all consumers, not again during install.
+  if ! wait_for_simulator_service "$log" "$udid" || [ "$simulator_device_state" != Booted ]; then
+    echo "::error::simulator $udid is not confirmed Booted after boot; see $log"
     return 1
   fi
   ready_devices="$ready_devices$udid "
@@ -155,6 +197,7 @@ boot_simulator() {
 # Every round that launches an app through XCUIApplication on a booted simulator does this:
 # run_suite (the Debug app) and the iPad Settings regression (the Distribution app).
 # swiftterm_api runs package unit tests in a test host, with no app for XCUITest to launch.
+# Callers must obtain current readiness through boot_simulator before using simctl.
 APP_UNDER_TEST=.build-dd/Build/Products/Debug-iphonesimulator/Herdr.app
 SETTINGS_APP_UNDER_TEST=.build-dd-settings-stack/Build/Products/Distribution-iphonesimulator/Herdr.app
 install_app_under_test() {
@@ -167,18 +210,11 @@ install_app_under_test() {
     echo "::error::cannot read CFBundleIdentifier from $app"
     return 1
   }
-  echo "$(date -u +%FT%TZ) waiting for CoreSimulator to answer" >"$log"
-  wait_for_simulator_service "$log" || return 1
   start=$(date +%s)
-  echo "$(date -u +%FT%TZ) install $bundle_id from $app on $udid" >>"$log"
+  echo "$(date -u +%FT%TZ) install $bundle_id from $app on $udid" >"$log"
   if ! "$TIMEOUT_BIN" --signal=TERM --kill-after=15s 5m \
       xcrun simctl install "$udid" "$app" >>"$log" 2>&1; then
     echo "::error::installing $bundle_id on $udid failed or timed out; see $log"
-    # A failed install says nothing good about the device, so the next round must ask
-    # again. Run 40898152906: after 418 s of silence CoreSimulator died mid-install
-    # ("Mach error -308 - (ipc/mig) server died"); the device stayed in ready_devices, so
-    # all eight later iPad rounds skipped boot and failed their installs within seconds.
-    ready_devices="${ready_devices/ $udid / }"
     return 1
   fi
   echo "$(date -u +%FT%TZ) simctl install returned after $(( $(date +%s) - start )) s" >>"$log"
@@ -301,8 +337,8 @@ sys.exit(1 if missing else 0)
 ' "$@"
 }
 
-# Herdrup Desktop's reference screenshots (DesktopReferenceShots, herdrup-desktop#16) on
-# one reference iPad. The pictures must be the same on every run, so the app starts from a
+# Herdrup Desktop's agent-list, Gram and Settings reference screenshots on one iPad.
+# Each class keeps its own bounded round as the reference set grows. The app starts from a
 # fresh install (no UserDefaults left by earlier rounds), the device is dark, and the status
 # bar is pinned: 9:41, full battery, charged, no cellular, three Wi-Fi bars. simctl takes
 # only a plain time here: it rejected both ISO date-times (`…Z` and `…+00:00`) as "non-ISO"
@@ -311,8 +347,12 @@ sys.exit(1 if missing else 0)
 # rounds on the device see the real status bar.
 DESKTOP_REFERENCE_STATUS_BAR=(--time 9:41 --batteryLevel 100 --batteryState charged
   --cellularMode notSupported --wifiBars 3)
+DESKTOP_REFERENCE_CLASSES=(DesktopReferenceShots DesktopGramReferenceShots DesktopSettingsReferenceShots DesktopDetailReferenceShots)
 desktop_reference_round() {
-  local label="$1" udid="$2" bundle_id status=0
+  local label="$1" udid="$2" bundle_id class round status=0
+  shift 2
+  local classes=("${DESKTOP_REFERENCE_CLASSES[@]}")
+  if [ "$#" -gt 0 ]; then classes=("$@"); fi
   boot_simulator "$udid" "TestReceipts/$label-boot.log" || return 1
   bundle_id=$(/usr/libexec/PlistBuddy -c 'Print :CFBundleIdentifier' "$APP_UNDER_TEST/Info.plist") || return 1
   xcrun simctl uninstall "$udid" "$bundle_id" >/dev/null 2>&1 || true
@@ -322,8 +362,17 @@ desktop_reference_round() {
     echo "xcrun simctl status_bar <udid> override ${DESKTOP_REFERENCE_STATUS_BAR[*]}"
     xcrun simctl status_bar "$udid" list
   } | tee "TestReceipts/$label-status-bar.txt"
-  run_suite "$label" "$udid" 15m -only-testing:HerdrUITests/DesktopReferenceShots || status=1
-  check_classes_ran "TestReceipts/$label-first.xcresult" DesktopReferenceShots || status=1
+  # Match focused iPad runs: record before installation, including simulator failures
+  # that happen before XCTest can attach its own recording.
+  xcrun simctl io "$udid" recordVideo "TestReceipts/$label-reference.mp4" \
+    > "TestReceipts/$label-reference-video.log" 2>&1 &
+  recorder=$!
+  for class in "${classes[@]}"; do
+    round="$label-${class//\//-}"
+    run_suite "$round" "$udid" 15m "-only-testing:HerdrUITests/$class" || status=1
+    check_classes_ran "TestReceipts/$round-first.xcresult" "${class%%/*}" || status=1
+  done
+  stop_recording
   xcrun simctl status_bar "$udid" clear || true
   xcrun simctl ui "$udid" appearance light || true
   return "$status"
@@ -423,10 +472,15 @@ case "$shard" in
     run_suite iPhoneAgentList "$IPHONE_UDID" 10m -only-testing:HerdrUITests/AgentFoldersTests \
       -only-testing:HerdrUITests/NeedsYouPillTests || failed=1
     check_classes_ran TestReceipts/iPhoneAgentList-first.xcresult AgentFoldersTests NeedsYouPillTests || failed=1
+    # Update-card scenarios take ~4 minutes (243 s in run 40900275118). Keeping them
+    # in iPhoneApp repeatedly exhausted its 30-minute cap before the last classes.
+    run_suite iPhoneServerUpdate "$IPHONE_UDID" 10m -only-testing:HerdrUITests/ServerUpdateUITests || failed=1
+    check_classes_ran TestReceipts/iPhoneServerUpdate-first.xcresult ServerUpdateUITests || failed=1
     skip=(-skip-testing:HerdrUITests/GramTests -skip-testing:HerdrUITests/StatusMotionTests
       -skip-testing:HerdrUITests/ChatViewTests -skip-testing:HerdrUITests/ChatUXSmokeTests -skip-testing:HerdrUITests/PagingTests
       -skip-testing:HerdrUITests/AgentFoldersTests -skip-testing:HerdrUITests/NeedsYouPillTests
-      -skip-testing:HerdrUITests/DesktopReferenceShots)
+      -skip-testing:HerdrUITests/ServerUpdateUITests)
+    for class in "${DESKTOP_REFERENCE_CLASSES[@]}"; do skip+=("-skip-testing:HerdrUITests/$class"); done
     for class in "${TERMINAL_CLASSES[@]}"; do skip+=("-skip-testing:HerdrUITests/$class"); done
     # 40m: on the Xcode 27 image every class ran slower. Run 40728450580 logged "iPhoneApp
     # exceeded its 30m budget" on its 79th case; its 69 cases that passed there and on
@@ -546,17 +600,29 @@ case "$shard" in
     ;;
   focused)
     case "${ONLY_DEVICE:-iphone}" in
-      ipad) label=iPad; udid="$IPAD_UDID" ;;
+      ipad|ipad-pro-13) label=iPad; udid="$IPAD_UDID" ;;
       *)    label=iPhone; udid="$IPHONE_UDID" ;;
     esac
-    if [ "$ONLY_SUITE" = DesktopReferenceShots ] && [ "$label" = iPad ]; then
-      # The references are a pair: both reference iPads, each under the pinned status bar.
-      echo "::notice::focused dispatch: HerdrUITests/DesktopReferenceShots on both reference iPads"
-      desktop_reference_round iPadDesktopReference "$IPAD_UDID" || failed=1
+    if [[ "$ONLY_SUITE" = DesktopReferenceShots || "$ONLY_SUITE" = DesktopGramAndSettingsReferences || "$ONLY_SUITE" = DesktopGramReferenceShots || "$ONLY_SUITE" = DesktopSettingsReferenceShots || "$ONLY_SUITE" = DesktopDetailReferenceShots || "$ONLY_SUITE" = DesktopGramReferenceShots/* || "$ONLY_SUITE" = DesktopSettingsReferenceShots/* || "$ONLY_SUITE" = DesktopDetailReferenceShots/* ]]; then
+      if [ "$label" != iPad ]; then
+        echo "::error::desktop reference groups require only_device=ipad or ipad-pro-13"
+        exit 1
+      fi
+      # Default to both references; a failed primary-device capture can be replaced alone.
+      reference_classes=("${DESKTOP_REFERENCE_CLASSES[@]}")
+      if [ "$ONLY_SUITE" = DesktopGramAndSettingsReferences ]; then
+        reference_classes=(DesktopGramReferenceShots DesktopSettingsReferenceShots)
+      elif [[ "$ONLY_SUITE" != DesktopReferenceShots ]]; then
+        reference_classes=("$ONLY_SUITE")
+      fi
+      echo "::notice::focused dispatch: $ONLY_SUITE on ${ONLY_DEVICE:-ipad}"
+      desktop_reference_round iPadDesktopReference "$IPAD_UDID" "${reference_classes[@]}" || failed=1
       xcrun simctl shutdown "$IPAD_UDID" >/dev/null 2>&1 || true
       # A shut-down device must be booted and checked again by any later round.
       ready_devices="${ready_devices/ $IPAD_UDID / }"
-      desktop_reference_round iPad11DesktopReference "$IPAD11_UDID" || failed=1
+      if [ "${ONLY_DEVICE:-ipad}" != ipad-pro-13 ]; then
+        desktop_reference_round iPad11DesktopReference "$IPAD11_UDID" "${reference_classes[@]}" || failed=1
+      fi
     else
       # The iPad as the ipad shard prepares it: boot, then the screen recorder, then the
       # rounds. Focused iPad runs that went straight to the install (40822219713,
@@ -570,7 +636,7 @@ case "$shard" in
         recorder=$!
       fi
       echo "::notice::focused dispatch: HerdrUITests/$ONLY_SUITE on $label only"
-      run_suite "$label-$ONLY_SUITE" "$udid" 25m "-only-testing:HerdrUITests/$ONLY_SUITE" || failed=1
+      run_suite "$label-${ONLY_SUITE//\//-}" "$udid" 25m "-only-testing:HerdrUITests/$ONLY_SUITE" || failed=1
       stop_recording
     fi
     ;;

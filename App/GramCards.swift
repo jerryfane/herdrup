@@ -113,8 +113,15 @@ enum GramType {
 
 /// Day and time wording for the feed's separators and the sidebar rows, like Messages.
 enum GramDates {
+    static func clockNow() -> Date {
+        #if DEBUG
+        if let pinned = MockClock.pinned { return pinned }
+        #endif
+        return Date()
+    }
+
     /// "Today" / "Yesterday" / a weekday within the last week / a date, plus the time.
-    static func separator(for date: Date, now: Date = Date(), calendar: Calendar = .current) -> (day: String, time: String) {
+    static func separator(for date: Date, now: Date = GramDates.clockNow(), calendar: Calendar = .current) -> (day: String, time: String) {
         let time = timeFormatter.string(from: date)
         switch day(of: date, now: now, calendar: calendar) {
         case .today: return ("Today", time)
@@ -126,7 +133,7 @@ enum GramDates {
     }
 
     /// A sidebar row's time: the time today, then "Yesterday", a weekday, a short date.
-    static func rowTime(for date: Date, now: Date = Date(), calendar: Calendar = .current) -> String {
+    static func rowTime(for date: Date, now: Date = GramDates.clockNow(), calendar: Calendar = .current) -> String {
         switch day(of: date, now: now, calendar: calendar) {
         case .today: return timeFormatter.string(from: date)
         case .yesterday: return "Yesterday"

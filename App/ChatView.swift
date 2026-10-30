@@ -1413,7 +1413,12 @@ private struct ChatRowView: View, Equatable {
     // MARK: - Pieces
 
     private func dayLabel(_ ms: UInt64) -> some View {
-        let (day, time) = ChatDay.label(ms: ms, now: Date())
+        #if DEBUG
+        let now = MockClock.pinned ?? Date()
+        #else
+        let now = Date()
+        #endif
+        let (day, time) = ChatDay.label(ms: ms, now: now)
         return (Text(day).font(Typography.app(13 * textScale, .semibold)) + Text(" " + time).font(Typography.app(13 * textScale)))
             .foregroundStyle(Palette.textFaint)
             .frame(maxWidth: .infinity)
@@ -1954,8 +1959,9 @@ enum ChatDay {
         let date = Date(timeIntervalSince1970: TimeInterval(ms) / 1000)
         let calendar = Calendar.current
         let time = date.formatted(date: .omitted, time: .shortened)
-        if calendar.isDateInToday(date) { return ("Today", time) }
-        if calendar.isDateInYesterday(date) { return ("Yesterday", time) }
+        if calendar.isDate(date, inSameDayAs: now) { return ("Today", time) }
+        if let yesterday = calendar.date(byAdding: .day, value: -1, to: now),
+           calendar.isDate(date, inSameDayAs: yesterday) { return ("Yesterday", time) }
         if let days = calendar.dateComponents([.day], from: date, to: now).day, days < 7 {
             return (date.formatted(.dateTime.weekday(.wide)), time)
         }

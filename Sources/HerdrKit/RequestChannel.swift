@@ -16,7 +16,7 @@ protocol RequestChannelLink: Sendable {
 }
 
 /// The production link: an exec channel on the shared SSH connection, driven the
-/// way `GramUploadChannel` drives its `--duplex` channel. `@unchecked` because
+/// way `GramUploadChannel` drives its `remote-api-bridge` channel. `@unchecked` because
 /// Citadel does not mark `SSHClient` Sendable; it is used from any task throughout
 /// this module, its state confined to its NIO event loop.
 struct CitadelRequestLink: RequestChannelLink, @unchecked Sendable {
