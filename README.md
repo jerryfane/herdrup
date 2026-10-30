@@ -199,6 +199,8 @@ Gram state checks poll completed accessibility queries directly, preserving thei
 when a slow lookup consumes the waiter's deadline. Synchronous queries can exceed that deadline.
 Terminal UI queries match the exact `terminal-surface` accessibility identifier rather than
 searching unrelated labels and values. Focus, input and viewport assertions remain unchanged.
+Clipboard UI checks tap the reply editor to focus it before the single long-press
+that opens Paste; an unfocused iOS 27 editor may only place the caret.
 
 The DEBUG `needsyou` fixture can hold its asking agents with
 `HERDR_MOCK_WAITING_MANUAL=1`. Its visible `fixture-start-waiting` button releases
