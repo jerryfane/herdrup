@@ -288,6 +288,12 @@ Settings builds its compact index in a separate view body, keeping the large sec
 off the adaptive navigation stack. CI checks resize/resume in an optimized simulator build
 with a device-sized 1008 KiB main stack, and rejects attached crashes even if XCTest reports a pass.
 
+Compact and regular home layouts share one split-view detail tree and one mounted
+terminal container. Changing the window's size class changes navigation chrome,
+not the identity of the terminal reply or Gram composer. The DEBUG
+`HERDR_LAYOUT_TRANSITIONS=1` interaction fixture changes width and size class
+without relaunching, so draft and stream-lifetime regressions exercise a live transition.
+
 Gram reads like iMessage in herdr's colours: your messages are violet bubbles on the right,
 agents' sit on the left under their name, machine (“vetrina · mac-studio”) and avatar, with
 time separators, an amber unread rule and green/grey Grabbed/Delivered lines. Long reports

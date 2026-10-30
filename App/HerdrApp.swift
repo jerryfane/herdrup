@@ -5145,6 +5145,7 @@ struct ComposerTextField: UIViewRepresentable {
     let isEnabled: Bool
     let isFocused: Bool
     let onFocusChange: (Bool) -> Void
+    var isPresented = true
     var placeholder = "Type a reply…"
     var accessibilityIdentifier = "terminal-reply-input"
     var capitalization: UITextAutocapitalizationType = .none
@@ -5197,6 +5198,10 @@ struct ComposerTextField: UIViewRepresentable {
         // Selection changes made from here are this update's own, not the reader's.
         view.isApplyingUpdate = true
         defer { view.isApplyingUpdate = false }
+        // SwiftUI opacity does not hide the retained UITextView from UIKit/AX.
+        // Keep the native editor mounted, but make its visibility match its pane.
+        view.isHidden = !isPresented
+        if !isPresented { context.coordinator.nativeFocusPendingStateSync = false }
         view.onPasteFile = onPasteFile
         view.onCommandReturn = onCommandReturn
         view.configureTypography()
@@ -5211,7 +5216,7 @@ struct ComposerTextField: UIViewRepresentable {
             view.refreshScrollMode()
         }
         view.isEditable = isEnabled
-        if isFocused {
+        if isFocused && isPresented {
             context.coordinator.nativeFocusPendingStateSync = false
             if !view.isFirstResponder {
                 view.becomeFirstResponder()
@@ -6574,6 +6579,7 @@ struct TerminalPaneContent: View {
                     replyFocused = focused
                     if focused { terminalInputFocused = false }
                 },
+                isPresented: isForeground,
                 onChange: { oldValue, newValue in
                     handleReplyChange(old: oldValue, new: newValue)
                 },

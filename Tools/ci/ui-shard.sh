@@ -499,7 +499,9 @@ case "$shard" in
     xcrun simctl io "$IPAD_UDID" recordVideo TestReceipts/terminal-resize-iPad.mp4 \
       > TestReceipts/terminal-resize-iPad-video.log 2>&1 &
     recorder=$!
-    run_suite iPadResize "$IPAD_UDID" 25m -only-testing:HerdrUITests/TerminalResizeTests || failed=1
+    run_suite iPadResize "$IPAD_UDID" 25m \
+      -only-testing:HerdrUITests/TerminalResizeTests \
+      -only-testing:HerdrUITests/DuoTransitionTests || failed=1
     stop_recording
     if [ ! -s TestReceipts/terminal-resize-iPad.mp4 ]; then
       echo "::warning::iPad video unavailable; consult recording log and xcresult screenshots"
