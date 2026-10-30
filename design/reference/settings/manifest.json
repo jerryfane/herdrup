@@ -1,0 +1,291 @@
+{
+  "description": "Native proposal-B Settings index/detail references for Herdrup Desktop; see README.md.",
+  "herdrupCommit": "4b577c1aaca565646bc2ebd0c0c6695e9972b0f5",
+  "ciRun": "https://github.com/themartianapp/herdrup/actions/runs/41019198405",
+  "runtime": "iOS 27.0 (com.apple.CoreSimulator.SimRuntime.iOS-27-0)",
+  "pngEncoding": "Original exported XCUIScreenshot PNG bytes; no recompression or pixel edits.",
+  "statusBarNote": "simctl pins the time to 9:41 but not the date: iPadOS shows the runner's real date beside it.",
+  "mockClockNote": "en_US/UTC/Gregorian, fixed2026-10-28T09:41:00Z; observed values are per file.",
+  "files": [
+    {
+      "file": "ref-ipad-11-settings-about-index.png",
+      "state": "settings-about-index",
+      "device": "ipad-11",
+      "simulator": "iPad Air 11-inch (M4)",
+      "points": {
+        "width": 1180,
+        "height": 820
+      },
+      "pixels": {
+        "width": 2360,
+        "height": 1640
+      },
+      "scale": 2,
+      "orientation": "landscape",
+      "appearance": "dark",
+      "dynamicTypeSize": "UICTContentSizeCategoryL",
+      "statusBar": {
+        "heightPoints": 32,
+        "safeAreaTopPoints": 32,
+        "override": "xcrun simctl status_bar <udid> override --time 9:41 --batteryLevel 100 --batteryState charged --cellularMode notSupported --wifiBars 3",
+        "date": "Fri Oct 30"
+      },
+      "mockClock": "2026-10-28T09:41:00Z",
+      "herdrupCommit": "4b577c1aaca565646bc2ebd0c0c6695e9972b0f5",
+      "fixtureSHA256": "3dfefaef702bc3b4e7c1108ecf9526e7bd4ec2da432ae36559e33d9f112b39ec",
+      "sha256": "4ffd812f0e5c9537e5f628648ec0438b72b4ad99480c8d2381daa07820025284",
+      "fixture": "HerdrUITests/Fixtures/desktop-reference-settings-machines.json",
+      "runtime": "iOS 27.0 (com.apple.CoreSimulator.SimRuntime.iOS-27-0)",
+      "ciRun": "https://github.com/themartianapp/herdrup/actions/runs/41019198405",
+      "locale": "en_US",
+      "timeZone": "GMT",
+      "timeZoneOffsetSeconds": 0,
+      "calendar": "gregorian"
+    },
+    {
+      "file": "ref-ipad-11-settings-machines-empty.png",
+      "state": "settings-machines-empty",
+      "device": "ipad-11",
+      "simulator": "iPad Air 11-inch (M4)",
+      "points": {
+        "width": 1180,
+        "height": 820
+      },
+      "pixels": {
+        "width": 2360,
+        "height": 1640
+      },
+      "scale": 2,
+      "orientation": "landscape",
+      "appearance": "dark",
+      "dynamicTypeSize": "UICTContentSizeCategoryL",
+      "statusBar": {
+        "heightPoints": 32,
+        "safeAreaTopPoints": 32,
+        "override": "xcrun simctl status_bar <udid> override --time 9:41 --batteryLevel 100 --batteryState charged --cellularMode notSupported --wifiBars 3",
+        "date": "Fri Oct 30"
+      },
+      "mockClock": "2026-10-28T09:41:00Z",
+      "herdrupCommit": "4b577c1aaca565646bc2ebd0c0c6695e9972b0f5",
+      "fixtureSHA256": "bb0c47ca8e3f85f48f0b2a976baf8c1fcaf047031f1d4c8264a9b2b33f21bab1",
+      "sha256": "951a762fd5b7650bfa5c3ec4cbb8b74ba51dc30798add4115336e7e0b3c72e6c",
+      "fixture": "HerdrUITests/Fixtures/desktop-reference-settings-empty.json",
+      "runtime": "iOS 27.0 (com.apple.CoreSimulator.SimRuntime.iOS-27-0)",
+      "ciRun": "https://github.com/themartianapp/herdrup/actions/runs/41019198405",
+      "locale": "en_US",
+      "timeZone": "GMT",
+      "timeZoneOffsetSeconds": 0,
+      "calendar": "gregorian"
+    },
+    {
+      "file": "ref-ipad-11-settings-machines-federation.png",
+      "state": "settings-machines-federation",
+      "device": "ipad-11",
+      "simulator": "iPad Air 11-inch (M4)",
+      "points": {
+        "width": 1180,
+        "height": 820
+      },
+      "pixels": {
+        "width": 2360,
+        "height": 1640
+      },
+      "scale": 2,
+      "orientation": "landscape",
+      "appearance": "dark",
+      "dynamicTypeSize": "UICTContentSizeCategoryL",
+      "statusBar": {
+        "heightPoints": 32,
+        "safeAreaTopPoints": 32,
+        "override": "xcrun simctl status_bar <udid> override --time 9:41 --batteryLevel 100 --batteryState charged --cellularMode notSupported --wifiBars 3",
+        "date": "Fri Oct 30"
+      },
+      "mockClock": "2026-10-28T09:41:00Z",
+      "herdrupCommit": "4b577c1aaca565646bc2ebd0c0c6695e9972b0f5",
+      "fixtureSHA256": "3dfefaef702bc3b4e7c1108ecf9526e7bd4ec2da432ae36559e33d9f112b39ec",
+      "sha256": "377ea1abc8240929d98b805e480dcdbe7f96d7a34233ce6ccd0c0d007a9f4ccb",
+      "fixture": "HerdrUITests/Fixtures/desktop-reference-settings-machines.json",
+      "runtime": "iOS 27.0 (com.apple.CoreSimulator.SimRuntime.iOS-27-0)",
+      "ciRun": "https://github.com/themartianapp/herdrup/actions/runs/41019198405",
+      "locale": "en_US",
+      "timeZone": "GMT",
+      "timeZoneOffsetSeconds": 0,
+      "calendar": "gregorian"
+    },
+    {
+      "file": "ref-ipad-11-settings-machines-index.png",
+      "state": "settings-machines-index",
+      "device": "ipad-11",
+      "simulator": "iPad Air 11-inch (M4)",
+      "points": {
+        "width": 1180,
+        "height": 820
+      },
+      "pixels": {
+        "width": 2360,
+        "height": 1640
+      },
+      "scale": 2,
+      "orientation": "landscape",
+      "appearance": "dark",
+      "dynamicTypeSize": "UICTContentSizeCategoryL",
+      "statusBar": {
+        "heightPoints": 32,
+        "safeAreaTopPoints": 32,
+        "override": "xcrun simctl status_bar <udid> override --time 9:41 --batteryLevel 100 --batteryState charged --cellularMode notSupported --wifiBars 3",
+        "date": "Fri Oct 30"
+      },
+      "mockClock": "2026-10-28T09:41:00Z",
+      "herdrupCommit": "4b577c1aaca565646bc2ebd0c0c6695e9972b0f5",
+      "fixtureSHA256": "3dfefaef702bc3b4e7c1108ecf9526e7bd4ec2da432ae36559e33d9f112b39ec",
+      "sha256": "39115c3b379a817e039a3711f52930cf3769c3306cb52c2d2ad570dd50fd4b6e",
+      "fixture": "HerdrUITests/Fixtures/desktop-reference-settings-machines.json",
+      "runtime": "iOS 27.0 (com.apple.CoreSimulator.SimRuntime.iOS-27-0)",
+      "ciRun": "https://github.com/themartianapp/herdrup/actions/runs/41019198405",
+      "locale": "en_US",
+      "timeZone": "GMT",
+      "timeZoneOffsetSeconds": 0,
+      "calendar": "gregorian"
+    },
+    {
+      "file": "ref-ipad-pro-13-settings-about-index.png",
+      "state": "settings-about-index",
+      "device": "ipad-pro-13",
+      "simulator": "iPad Pro 13-inch (M5)",
+      "points": {
+        "width": 1376,
+        "height": 1032
+      },
+      "pixels": {
+        "width": 2752,
+        "height": 2064
+      },
+      "scale": 2,
+      "orientation": "landscape",
+      "appearance": "dark",
+      "dynamicTypeSize": "UICTContentSizeCategoryL",
+      "statusBar": {
+        "heightPoints": 32,
+        "safeAreaTopPoints": 32,
+        "override": "xcrun simctl status_bar <udid> override --time 9:41 --batteryLevel 100 --batteryState charged --cellularMode notSupported --wifiBars 3",
+        "date": "Fri Oct 30"
+      },
+      "mockClock": "2026-10-28T09:41:00Z",
+      "herdrupCommit": "4b577c1aaca565646bc2ebd0c0c6695e9972b0f5",
+      "fixtureSHA256": "3dfefaef702bc3b4e7c1108ecf9526e7bd4ec2da432ae36559e33d9f112b39ec",
+      "sha256": "525fa99eee9c4a6e7090a95ada1d819e8095acb293cff9c9c44df2b7b16c078b",
+      "fixture": "HerdrUITests/Fixtures/desktop-reference-settings-machines.json",
+      "runtime": "iOS 27.0 (com.apple.CoreSimulator.SimRuntime.iOS-27-0)",
+      "ciRun": "https://github.com/themartianapp/herdrup/actions/runs/41019198405",
+      "locale": "en_US",
+      "timeZone": "GMT",
+      "timeZoneOffsetSeconds": 0,
+      "calendar": "gregorian"
+    },
+    {
+      "file": "ref-ipad-pro-13-settings-machines-empty.png",
+      "state": "settings-machines-empty",
+      "device": "ipad-pro-13",
+      "simulator": "iPad Pro 13-inch (M5)",
+      "points": {
+        "width": 1376,
+        "height": 1032
+      },
+      "pixels": {
+        "width": 2752,
+        "height": 2064
+      },
+      "scale": 2,
+      "orientation": "landscape",
+      "appearance": "dark",
+      "dynamicTypeSize": "UICTContentSizeCategoryL",
+      "statusBar": {
+        "heightPoints": 32,
+        "safeAreaTopPoints": 32,
+        "override": "xcrun simctl status_bar <udid> override --time 9:41 --batteryLevel 100 --batteryState charged --cellularMode notSupported --wifiBars 3",
+        "date": "Fri Oct 30"
+      },
+      "mockClock": "2026-10-28T09:41:00Z",
+      "herdrupCommit": "4b577c1aaca565646bc2ebd0c0c6695e9972b0f5",
+      "fixtureSHA256": "bb0c47ca8e3f85f48f0b2a976baf8c1fcaf047031f1d4c8264a9b2b33f21bab1",
+      "sha256": "a5500cc18d85f5a4a5d7ffebed8d10635158ef593bf59db463fab5253d0de6a2",
+      "fixture": "HerdrUITests/Fixtures/desktop-reference-settings-empty.json",
+      "runtime": "iOS 27.0 (com.apple.CoreSimulator.SimRuntime.iOS-27-0)",
+      "ciRun": "https://github.com/themartianapp/herdrup/actions/runs/41019198405",
+      "locale": "en_US",
+      "timeZone": "GMT",
+      "timeZoneOffsetSeconds": 0,
+      "calendar": "gregorian"
+    },
+    {
+      "file": "ref-ipad-pro-13-settings-machines-federation.png",
+      "state": "settings-machines-federation",
+      "device": "ipad-pro-13",
+      "simulator": "iPad Pro 13-inch (M5)",
+      "points": {
+        "width": 1376,
+        "height": 1032
+      },
+      "pixels": {
+        "width": 2752,
+        "height": 2064
+      },
+      "scale": 2,
+      "orientation": "landscape",
+      "appearance": "dark",
+      "dynamicTypeSize": "UICTContentSizeCategoryL",
+      "statusBar": {
+        "heightPoints": 32,
+        "safeAreaTopPoints": 32,
+        "override": "xcrun simctl status_bar <udid> override --time 9:41 --batteryLevel 100 --batteryState charged --cellularMode notSupported --wifiBars 3",
+        "date": "Fri Oct 30"
+      },
+      "mockClock": "2026-10-28T09:41:00Z",
+      "herdrupCommit": "4b577c1aaca565646bc2ebd0c0c6695e9972b0f5",
+      "fixtureSHA256": "3dfefaef702bc3b4e7c1108ecf9526e7bd4ec2da432ae36559e33d9f112b39ec",
+      "sha256": "351d3f514694b6af3f2234c76ee1b76d93a57838b3481a0a35dccf99564e6f5d",
+      "fixture": "HerdrUITests/Fixtures/desktop-reference-settings-machines.json",
+      "runtime": "iOS 27.0 (com.apple.CoreSimulator.SimRuntime.iOS-27-0)",
+      "ciRun": "https://github.com/themartianapp/herdrup/actions/runs/41019198405",
+      "locale": "en_US",
+      "timeZone": "GMT",
+      "timeZoneOffsetSeconds": 0,
+      "calendar": "gregorian"
+    },
+    {
+      "file": "ref-ipad-pro-13-settings-machines-index.png",
+      "state": "settings-machines-index",
+      "device": "ipad-pro-13",
+      "simulator": "iPad Pro 13-inch (M5)",
+      "points": {
+        "width": 1376,
+        "height": 1032
+      },
+      "pixels": {
+        "width": 2752,
+        "height": 2064
+      },
+      "scale": 2,
+      "orientation": "landscape",
+      "appearance": "dark",
+      "dynamicTypeSize": "UICTContentSizeCategoryL",
+      "statusBar": {
+        "heightPoints": 32,
+        "safeAreaTopPoints": 32,
+        "override": "xcrun simctl status_bar <udid> override --time 9:41 --batteryLevel 100 --batteryState charged --cellularMode notSupported --wifiBars 3",
+        "date": "Fri Oct 30"
+      },
+      "mockClock": "2026-10-28T09:41:00Z",
+      "herdrupCommit": "4b577c1aaca565646bc2ebd0c0c6695e9972b0f5",
+      "fixtureSHA256": "3dfefaef702bc3b4e7c1108ecf9526e7bd4ec2da432ae36559e33d9f112b39ec",
+      "sha256": "aa782ac2efff9ede2ad81ab2f93f340e35268871ee203d3e7aa7314b49acd9d0",
+      "fixture": "HerdrUITests/Fixtures/desktop-reference-settings-machines.json",
+      "runtime": "iOS 27.0 (com.apple.CoreSimulator.SimRuntime.iOS-27-0)",
+      "ciRun": "https://github.com/themartianapp/herdrup/actions/runs/41019198405",
+      "locale": "en_US",
+      "timeZone": "GMT",
+      "timeZoneOffsetSeconds": 0,
+      "calendar": "gregorian"
+    }
+  ]
+}

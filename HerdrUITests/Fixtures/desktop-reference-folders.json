@@ -1,0 +1,157 @@
+{
+  "state": "folders",
+  "ping": {
+    "type": "pong",
+    "version": "0.9.5",
+    "protocol": 22,
+    "capabilities": {
+      "live_handoff": true,
+      "pane_input_stream": true,
+      "gram_upload_stream": true,
+      "agent_session_transfer": true,
+      "agent_session_transfer_harnesses": [
+        "claude",
+        "codex",
+        "omp"
+      ],
+      "events_v2": true,
+      "agent_forget": true,
+      "api_bridge_multi": true,
+      "pane_history": true,
+      "agent_transcript": true,
+      "agent_answer": true,
+      "agent_avatar": true,
+      "agent_groups": true
+    }
+  },
+  "agent.list": {
+    "type": "agent_list",
+    "agents": [
+      {
+        "pane_id": "w1:p1",
+        "terminal_id": "t1",
+        "workspace_id": "w1",
+        "tab_id": "w1:t1",
+        "focused": false,
+        "revision": 3,
+        "name": "vetrina",
+        "agent": "claude",
+        "agent_status": "blocked",
+        "cwd": "/home/dev/vetrina",
+        "terminal_title_stripped": "asking to merge the release branch",
+        "status_since_unix_ms": 1793180220000
+      },
+      {
+        "pane_id": "w1:p2",
+        "terminal_id": "t2",
+        "workspace_id": "w1",
+        "tab_id": "w1:t1",
+        "focused": false,
+        "revision": 4,
+        "name": "herdr-ios",
+        "agent": "claude",
+        "agent_status": "blocked",
+        "cwd": "/home/dev/herdr-ios",
+        "terminal_title_stripped": "asking to run the UI tests",
+        "status_since_unix_ms": 1793178240000
+      },
+      {
+        "pane_id": "w1:p3",
+        "terminal_id": "t3",
+        "workspace_id": "w1",
+        "tab_id": "w1:t1",
+        "focused": false,
+        "revision": 5,
+        "name": "herdr-app",
+        "agent": "codex",
+        "agent_status": "working",
+        "cwd": "/home/dev/herdr-app",
+        "terminal_title_stripped": "⠋ building the iPad layout",
+        "status_since_unix_ms": 1793172660000
+      },
+      {
+        "pane_id": "w2:p1",
+        "terminal_id": "t4",
+        "workspace_id": "w2",
+        "tab_id": "w2:t1",
+        "focused": false,
+        "revision": 6,
+        "name": "enyo-review",
+        "agent": "claude",
+        "agent_status": "working",
+        "cwd": "/home/dev/enyo",
+        "terminal_title_stripped": "⠋ reviewing pull request 212",
+        "status_since_unix_ms": 1793148060000
+      },
+      {
+        "pane_id": "w2:p2",
+        "terminal_id": "t5",
+        "workspace_id": "w2",
+        "tab_id": "w2:t1",
+        "focused": false,
+        "revision": 7,
+        "name": "enyo-scout",
+        "agent": "omp",
+        "agent_status": "idle",
+        "cwd": "/home/dev/enyo",
+        "terminal_title_stripped": "π > waiting for a task",
+        "status_since_unix_ms": 1792917660000
+      },
+      {
+        "pane_id": "w2:p3",
+        "terminal_id": "t6",
+        "workspace_id": "w2",
+        "tab_id": "w2:t1",
+        "focused": false,
+        "revision": 8,
+        "name": "jarvis",
+        "agent": "claude",
+        "agent_status": "working",
+        "cwd": "/home/dev/fleet",
+        "terminal_title_stripped": "⠋ planning the week",
+        "status_since_unix_ms": 1793179740000
+      },
+      {
+        "pane_id": "w3:p1",
+        "terminal_id": "t7",
+        "workspace_id": "w3",
+        "tab_id": "w3:t1",
+        "focused": false,
+        "revision": 9,
+        "name": "notes",
+        "agent": "omp",
+        "agent_status": "idle",
+        "cwd": "/home/dev/notes",
+        "terminal_title_stripped": "π > ready",
+        "status_since_unix_ms": 1793177160000
+      }
+    ]
+  },
+  "agent.groups.get": {
+    "type": "agent_groups",
+    "revision": 3,
+    "folders": [
+      {
+        "id": "herdr",
+        "name": "Herdr",
+        "order": 0,
+        "members": [
+          "herdr-ios",
+          "herdr-app"
+        ]
+      },
+      {
+        "id": "enyo",
+        "name": "Enyo",
+        "order": 1,
+        "members": [
+          "enyo-review",
+          "enyo-scout"
+        ]
+      }
+    ],
+    "stars": [
+      "vetrina"
+    ]
+  }
+}

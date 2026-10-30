@@ -362,6 +362,7 @@ struct RootView: View {
             // every capture of a state is the same picture. See DesktopReferenceMock.
             let _ = DesktopReferenceMock.prepared
             TerminalHomeView(client: HerdrClient(transport: DesktopReferenceMockTransport()), onDisconnect: {},
+                             host: DesktopReferenceMock.state == .settings ? "reference-hub" : "",
                              onTrustHostKey: { _ in false })
                 .transaction { $0.disablesAnimations = true; $0.animation = nil }
                 .overlay(alignment: .topLeading) { DesktopReferenceProbe().frame(width: 1, height: 1) }
@@ -1941,7 +1942,8 @@ struct TerminalHomeView: View {
     /// initializer"). Both readers name `Self.sidebarMinimizedKey` so a rename cannot
     /// desync them — and the desync would be SILENT, since the layout would simply be
     /// born expanded while the preference said otherwise.
-    private static let sidebarMinimizedKey = "ui.sidebarMinimized"
+    /// Internal, not private, only so the DEBUG `desktopref` mock can start expanded.
+    static let sidebarMinimizedKey = "ui.sidebarMinimized"
     @State private var columnVisibility: NavigationSplitViewVisibility =
         UserDefaults.standard.bool(forKey: Self.sidebarMinimizedKey) ? .detailOnly : .all
     /// Whether the sidebar is MINIMISED to the icon rail, remembered across launches.
