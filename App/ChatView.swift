@@ -427,6 +427,8 @@ struct ChatView: View {
     @State private var followingLatest = true
     @State private var userScrolling = false
     @State private var scrollPosition = ChatScrollPosition()
+    /// Where the selected search result sits, reported by its row (`ChatSearchResults`).
+    @State private var searchReveal = ChatSearchReveal()
     /// The first scroll to the newest turn has landed: until then the top of the list is
     /// on screen for a moment and must not fetch older pages.
     @State private var landed = false
@@ -531,7 +533,22 @@ struct ChatView: View {
             await Task.yield()
             // Rows just drawn above the window are laid out before the scroll can find them.
             if widened { try? await Task.sleep(nanoseconds: 30_000_000) }
-            guard selectedSearchHit == hit.id, findRequest != nil else { return }
+            // Centre the result by moving the scroll view itself: on iOS 27 `scrollTo` on the
+            // result's id, inside its row, leaves the chat where it was. The result reports
+            // its frame once laid out; a second pass corrects a frame taken before rows above
+            // it (a widened window, an older page) had settled.
+            var revealed = false
+            for _ in 0..<12 {
+                guard selectedSearchHit == hit.id, findRequest != nil else { return }
+                if let frame = searchReveal.frame(of: hit.id), scrollPosition.reveal(frame) {
+                    if revealed { return }
+                    revealed = true
+                    try? await Task.sleep(nanoseconds: 120_000_000)
+                } else {
+                    try? await Task.sleep(nanoseconds: 30_000_000)
+                }
+            }
+            guard !revealed, selectedSearchHit == hit.id, findRequest != nil else { return }
             proxy.scrollTo("search:" + hit.id, anchor: .center)
         }
     }
@@ -575,6 +592,7 @@ struct ChatView: View {
         }
         .environment(\.chatTextScale, textScale)
         .environment(\.chatSearchQuery, findRequest?.term ?? "")
+        .environment(\.chatSearchReveal, searchReveal)
     }
 
     private func transcriptScroll(_ proxy: ScrollViewProxy, hits: [TranscriptSearchHit]) -> some View {
@@ -616,7 +634,6 @@ struct ChatView: View {
         }
         // The resizer's width is the chat's whole width: the most the column can take.
         .conversationColumnResizer(.chat)
-        .background { probe("chat-area", "Chat area") }
         .task(id: model.loaded) {
             guard model.loaded, !landed, findRequest == nil else { return }
             for _ in 0..<8 {
@@ -950,20 +967,6 @@ struct ChatView: View {
         if ScreenshotMock.mode != nil {
             ChatCopyProbe()
             ChatRowRenderProbe()
-        }
-        #endif
-    }
-
-    /// UI tests measure the chat's whole width (`chat-area`: `chat-view`'s own frame spans its
-    /// scrolled-away content); the column is `chat-column` (`conversationColumn`).
-    @ViewBuilder private func probe(_ identifier: String, _ label: String) -> some View {
-        #if DEBUG
-        if ScreenshotMock.mode != nil {
-            Color.clear
-                .accessibilityElement()
-                .accessibilityIdentifier(identifier)
-                .accessibilityLabel(label)
-                .allowsHitTesting(false)
         }
         #endif
     }
