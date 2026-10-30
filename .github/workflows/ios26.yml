@@ -37,9 +37,6 @@ jobs:
       fail-fast: false
       matrix:
         include:
-          - shard: ios26-iphone
-            device_type: iPhone 17 Pro
-            udid_var: IPHONE_UDID
           - shard: ios26-ipad
             device_type: iPad Pro 13-inch (M5)
             udid_var: IPAD_UDID
