@@ -418,10 +418,14 @@ case "$shard" in
     run_suite iPhoneAgentList "$IPHONE_UDID" 10m -only-testing:HerdrUITests/AgentFoldersTests \
       -only-testing:HerdrUITests/NeedsYouPillTests || failed=1
     check_classes_ran TestReceipts/iPhoneAgentList-first.xcresult AgentFoldersTests NeedsYouPillTests || failed=1
+    # Update-card scenarios take ~4 minutes (243 s in run 40900275118). Keeping them
+    # in iPhoneApp repeatedly exhausted its 30-minute cap before the last classes.
+    run_suite iPhoneServerUpdate "$IPHONE_UDID" 10m -only-testing:HerdrUITests/ServerUpdateUITests || failed=1
+    check_classes_ran TestReceipts/iPhoneServerUpdate-first.xcresult ServerUpdateUITests || failed=1
     skip=(-skip-testing:HerdrUITests/GramTests -skip-testing:HerdrUITests/StatusMotionTests
       -skip-testing:HerdrUITests/ChatViewTests -skip-testing:HerdrUITests/ChatUXSmokeTests -skip-testing:HerdrUITests/PagingTests
       -skip-testing:HerdrUITests/AgentFoldersTests -skip-testing:HerdrUITests/NeedsYouPillTests
-      -skip-testing:HerdrUITests/DesktopReferenceShots)
+      -skip-testing:HerdrUITests/ServerUpdateUITests -skip-testing:HerdrUITests/DesktopReferenceShots)
     for class in "${TERMINAL_CLASSES[@]}"; do skip+=("-skip-testing:HerdrUITests/$class"); done
     # 40m: on the Xcode 27 image every class ran slower. Run 40728450580 logged "iPhoneApp
     # exceeded its 30m budget" on its 79th case; its 69 cases that passed there and on
