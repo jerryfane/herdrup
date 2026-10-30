@@ -27,7 +27,7 @@ on:
         required: false
         default: ""
       only_device:
-        description: "Destination: iphone or ipad. Both desktop reference groups require ipad and capture both reference sizes."
+        description: "Destination: iphone or ipad. Reference groups use ipad for both sizes; ipad-pro-13 replaces only that device."
         required: false
         default: "iphone"
 

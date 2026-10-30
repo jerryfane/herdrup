@@ -594,27 +594,29 @@ case "$shard" in
     ;;
   focused)
     case "${ONLY_DEVICE:-iphone}" in
-      ipad) label=iPad; udid="$IPAD_UDID" ;;
+      ipad|ipad-pro-13) label=iPad; udid="$IPAD_UDID" ;;
       *)    label=iPhone; udid="$IPHONE_UDID" ;;
     esac
     if [[ "$ONLY_SUITE" = DesktopReferenceShots || "$ONLY_SUITE" = DesktopGramAndSettingsReferences || "$ONLY_SUITE" = DesktopGramReferenceShots/* ]]; then
       if [ "$label" != iPad ]; then
-        echo "::error::desktop reference groups require only_device=ipad"
+        echo "::error::desktop reference groups require only_device=ipad or ipad-pro-13"
         exit 1
       fi
-      # The references are a pair: both reference iPads, each under the pinned status bar.
+      # Default to both references; a failed primary-device capture can be replaced alone.
       reference_classes=("${DESKTOP_REFERENCE_CLASSES[@]}")
       if [ "$ONLY_SUITE" = DesktopGramAndSettingsReferences ]; then
         reference_classes=(DesktopGramReferenceShots DesktopSettingsReferenceShots)
       elif [[ "$ONLY_SUITE" = DesktopGramReferenceShots/* ]]; then
         reference_classes=("$ONLY_SUITE")
       fi
-      echo "::notice::focused dispatch: $ONLY_SUITE on both reference iPads"
+      echo "::notice::focused dispatch: $ONLY_SUITE on ${ONLY_DEVICE:-ipad}"
       desktop_reference_round iPadDesktopReference "$IPAD_UDID" "${reference_classes[@]}" || failed=1
       xcrun simctl shutdown "$IPAD_UDID" >/dev/null 2>&1 || true
       # A shut-down device must be booted and checked again by any later round.
       ready_devices="${ready_devices/ $IPAD_UDID / }"
-      desktop_reference_round iPad11DesktopReference "$IPAD11_UDID" "${reference_classes[@]}" || failed=1
+      if [ "${ONLY_DEVICE:-ipad}" != ipad-pro-13 ]; then
+        desktop_reference_round iPad11DesktopReference "$IPAD11_UDID" "${reference_classes[@]}" || failed=1
+      fi
     else
       # The iPad as the ipad shard prepares it: boot, then the screen recorder, then the
       # rounds. Focused iPad runs that went straight to the install (40822219713,
