@@ -121,6 +121,8 @@ herdr's JSON API exposes both, so panes and agents become real UI objects instea
   separately rather than calling all three “paused”. Each relay connection selects and verifies
   its grant before sending a request; accepting another agent's invite does not replace an
   existing share on updated hosts. Previously revoked shares need a fresh invitation.
+  Timed-out or cancelled relay requests close their acquired socket before reporting completion,
+  including when the encrypted handshake never answers.
 
 ## Requirements
 
@@ -186,6 +188,9 @@ CI runs core tests on Linux and UIKit/interaction regressions on both iPhone and
 The app and test bundles are built before the timed UI runs. The first simulator boot
 allows ten minutes for cold data migration; later readiness checks allow five minutes.
 Both force termination after another 15 seconds and retain a boot log.
+Before reusing readiness, CI checks the device's current state. A device that shut down
+is booted again; a still-booted device skips `bootstatus`. Missing or unavailable devices
+and failed readiness or install steps fail the round.
 Debug resize receipts are per pane, so a background terminal's fixed grid
 cannot overwrite the foreground terminal's keyboard-resize result.
 The built-version check selects `Herdr.app`, not the separate UI test runner bundle.
