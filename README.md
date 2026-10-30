@@ -121,6 +121,8 @@ herdr's JSON API exposes both, so panes and agents become real UI objects instea
   separately rather than calling all three “paused”. Each relay connection selects and verifies
   its grant before sending a request; accepting another agent's invite does not replace an
   existing share on updated hosts. Previously revoked shares need a fresh invitation.
+  Timed-out or cancelled relay requests close their acquired socket before reporting completion,
+  including when the encrypted handshake never answers.
 
 ## Requirements
 
