@@ -3,20 +3,20 @@ import XCTest
 /// Scratch-only runtime receipt for PR #577. Uses the production pane, Chat switch,
 /// terminal renderer and ordered geometry path; only the remote peer is the existing fixture.
 final class ChatHiddenTerminalSmokeTests: TerminalInteractionTestCase {
-    func testStreamingAndResizeWhileChatCoversTerminalPreservesFirstVisibleFrame() {
+    func testStreamingAndResizeWhileChatCoversTerminalPreservesFirstVisibleFrame() throws {
         launch("resize", environment: ["HERDR_CHAT_HIDDEN_RECEIPT": "1", "HERDR_STEADY_CARET": "1"])
         command("history")
         anchor()
         let initial = probe()
         XCTAssertEqual(initial["opens"] as? Int, 1)
         XCTAssertEqual(initial["cols"] as? Int, 80)
-        XCTAssertTrue(app.buttons["chat-switch-terminal"].isSelected)
+        XCTAssertTrue(try XCTUnwrap(onscreen("chat-switch-terminal", requiringHittable: true)).isSelected)
         receipt("before-chat")
 
         let chat = app.descendants(matching: .any)["chat-view"].firstMatch
-        app.buttons["chat-switch-chat"].tap()
+        try XCTUnwrap(onscreen("chat-switch-chat", requiringHittable: true)).tap()
         XCTAssertTrue(chat.waitForExistence(timeout: 10))
-        XCTAssertTrue(app.buttons["chat-switch-chat"].isSelected)
+        XCTAssertTrue(try XCTUnwrap(onscreen("chat-switch-chat", requiringHittable: true)).isSelected)
         wait { ($0["chatHidden"] as? Bool) == true }
         command("busy")
         wait { ($0["appended"] as? Int ?? 0) >= 3 }
@@ -35,7 +35,7 @@ final class ChatHiddenTerminalSmokeTests: TerminalInteractionTestCase {
         receipt("streaming-and-resized-under-chat")
         command("quiet")
 
-        app.buttons["chat-switch-terminal"].tap()
+        try XCTUnwrap(onscreen("chat-switch-terminal", requiringHittable: true)).tap()
         XCTAssertTrue(chat.waitForNonExistence(timeout: 10))
         let revealed = wait {
             ($0["chatHidden"] as? Bool) == false
