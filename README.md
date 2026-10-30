@@ -200,6 +200,12 @@ when a slow lookup consumes the waiter's deadline. Synchronous queries can excee
 Terminal UI queries match the exact `terminal-surface` accessibility identifier rather than
 searching unrelated labels and values. Focus, input and viewport assertions remain unchanged.
 
+The DEBUG `needsyou` fixture can hold its asking agents with
+`HERDR_MOCK_WAITING_MANUAL=1`. Its visible `fixture-start-waiting` button releases
+them through the normal roster polling path. The offscreen-arrival regression
+checks its scroll position and absence of the pill before releasing the agents,
+so slow simulator interactions cannot race a fixed startup delay.
+
 The four simulator jobs run in parallel. Gram shares the optimized Settings job; the other
 iPhone app job runs font, status-motion, agent-list and server-update tests in their own rounds
 before the remaining app tests. The server-update round has a ten-minute budget and checks
