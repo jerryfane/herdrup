@@ -198,7 +198,7 @@ searching unrelated labels and values. Focus, input and viewport assertions rema
 The four simulator jobs run in parallel. Gram shares the optimized Settings job; the other
 iPhone app job runs font, status-motion, agent-list and server-update tests in their own rounds
 before the remaining app tests. The server-update round has a ten-minute budget and checks
-that its class actually ran; the combined app round keeps its thirty-minute budget.
+that its class actually ran; the remaining app round has a forty-minute budget on Xcode 27.
 A failed first run still fails its job even if the diagnostic rerun passes; manual reruns
 execute the entire selected job.
 The optimized Settings job builds only the selected simulator architecture and caches
