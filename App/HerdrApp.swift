@@ -2449,6 +2449,14 @@ struct TerminalHomeView: View {
                 if columnVisibility == .detailOnly { sidebarRail }
                 detailColumn
             }
+            // A floor under the detail column, so a window just wider than two columns keeps
+            // them side by side. Without it the split's automatic minimum for the detail does
+            // not fit beside the 320 pt sidebar: on iOS 27 a 715 pt iPad window (full screen
+            // dragged into a window) went secondaryOnly, `columnVisibility` became
+            // `.detailOnly` and the sidebar collapsed to the rail (CI 40847167282). The same
+            // floor keeps the columns side by side on iPhone Duo held tall (669 pt).
+            .navigationSplitViewColumnWidth(min: DesignTokens.Size.sidebarMin,
+                                            ideal: DesignTokens.Size.sidebarMin)
             // NO SIZE CONTRACT IS ADDED HERE, AND THE ONE I TRIED IS WITHDRAWN.
             //
             // It was `.frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)`,
@@ -5871,6 +5879,9 @@ struct TerminalPaneContent: View {
                 // prompt path for agent messages.
                 LiveTerminalView(client: client, paneID: paneID,
                                  onNavigate: onNavigate, isForeground: isForeground,
+                                 // Chat covers the terminal: its UIKit views leave
+                                 // accessibility too (see `accessibilityCovered`).
+                                 accessibilityCovered: showingChat,
                                  // Releases the width claim while the scene is in the
                                  // background; cleared with the remount decision below.
                                  sceneBackgrounded: wasBackgrounded,
@@ -5922,7 +5933,9 @@ struct TerminalPaneContent: View {
                     // only the button itself hit-tests, taps elsewhere reach the terminal.
                     .overlay(alignment: .bottom) {
                         ZStack {
-                            if !terminalAtTail {
+                            // Not under Chat: there it is invisible, and on iOS 27 still an
+                            // accessibility element over the chat.
+                            if !terminalAtTail && !showingChat {
                                 JumpToLatestButton(label: "Jump to latest output", identifier: "terminal-jump-latest",
                                                    regularGlass: true) { jumpToTailToken += 1 }
                                     .padding(.bottom, 16)

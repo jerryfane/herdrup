@@ -129,7 +129,9 @@ jobs:
   # the account's limit of five concurrent macOS jobs, which other repos share.
   uitest:
     name: ui (${{ matrix.shard }})
-    runs-on: macos-latest
+    # The Xcode 27 image: an app built with the iOS 26 SDK or older is letterboxed on
+    # iPhone Duo (no full screen, no vertical bars). Duo support needs the 27.1 SDK.
+    runs-on: xcode-27
     strategy:
       # Every shard reports its own evidence even when another shard fails.
       fail-fast: false
@@ -164,12 +166,18 @@ jobs:
             spm-${{ runner.os }}-
 
       - name: Select Xcode and assert the iOS SDK
+        # The image's default Xcode (/Applications/Xcode.app), not the newest path: the
+        # newest is a release candidate (Xcode_27.2.app links to it). Assert the SDK
+        # instead of a filename: iPhone Duo full screen needs iOS 27.1 or newer.
         run: |
           echo "Xcodes present:"; ls -d /Applications/Xcode*.app || true
-          LATEST=$(ls -d /Applications/Xcode*.app | sort -V | tail -1)
-          echo "selecting: $LATEST"; sudo xcode-select -s "$LATEST"; xcodebuild -version
+          sudo xcode-select -s /Applications/Xcode.app; xcodebuild -version
           SDK=$(xcodebuild -showsdks | grep -oE 'iphonesimulator[0-9.]+' | sed 's/iphonesimulator//' | sort -V | tail -1)
           echo "newest iOS simulator SDK: ${SDK:-<none>}"
+          if [ -z "$SDK" ] || [ "$(printf '%s\n27.1\n' "$SDK" | sort -V | head -1)" != "27.1" ]; then
+            echo "::error::iOS simulator SDK '${SDK:-none}' is older than 27.1, which iPhone Duo needs."
+            exit 1
+          fi
 
       - name: Download the Metal toolchain
         # SwiftTerm >=1.12.0 bundles Apple/Metal/Shaders.metal unconditionally; Xcode 26
@@ -197,20 +205,24 @@ jobs:
           import json, os, re
           with open("SimulatorDevices.json") as source:
               devices = json.load(source)["devices"]
+          # The newest runtime with BOTH an iPhone and an iPad. On the Xcode 27 image the
+          # newest (iOS 27.1) holds only iPhone Duo, so it alone cannot host the suite.
           runtimes = [
               (tuple(map(int, match.group(1).split("-"))), name)
               for name in devices
               if (match := re.fullmatch(r"com\.apple\.CoreSimulator\.SimRuntime\.iOS-(\d+(?:-\d+)*)", name))
-              and any(device.get("isAvailable", True) for device in devices[name])
           ]
-          if not runtimes:
-              raise SystemExit("::error::no available iOS simulator runtime")
-          _, runtime = max(runtimes)
-          available = [device for device in devices[runtime] if device.get("isAvailable", True)]
-          phones = [device for device in available if device["name"].startswith("iPhone")]
-          pads = [device for device in available if device["name"].startswith("iPad")]
-          if not phones or not pads:
-              raise SystemExit(f"::error::{runtime} requires both an iPhone and an iPad; no substitute or skip")
+          def usable(name):
+              available = [device for device in devices[name] if device.get("isAvailable", True)]
+              phones = [device for device in available if device["name"].startswith("iPhone")
+                        and "Duo" not in device["name"]]
+              pads = [device for device in available if device["name"].startswith("iPad")]
+              return phones, pads
+          candidates = [(version, name) for version, name in runtimes if all(usable(name))]
+          if not candidates:
+              raise SystemExit("::error::no iOS runtime has both an iPhone and an iPad; no substitute or skip")
+          _, runtime = max(candidates)
+          phones, pads = usable(runtime)
           ipad = next(
               (device for device in pads if "iPad Pro" in device["name"] and "13-inch" in device["name"]),
               pads[0],
