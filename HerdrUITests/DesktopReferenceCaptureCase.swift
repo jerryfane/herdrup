@@ -62,6 +62,7 @@ class DesktopReferenceCaptureCase: XCTestCase {
             "HERDR_SCREENSHOT_MOCK": "desktopref",
             "HERDR_DESKTOPREF_STATE": state,
             "HERDR_MOCK_NOW": Self.clock,
+            "TZ": "UTC",
         ]
         app.launchEnvironment.merge(environment, uniquingKeysWith: { _, value in value })
         if let name {
@@ -73,7 +74,10 @@ class DesktopReferenceCaptureCase: XCTestCase {
             served = nil
         }
         if name == "avatars" { try assertServedAvatarIsTheAsset() }
-        app.launchArguments += ["-UIPreferredContentSizeCategoryName", Self.contentSize]
+        app.launchArguments += [
+            "-UIPreferredContentSizeCategoryName", Self.contentSize,
+            "-AppleLanguages", "(en)", "-AppleLocale", "en_US",
+        ]
         app.launch()
 
         let probe = app.otherElements["desktopref-probe"]
@@ -86,6 +90,9 @@ class DesktopReferenceCaptureCase: XCTestCase {
         XCTAssertEqual(fields["style"], "dark")
         XCTAssertEqual(fields["contentSize"], Self.contentSize)
         XCTAssertEqual(fields["now"], Self.clock)
+        XCTAssertEqual(fields["locale"], "en_US")
+        XCTAssertEqual(fields["timeZoneOffset"], "0")
+        XCTAssertEqual(fields["calendar"], "gregorian")
         return (app, device)
     }
 

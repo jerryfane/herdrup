@@ -397,6 +397,10 @@ struct DesktopReferenceProbe: UIViewRepresentable {
                 "contentSize=\(traits.preferredContentSizeCategory.rawValue)",
                 "style=\(traits.userInterfaceStyle == .dark ? "dark" : "light")",
                 "now=\(MockClock.pinned.map { ISO8601DateFormatter().string(from: $0) } ?? "unpinned")",
+                "locale=\(Locale.current.identifier)",
+                "timeZone=\(TimeZone.current.identifier)",
+                "timeZoneOffset=\(TimeZone.current.secondsFromGMT(for: MockClock.pinned ?? Date()))",
+                "calendar=\(Calendar.current.identifier)",
             ]
             accessibilityValue = fields.joined(separator: ";")
         }
