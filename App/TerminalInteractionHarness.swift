@@ -541,7 +541,7 @@ final class TerminalInteractionHarness: ObservableObject {
         surfaces.first(where: { $0.value.isForeground() })?.key ?? "ix:a"
     }
     private var pendingChatReveals: Set<String> = []
-    private var firstChatRevealedPaint: [String: [String: Any]] = [:]
+    private var firstChatRevealedFrame: [String: [String: Any]] = [:]
     static var enabled: Bool { ScreenshotMock.mode == .resize || ScreenshotMock.mode == .control }
 
     /// The file the composer's attach sheet "picks" under this harness, in place of the
@@ -632,6 +632,21 @@ final class TerminalInteractionHarness: ObservableObject {
             spacer.height = hiding ? 0 : target
         }
     }
+    // Scratch-only observation, not a redraw request. Unhiding can expose a backing
+    // layer already painted under Chat, so a new draw callback is not required.
+    static func chatVisibilityChanged(paneID: String, view: TerminalView) {
+        guard enabled, TerminalInteractionDriver.chatReceipt else { return }
+        if view.isHidden {
+            shared.pendingChatReveals.insert(paneID)
+            shared.firstChatRevealedFrame[paneID] = nil
+        } else if shared.pendingChatReveals.remove(paneID) != nil,
+                  let surface = shared.surfaces[paneID] {
+            var frame = surface.isCovered() ? (surface.retained ?? surface.painted) : surface.painted
+            frame["covered"] = surface.isCovered()
+            shared.firstChatRevealedFrame[paneID] = frame
+        }
+    }
+
     static func painted(paneID: String, view: TerminalView, cellSize: CGSize, complete: Bool) {
         guard enabled, var surface = shared.surfaces[paneID], cellSize.height > 0 else { return }
         surface.cellSize = cellSize
@@ -639,10 +654,6 @@ final class TerminalInteractionHarness: ObservableObject {
         if !surface.isCovered() { surface.retained = nil }
         surface.painted = shared.viewport(view, cellSize: cellSize)
         surface.painted["complete"] = complete
-        if !view.isHidden, !surface.isCovered(),
-           shared.pendingChatReveals.remove(paneID) != nil {
-            shared.firstChatRevealedPaint[paneID] = surface.painted
-        }
         shared.surfaces[paneID] = surface
         _ = shared.noteStability(paneID: paneID, surface)
         shared.sampleSweep()
@@ -819,14 +830,10 @@ final class TerminalInteractionHarness: ObservableObject {
             // in the UI means the wiring, not the engine.
             if let view = surface.view {
                 value["chatHidden"] = view.isHidden
-                if view.isHidden {
-                    pendingChatReveals.insert(id)
-                    firstChatRevealedPaint[id] = nil
-                }
                 if surface.cellSize.height > 0, surface.cellSize.width > 0 {
                     value["live"] = viewport(view, cellSize: surface.cellSize)
                 }
-                value["firstChatRevealedPaint"] = firstChatRevealedPaint[id]
+                value["firstChatRevealedFrame"] = firstChatRevealedFrame[id]
                 value["engineMatches"] = view.searchMatchSummary("RECORD").total
                 // The font the view has APPLIED, so a menu receipt can tell a Text size tap
                 // that landed from one that was dropped, before any grid change follows it.

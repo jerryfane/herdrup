@@ -40,10 +40,11 @@ final class ChatHiddenTerminalSmokeTests: TerminalInteractionTestCase {
         let revealed = wait {
             ($0["chatHidden"] as? Bool) == false
                 && ($0["covered"] as? Bool) == false
-                && $0["firstChatRevealedPaint"] != nil
+                && $0["firstChatRevealedFrame"] != nil
         }
-        let first = revealed["firstChatRevealedPaint"] as? [String: Any] ?? [:]
-        XCTAssertEqual(first["complete"] as? Bool, true, "The first uncovered terminal draw must be complete")
+        let first = revealed["firstChatRevealedFrame"] as? [String: Any] ?? [:]
+        XCTAssertEqual(first["complete"] as? Bool, true, "The first exposed backing frame must be complete")
+        XCTAssertEqual(first["covered"] as? Bool, false)
         XCTAssertEqual(first["cols"] as? Int, 120)
         XCTAssertEqual(first["rows"] as? Int, 24)
         XCTAssertEqual(first["markerRow"] as? Int, 0, "The reading anchor must survive the hidden resize")
@@ -59,7 +60,7 @@ final class ChatHiddenTerminalSmokeTests: TerminalInteractionTestCase {
         XCTAssertEqual(complete["appendedRecords"] as? [Int], Array(1...max(1, appended)),
                        "Hidden stream output must be neither lost nor replayed")
         XCTAssertEqual(complete["opens"] as? Int, 1)
-        receipt("returned-to-terminal-first-paint-and-scroll")
+        receipt("returned-to-terminal-first-exposed-frame-and-scroll")
     }
 
     private func receipt(_ name: String) {

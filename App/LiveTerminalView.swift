@@ -273,6 +273,9 @@ struct LiveTerminalView: UIViewRepresentable {
         // animation that keeps the window compositing (#427).
         terminalView.caretBlinkPaused = !isForeground || scenePhase != .active || Self.steadyCaret
         terminalView.isHidden = accessibilityCovered
+        #if DEBUG
+        TerminalInteractionHarness.chatVisibilityChanged(paneID: paneID, view: terminalView)
+        #endif
         context.coordinator.directFocusIntended = wantsTerminalKeyFocus && !viewOnly
         context.coordinator.performJumpToTail(ifTokenChanged: jumpToTailToken)
         context.coordinator.loadEarlierHistory(ifTokenChanged: loadEarlierHistoryToken)
