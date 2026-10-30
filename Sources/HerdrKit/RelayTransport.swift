@@ -217,8 +217,8 @@ public struct RelayTransport: HerdrTransport {
     /// Fails with `TransportError.requestTimedOut` after the connector's `roundTripLimit`
     /// and closes the call's socket. Without a limit, a connection whose upgrade or
     /// handshake reply never came left the call (and an upload behind it) waiting forever.
-    /// The wait does not depend on the socket honouring the close: the call answers on
-    /// the deadline (or its cancellation) either way.
+    /// The wait does not depend on the socket honouring the close: after invoking
+    /// close, the call answers without waiting for the handshake or exchange to end.
     public func roundTrip(_ requestLine: String) async throws -> String {
         let sockets = ClosableConnector(connector)
         let outcome = FirstOutcome<String>()
@@ -230,9 +230,10 @@ public struct RelayTransport: HerdrTransport {
             }
         }
         let end = { @Sendable (error: Error) in
-            guard outcome.offer(.failure(error)) else { return }
-            sockets.close()
-            work.cancel()
+            outcome.offer(.failure(error)) {
+                sockets.close()
+                work.cancel()
+            }
         }
         let expired = TransportError.requestTimedOut(host: endpoint.relay.host ?? endpoint.relay.absoluteString)
         let timer = Task { [limit = connector.roundTripLimit] in
@@ -377,23 +378,29 @@ private final class ClosableConnector: RelaySocketConnector, @unchecked Sendable
     }
 }
 
-/// The first result offered wins and is what `value()` returns; later offers are dropped.
+/// The first offer reserves the outcome; it becomes visible only after its cleanup.
 private final class FirstOutcome<Value: Sendable>: @unchecked Sendable {
     private let lock = NSLock()
+    private var claimed = false
     private var result: Result<Value, Error>?
     private var waiter: CheckedContinuation<Value, Error>?
 
-    /// True when `result` is the first offer.
-    @discardableResult
-    func offer(_ result: Result<Value, Error>) -> Bool {
-        let (first, waiter) = lock.withLock { () -> (Bool, CheckedContinuation<Value, Error>?) in
-            guard self.result == nil else { return (false, nil) }
+    /// Cleanup runs only for the winning offer, outside the lock: closing a socket
+    /// can let the worker finish and offer its own result.
+    func offer(_ result: Result<Value, Error>, beforePublishing cleanup: () -> Void = {}) {
+        let first = lock.withLock {
+            guard !claimed else { return false }
+            claimed = true
+            return true
+        }
+        guard first else { return }
+        cleanup()
+        let waiter = lock.withLock {
             self.result = result
             defer { self.waiter = nil }
-            return (true, self.waiter)
+            return self.waiter
         }
         waiter?.resume(with: result)
-        return first
     }
 
     func value() async throws -> Value {
