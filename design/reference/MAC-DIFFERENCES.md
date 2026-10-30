@@ -1,6 +1,6 @@
 # Where the Mac app differs from the iPad references
 
-The references in `agent-list/` are screenshots from the iPad simulator. Herdrup Desktop matches herdrup's regular-width `NavigationSplitView`, which is also the layout the Mac "Designed for iPad" app runs. The Mac app is the same binary, but a few things differ there. Read this before comparing a desktop window to an iPad reference.
+The references in `agent-list/`, `gram/` and `settings/` are iOS 27.0 iPad simulator screenshots. Herdrup Desktop matches herdrup's regular-width `NavigationSplitView`, which is also the layout the Mac "Designed for iPad" app runs. The Mac app is the same binary, but a few things differ there. Read this before comparing a desktop window to an iPad reference. These captures do not prove Mac rendering, Finder drops or physical-device behavior.
 
 Line numbers are from the head of the pull request that added these files. Search for the quoted code if the lines have moved since.
 

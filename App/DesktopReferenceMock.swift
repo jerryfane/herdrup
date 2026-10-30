@@ -1,17 +1,17 @@
 #if DEBUG
+import CryptoKit
 import Foundation
 import HerdrKit
 import SwiftUI
 import UIKit
 
 /// Herdrup Desktop's pixel-parity references (`HERDR_SCREENSHOT_MOCK=desktopref`,
-/// herdrup-desktop#16): the Agents home over a fake herdr, held still so every capture of
-/// a state is the same picture. `DesktopReferenceShots` drives it;
-/// design/reference/agent-list/README.md says how the pictures are made.
+/// herdrup-desktop#16): Agents, Gram and Settings over a fixture herdr, held still so
+/// every capture of a state is the same picture. `DesktopReferenceShots` drives it.
 ///
 /// - `HERDR_DESKTOPREF_STATE`: `populated` (the default), `empty` (no agents), `loading`
 ///   (`agent.list` never answers), or one of the served states: `folders`, `avatars`,
-///   `sessions`, `federated`, `needs-you`.
+///   `sessions`, `federated`, `needs-you`, `gram`, `gram-loading`, `settings`.
 /// - `HERDR_DESKTOPREF_AGENT_LIST`: the `agent.list` result of `populated`, served verbatim.
 ///   The UI test reads it from its vendored copy of herdrup-desktop's cmd/fakeherdr/agents.json.
 /// - `HERDR_DESKTOPREF_SERVED`: everything a served state answers, one JSON object keyed by
@@ -27,6 +27,8 @@ enum DesktopReferenceMock {
     enum State: String {
         case populated, empty, loading
         case folders, avatars, sessions, federated
+        case gram, settings
+        case gramLoading = "gram-loading"
         case needsYou = "needs-you"
     }
 
@@ -47,6 +49,11 @@ enum DesktopReferenceMock {
         UIView.setAnimationsEnabled(false)
         UserDefaults.standard.removeObject(forKey: TerminalHomeView.sidebarMinimizedKey)
         UserDefaults.standard.removeObject(forKey: AgentGroupsStore.openFoldersKey(host: ""))
+        if state == .gram || state == .gramLoading {
+            // Capture the inbox's empty state, not the first-use setup instructions.
+            // Like the sidebar resets above, this is prepared once, never in a view init.
+            UserDefaults.standard.set(true, forKey: "gram.setupCardDismissed")
+        }
     }()
 
     /// The served `agent.list` result, verbatim, or nil when the test passed none.
@@ -93,6 +100,7 @@ enum DesktopReferenceMock {
 /// sessions, like a herdr without named sessions.
 struct DesktopReferenceMockTransport: SessionListingTransport {
     static let capabilities = #"{"live_handoff":true,"pane_input_stream":true,"gram_upload_stream":true,"agent_session_transfer":true,"agent_session_transfer_harnesses":["claude","codex","omp"],"events_v2":true,"agent_forget":true,"api_bridge_multi":true,"pane_history":true,"agent_transcript":true,"agent_answer":true,"agent_avatar":true}"#
+    private static let gram = GramState()
 
     private var served: DesktopReferenceMock.Served? { DesktopReferenceMock.served }
 
@@ -118,7 +126,7 @@ struct DesktopReferenceMockTransport: SessionListingTransport {
                     return Self.error(id, "no_fixture", "HERDR_DESKTOPREF_AGENT_LIST is not set")
                 }
                 return Self.result(id, list)
-            case .folders, .avatars, .sessions, .federated, .needsYou:
+            case .folders, .avatars, .sessions, .federated, .needsYou, .gram, .gramLoading, .settings:
                 guard let list = served?.json("agent.list") else {
                     return Self.error(id, "no_fixture", "HERDR_DESKTOPREF_SERVED has no agent.list")
                 }
@@ -134,10 +142,28 @@ struct DesktopReferenceMockTransport: SessionListingTransport {
                 return Self.error(id, "avatar_not_found", "no such avatar image")
             }
             return Self.result(id, image)
+        case "machine.status", "server.staged_update", "guest.list", "guest.audit":
+            guard let answer = served?.json(method) else { return Self.unknownMethod(id) }
+            return Self.result(id, answer)
         case "accounts.list":
+            if let answer = served?.json(method) { return Self.result(id, answer) }
+            if [.gram, .gramLoading, .settings].contains(DesktopReferenceMock.state) {
+                return Self.unknownMethod(id)
+            }
             return Self.result(id, #"{"type":"accounts_list","accounts":[]}"#)
         case "gram.list":
-            return Self.result(id, #"{"type":"gram_list","messages":[],"unread_count":0}"#)
+            if DesktopReferenceMock.state == .gramLoading {
+                while !Task.isCancelled { try await Task.sleep(for: .seconds(3600)) }
+                throw CancellationError()
+            }
+            guard served?.json(method) != nil else {
+                if [.gram, .settings].contains(DesktopReferenceMock.state) { return Self.unknownMethod(id) }
+                // Original agent-list references predate Gram fixtures.
+                return Self.result(id, #"{"type":"gram_list","messages":[],"unread_count":0}"#)
+            }
+            return try await Self.gram.answer(id: id, method: method, requestLine: requestLine)
+        case "gram.mark_read", "gram.get_file", "gram.get_file_chunk", "gram.upload_chunk", "gram.upload.discard":
+            return try await Self.gram.answer(id: id, method: method, requestLine: requestLine)
         default:
             return Self.unknownMethod(id)
         }
@@ -192,6 +218,132 @@ struct DesktopReferenceMockTransport: SessionListingTransport {
         error(id, "unknown_method", "not served by the desktopref mock")
     }
 
+
+    /// Process-local daemon state. Saved messages and search remain the production app's
+    /// local operations; only read marks and staged file bytes are server mutations here.
+    private actor GramState {
+        private var readIDs: Set<String> = []
+        private var uploads: [String: Data] = [:]
+
+        func answer(id: String, method: String, requestLine: String) throws -> String {
+            let request = (try? JSONSerialization.jsonObject(with: Data(requestLine.utf8))) as? [String: Any]
+            let params = request?["params"] as? [String: Any] ?? [:]
+            let fixture = DesktopReferenceMock.served
+            func object(_ key: String, _ member: String? = nil) -> [String: Any]? {
+                guard let json = fixture?.json(key, member) else { return nil }
+                return (try? JSONSerialization.jsonObject(with: Data(json.utf8))) as? [String: Any]
+            }
+            func reply(_ value: Any) throws -> String {
+                let data = try JSONSerialization.data(withJSONObject: value, options: [.sortedKeys, .fragmentsAllowed])
+                return DesktopReferenceMockTransport.result(id, String(decoding: data, as: UTF8.self))
+            }
+            guard let list = object("gram.list"),
+                  let original = list["messages"] as? [[String: Any]] else {
+                return DesktopReferenceMockTransport.unknownMethod(id)
+            }
+            switch method {
+            case "gram.list":
+                // Capture fixtures serve the owner view, not an invented agent projection.
+                if params["caller_pane_id"] is String {
+                    return DesktopReferenceMockTransport.error(id, "invalid_params", "owner fixture has no agent view")
+                }
+                var messages = original.map { message -> [String: Any] in
+                    var message = message
+                    if let messageID = message["id"] as? String, readIDs.contains(messageID) {
+                        message["read_by_owner"] = true
+                    }
+                    return message
+                }
+                let unread = messages.filter {
+                    $0["direction"] as? String == "agent_to_owner" && $0["read_by_owner"] as? Bool == false
+                }.count
+                let bytes = try JSONSerialization.data(withJSONObject: messages, options: [.sortedKeys])
+                let digest = SHA256.hash(data: bytes).map { String(format: "%02x", $0) }.joined()
+                let before = params["before_id"] as? String
+                if before == nil, params["if_unchanged_digest"] as? String == digest {
+                    return try reply(["type": "gram_list_unchanged", "digest": digest, "unread_count": unread])
+                }
+                if params["only_queue"] as? Bool == true {
+                    messages = messages.filter {
+                        $0["direction"] as? String == "owner_to_agent" && !($0["to"] is String) && !($0["grabbed_by"] is String)
+                    }
+                }
+                if params["unread_only"] as? Bool == true {
+                    messages = messages.filter {
+                        $0["direction"] as? String == "agent_to_owner" && $0["read_by_owner"] as? Bool == false
+                    }
+                }
+                if let before {
+                    guard let index = messages.firstIndex(where: { $0["id"] as? String == before }) else {
+                        return DesktopReferenceMockTransport.error(id, "not_found", "unknown Gram cursor")
+                    }
+                    messages = Array(messages.dropFirst(index + 1))
+                }
+                let limit = max(1, params["limit"] as? Int ?? messages.count)
+                let hasMore = messages.count > limit
+                messages = Array(messages.prefix(limit))
+                var answer: [String: Any] = [
+                    "type": "gram_list", "messages": messages, "digest": digest,
+                    "unread_count": unread, "has_more": hasMore,
+                ]
+                if hasMore { answer["next_before_id"] = messages.last?["id"] }
+                return try reply(answer)
+            case "gram.mark_read":
+                guard let messageID = params["id"] as? String,
+                      let message = original.first(where: { $0["id"] as? String == messageID }),
+                      message["direction"] as? String == "agent_to_owner" else {
+                    return DesktopReferenceMockTransport.error(id, "not_found", "no incoming message with that id")
+                }
+                readIDs.insert(messageID)
+                return try reply(["type": "ok"])
+            case "gram.get_file", "gram.get_file_chunk":
+                guard let messageID = params["id"] as? String,
+                      var file = object("gram.get_file", messageID) else {
+                    return DesktopReferenceMockTransport.error(id, "not_found", "no file with that message id")
+                }
+                if method == "gram.get_file_chunk" {
+                    guard let encoded = file["data_base64"] as? String, let bytes = Data(base64Encoded: encoded),
+                          let offset = params["offset"] as? Int, offset >= 0, offset <= bytes.count,
+                          let length = params["length"] as? Int, length > 0 else {
+                        return DesktopReferenceMockTransport.error(id, "invalid_params", "invalid file range")
+                    }
+                    file["type"] = "gram_file_chunk"
+                    file["offset"] = offset
+                    file["data_base64"] = bytes.subdata(in: offset..<(offset + min(length, bytes.count - offset))).base64EncodedString()
+                }
+                return try reply(file)
+            case "gram.upload_chunk":
+                guard let expected = object("gram.upload.fixture")?["data_base64"] as? String,
+                      let expectedBytes = Data(base64Encoded: expected),
+                      let uploadID = params["upload_id"] as? String, !uploadID.isEmpty,
+                      let offset = params["offset"] as? Int, offset >= 0,
+                      let encoded = params["data_base64"] as? String,
+                      let chunk = Data(base64Encoded: encoded) else {
+                    return DesktopReferenceMockTransport.error(id, "invalid_params", "no matching upload fixture")
+                }
+                var staged = uploads[uploadID] ?? Data()
+                guard offset <= staged.count, offset <= expectedBytes.count,
+                      chunk.count <= expectedBytes.count - offset,
+                      expectedBytes.subdata(in: offset..<(offset + chunk.count)) == chunk else {
+                    return DesktopReferenceMockTransport.error(id, "invalid_params", "upload bytes or offset do not match fixture")
+                }
+                if offset == staged.count {
+                    staged.append(chunk)
+                } else if offset + chunk.count > staged.count || staged.subdata(in: offset..<(offset + chunk.count)) != chunk {
+                    return DesktopReferenceMockTransport.error(id, "invalid_params", "conflicting upload replay")
+                }
+                uploads[uploadID] = staged
+                return try reply(["type": "ok"])
+            case "gram.upload.discard":
+                guard let uploadID = params["upload_id"] as? String else {
+                    return DesktopReferenceMockTransport.error(id, "invalid_params", "missing upload id")
+                }
+                return try reply(["type": "gram_upload_discarded", "discarded": uploads.removeValue(forKey: uploadID) != nil])
+            default:
+                return DesktopReferenceMockTransport.unknownMethod(id)
+            }
+        }
+    }
     /// A stream, or a session listing, this daemon does not serve.
     private struct Unserved: Error {}
 }
@@ -217,7 +369,9 @@ struct DesktopReferenceProbe: UIViewRepresentable {
 
         override func didMoveToWindow() {
             super.didMoveToWindow()
-            if let window, DesktopReferenceMock.state == .loading { window.layer.speed = 0 }
+            if let window, [.loading, .gramLoading].contains(DesktopReferenceMock.state) {
+                window.layer.speed = 0
+            }
             report()
         }
 
@@ -243,6 +397,10 @@ struct DesktopReferenceProbe: UIViewRepresentable {
                 "contentSize=\(traits.preferredContentSizeCategory.rawValue)",
                 "style=\(traits.userInterfaceStyle == .dark ? "dark" : "light")",
                 "now=\(MockClock.pinned.map { ISO8601DateFormatter().string(from: $0) } ?? "unpinned")",
+                "locale=\(Locale.current.identifier)",
+                "timeZone=\(TimeZone.current.identifier)",
+                "timeZoneOffset=\(TimeZone.current.secondsFromGMT(for: MockClock.pinned ?? Date()))",
+                "calendar=\(Calendar.current.identifier)",
             ]
             accessibilityValue = fields.joined(separator: ";")
         }

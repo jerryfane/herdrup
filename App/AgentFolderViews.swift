@@ -35,10 +35,10 @@ struct AgentFolderRow: View {
                         .lineLimit(1)
                     Spacer(minLength: DesignTokens.Space.stackSmall)
                     if summary.waitingCount > 0 {
-                        countPill(summary.waitingCount, Palette.waiting)
+                        CountPill(count: summary.waitingCount, fill: Palette.waiting)
                     }
                     if summary.stoppedCount > 0 {
-                        countPill(summary.stoppedCount, Palette.died)
+                        CountPill(count: summary.stoppedCount, fill: Palette.died)
                     }
                     Image(systemName: "chevron.right")
                         .font(.system(size: 12, weight: .semibold))
@@ -65,8 +65,15 @@ struct AgentFolderRow: View {
         }
         .contentShape(Rectangle())
     }
+}
 
-    private func countPill(_ count: Int, _ fill: Color) -> some View {
+/// The amber / red count capsule (`text.countPill`, 22 pt, ground ink): a closed folder's
+/// waiting and stopped counts, and the badges on Settings' suggestions rows.
+struct CountPill: View {
+    let count: Int
+    let fill: Color
+
+    var body: some View {
         Text("\(count)")
             .font(Typography.app(DesignTokens.Text.CountPill.size, DesignTokens.Text.CountPill.weight))
             .monospacedDigit()

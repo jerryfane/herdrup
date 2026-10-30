@@ -337,8 +337,8 @@ sys.exit(1 if missing else 0)
 ' "$@"
 }
 
-# Herdrup Desktop's reference screenshots (DesktopReferenceShots, herdrup-desktop#16) on
-# one reference iPad. The pictures must be the same on every run, so the app starts from a
+# Herdrup Desktop's agent-list, Gram and Settings reference screenshots on one iPad.
+# Each class keeps its own bounded round as the reference set grows. The app starts from a
 # fresh install (no UserDefaults left by earlier rounds), the device is dark, and the status
 # bar is pinned: 9:41, full battery, charged, no cellular, three Wi-Fi bars. simctl takes
 # only a plain time here: it rejected both ISO date-times (`…Z` and `…+00:00`) as "non-ISO"
@@ -347,8 +347,12 @@ sys.exit(1 if missing else 0)
 # rounds on the device see the real status bar.
 DESKTOP_REFERENCE_STATUS_BAR=(--time 9:41 --batteryLevel 100 --batteryState charged
   --cellularMode notSupported --wifiBars 3)
+DESKTOP_REFERENCE_CLASSES=(DesktopReferenceShots DesktopGramReferenceShots DesktopSettingsReferenceShots)
 desktop_reference_round() {
-  local label="$1" udid="$2" bundle_id status=0
+  local label="$1" udid="$2" bundle_id class round status=0
+  shift 2
+  local classes=("${DESKTOP_REFERENCE_CLASSES[@]}")
+  if [ "$#" -gt 0 ]; then classes=("$@"); fi
   boot_simulator "$udid" "TestReceipts/$label-boot.log" || return 1
   bundle_id=$(/usr/libexec/PlistBuddy -c 'Print :CFBundleIdentifier' "$APP_UNDER_TEST/Info.plist") || return 1
   xcrun simctl uninstall "$udid" "$bundle_id" >/dev/null 2>&1 || true
@@ -358,8 +362,17 @@ desktop_reference_round() {
     echo "xcrun simctl status_bar <udid> override ${DESKTOP_REFERENCE_STATUS_BAR[*]}"
     xcrun simctl status_bar "$udid" list
   } | tee "TestReceipts/$label-status-bar.txt"
-  run_suite "$label" "$udid" 15m -only-testing:HerdrUITests/DesktopReferenceShots || status=1
-  check_classes_ran "TestReceipts/$label-first.xcresult" DesktopReferenceShots || status=1
+  # Match focused iPad runs: record before installation, including simulator failures
+  # that happen before XCTest can attach its own recording.
+  xcrun simctl io "$udid" recordVideo "TestReceipts/$label-reference.mp4" \
+    > "TestReceipts/$label-reference-video.log" 2>&1 &
+  recorder=$!
+  for class in "${classes[@]}"; do
+    round="$label-${class//\//-}"
+    run_suite "$round" "$udid" 15m "-only-testing:HerdrUITests/$class" || status=1
+    check_classes_ran "TestReceipts/$round-first.xcresult" "${class%%/*}" || status=1
+  done
+  stop_recording
   xcrun simctl status_bar "$udid" clear || true
   xcrun simctl ui "$udid" appearance light || true
   return "$status"
@@ -466,7 +479,8 @@ case "$shard" in
     skip=(-skip-testing:HerdrUITests/GramTests -skip-testing:HerdrUITests/StatusMotionTests
       -skip-testing:HerdrUITests/ChatViewTests -skip-testing:HerdrUITests/ChatUXSmokeTests -skip-testing:HerdrUITests/PagingTests
       -skip-testing:HerdrUITests/AgentFoldersTests -skip-testing:HerdrUITests/NeedsYouPillTests
-      -skip-testing:HerdrUITests/ServerUpdateUITests -skip-testing:HerdrUITests/DesktopReferenceShots)
+      -skip-testing:HerdrUITests/ServerUpdateUITests)
+    for class in "${DESKTOP_REFERENCE_CLASSES[@]}"; do skip+=("-skip-testing:HerdrUITests/$class"); done
     for class in "${TERMINAL_CLASSES[@]}"; do skip+=("-skip-testing:HerdrUITests/$class"); done
     # 40m: on the Xcode 27 image every class ran slower. Run 40728450580 logged "iPhoneApp
     # exceeded its 30m budget" on its 79th case; its 69 cases that passed there and on
@@ -586,17 +600,29 @@ case "$shard" in
     ;;
   focused)
     case "${ONLY_DEVICE:-iphone}" in
-      ipad) label=iPad; udid="$IPAD_UDID" ;;
+      ipad|ipad-pro-13) label=iPad; udid="$IPAD_UDID" ;;
       *)    label=iPhone; udid="$IPHONE_UDID" ;;
     esac
-    if [ "$ONLY_SUITE" = DesktopReferenceShots ] && [ "$label" = iPad ]; then
-      # The references are a pair: both reference iPads, each under the pinned status bar.
-      echo "::notice::focused dispatch: HerdrUITests/DesktopReferenceShots on both reference iPads"
-      desktop_reference_round iPadDesktopReference "$IPAD_UDID" || failed=1
+    if [[ "$ONLY_SUITE" = DesktopReferenceShots || "$ONLY_SUITE" = DesktopGramAndSettingsReferences || "$ONLY_SUITE" = DesktopGramReferenceShots/* ]]; then
+      if [ "$label" != iPad ]; then
+        echo "::error::desktop reference groups require only_device=ipad or ipad-pro-13"
+        exit 1
+      fi
+      # Default to both references; a failed primary-device capture can be replaced alone.
+      reference_classes=("${DESKTOP_REFERENCE_CLASSES[@]}")
+      if [ "$ONLY_SUITE" = DesktopGramAndSettingsReferences ]; then
+        reference_classes=(DesktopGramReferenceShots DesktopSettingsReferenceShots)
+      elif [[ "$ONLY_SUITE" = DesktopGramReferenceShots/* ]]; then
+        reference_classes=("$ONLY_SUITE")
+      fi
+      echo "::notice::focused dispatch: $ONLY_SUITE on ${ONLY_DEVICE:-ipad}"
+      desktop_reference_round iPadDesktopReference "$IPAD_UDID" "${reference_classes[@]}" || failed=1
       xcrun simctl shutdown "$IPAD_UDID" >/dev/null 2>&1 || true
       # A shut-down device must be booted and checked again by any later round.
       ready_devices="${ready_devices/ $IPAD_UDID / }"
-      desktop_reference_round iPad11DesktopReference "$IPAD11_UDID" || failed=1
+      if [ "${ONLY_DEVICE:-ipad}" != ipad-pro-13 ]; then
+        desktop_reference_round iPad11DesktopReference "$IPAD11_UDID" "${reference_classes[@]}" || failed=1
+      fi
     else
       # The iPad as the ipad shard prepares it: boot, then the screen recorder, then the
       # rounds. Focused iPad runs that went straight to the install (40822219713,
