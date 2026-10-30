@@ -363,9 +363,9 @@ desktop_reference_round() {
     xcrun simctl status_bar "$udid" list
   } | tee "TestReceipts/$label-status-bar.txt"
   for class in "${classes[@]}"; do
-    round="$label-$class"
+    round="$label-${class//\//-}"
     run_suite "$round" "$udid" 15m "-only-testing:HerdrUITests/$class" || status=1
-    check_classes_ran "TestReceipts/$round-first.xcresult" "$class" || status=1
+    check_classes_ran "TestReceipts/$round-first.xcresult" "${class%%/*}" || status=1
   done
   xcrun simctl status_bar "$udid" clear || true
   xcrun simctl ui "$udid" appearance light || true
@@ -597,7 +597,7 @@ case "$shard" in
       ipad) label=iPad; udid="$IPAD_UDID" ;;
       *)    label=iPhone; udid="$IPHONE_UDID" ;;
     esac
-    if [[ "$ONLY_SUITE" = DesktopReferenceShots || "$ONLY_SUITE" = DesktopGramAndSettingsReferences ]]; then
+    if [[ "$ONLY_SUITE" = DesktopReferenceShots || "$ONLY_SUITE" = DesktopGramAndSettingsReferences || "$ONLY_SUITE" = DesktopGramReferenceShots/* ]]; then
       if [ "$label" != iPad ]; then
         echo "::error::desktop reference groups require only_device=ipad"
         exit 1
@@ -606,6 +606,8 @@ case "$shard" in
       reference_classes=("${DESKTOP_REFERENCE_CLASSES[@]}")
       if [ "$ONLY_SUITE" = DesktopGramAndSettingsReferences ]; then
         reference_classes=(DesktopGramReferenceShots DesktopSettingsReferenceShots)
+      elif [[ "$ONLY_SUITE" = DesktopGramReferenceShots/* ]]; then
+        reference_classes=("$ONLY_SUITE")
       fi
       echo "::notice::focused dispatch: $ONLY_SUITE on both reference iPads"
       desktop_reference_round iPadDesktopReference "$IPAD_UDID" "${reference_classes[@]}" || failed=1

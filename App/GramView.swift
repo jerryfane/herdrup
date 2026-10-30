@@ -3267,7 +3267,7 @@ struct GramRow: View, Equatable {
     }
 
     static func age(from date: Date) -> String {
-        let seconds = max(0, Date().timeIntervalSince(date))
+        let seconds = max(0, GramDates.clockNow().timeIntervalSince(date))
         switch seconds {
         case ..<60: return "now"
         case ..<3600: return "\(Int(seconds / 60))m"
