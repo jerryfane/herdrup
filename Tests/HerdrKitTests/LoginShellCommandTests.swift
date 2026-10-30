@@ -49,8 +49,8 @@ final class LoginShellCommandTests: XCTestCase {
              ["api-bridge", CitadelTransport.encodedRequest(for: agentList)]),
             ("near-limit request", largeCommand,
              ["api-bridge", CitadelTransport.encodedRequest(for: large)]),
-            ("duplex upload", CitadelTransport.herdrCommand(["api-bridge", "--duplex"]),
-             ["api-bridge", "--duplex"]),
+            ("stream upload", CitadelTransport.inputStreamBridgeCommand(session: nil),
+             ["remote-api-bridge"]),
             ("machine federate", CitadelTransport.herdrCommand(["machine", "federate", profileID]),
              ["machine", "federate", profileID]),
             // #347: a named session is the global `--session` flag before the subcommand;
@@ -61,9 +61,9 @@ final class LoginShellCommandTests: XCTestCase {
             ("agent.list in the default session",
              try CitadelTransport.bridgeCommand(for: agentList, session: "default"),
              ["api-bridge", CitadelTransport.encodedRequest(for: agentList)]),
-            ("duplex upload in a named session",
-             CitadelTransport.herdrCommand(["api-bridge", "--duplex"], session: "personal"),
-             ["--session", "personal", "api-bridge", "--duplex"]),
+            ("stream upload in a named session",
+             CitadelTransport.inputStreamBridgeCommand(session: "personal"),
+             ["--session", "personal", "remote-api-bridge"]),
             ("session list", CitadelTransport.herdrCommand(["session", "list", "--json"]),
              ["session", "list", "--json"]),
         ]

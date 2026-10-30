@@ -365,11 +365,13 @@ final class ChatMockConversation: @unchecked Sendable {
     }
 
     private static func today(_ hour: Int, _ minute: Int) -> UInt64 {
-        ms(Calendar.current.date(bySettingHour: hour, minute: minute, second: 0, of: Date()) ?? Date())
+        let now = MockClock.pinned ?? Date()
+        return ms(Calendar.current.date(bySettingHour: hour, minute: minute, second: 0, of: now) ?? now)
     }
 
     private static func daysAgo(_ days: Int, hour: Int, minute: Int) -> UInt64 {
-        let day = Calendar.current.date(byAdding: .day, value: -days, to: Date()) ?? Date()
+        let now = MockClock.pinned ?? Date()
+        let day = Calendar.current.date(byAdding: .day, value: -days, to: now) ?? now
         return ms(Calendar.current.date(bySettingHour: hour, minute: minute, second: 0, of: day) ?? day)
     }
 
