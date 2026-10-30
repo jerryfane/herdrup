@@ -1,6 +1,6 @@
 # Where the Mac app differs from the iPad references
 
-The references in `agent-list/` are screenshots from the iPad simulator. Herdrup Desktop matches herdrup's regular-width `NavigationSplitView`, which is also the layout the Mac "Designed for iPad" app runs. The Mac app is the same binary, but a few things differ there. Read this before comparing a desktop window to an iPad reference.
+The references in `agent-list/`, `gram/` and `settings/` are iOS 27.0 iPad simulator screenshots. Herdrup Desktop matches herdrup's regular-width `NavigationSplitView`, which is also the layout the Mac "Designed for iPad" app runs. The Mac app is the same binary, but a few things differ there. Read this before comparing a desktop window to an iPad reference. These captures do not prove Mac rendering, Finder drops or physical-device behavior.
 
 Line numbers are from the head of the pull request that added these files. Search for the quoted code if the lines have moved since.
 
@@ -8,7 +8,7 @@ Line numbers are from the head of the pull request that added these files. Searc
 
 | Where | iPad simulator (the references) | Mac "Designed for iPad" |
 |---|---|---|
-| `App/HerdrApp.swift:3781` `agentRosterStack` | `LazyVStack`: rows are built as they scroll into view. | Eager `VStack` (`ProcessInfo.processInfo.isiOSAppOnMac \|\| forceEagerAgentRosterStack \|\| groups.document != nil`). Every row is built up front. The pixels are the same; only the build and scroll timing differ. The iPad switches to the eager stack too once a daemon has folders (`groups.document`), which the references do not have. |
+| `App/HerdrApp.swift:3781` `agentRosterStack` | `LazyVStack`: rows are built as they scroll into view. | Eager `VStack` (`ProcessInfo.processInfo.isiOSAppOnMac \|\| forceEagerAgentRosterStack \|\| groups.document != nil`). Every row is built up front. The pixels are the same; only the build and scroll timing differ. The iPad switches to the eager stack too once a daemon has folders (`groups.document`), which of the references only `folders` has. |
 | `App/SectionTopBar.swift:106-119` `SectionTopBar.body` | Full screen: no window-controls corner, so the bar's row is 44 pt, drawn 6 pt below the bar's top (`windowed ? 0 : 6`). | The window has a corner inset, so `windowed` is true, but `sharesRow` is false because the Mac keeps its traffic lights in their own title-bar row (line 108). The row stays 44 pt but sits at offset 0, 6 pt higher than on the full-screen iPad. |
 | `App/SectionTopBar.swift:99`, `:110`, `:140` `containerCornerInsets` | Both corner insets are 0 in full screen, so the "Agents" bar's capsules sit at the 16 pt side padding. | The bar's `leadingInset` and `trailingInset` are the window's `containerCornerInsets` (the traffic-light corner). The capsules and the centred title can move inwards by that inset. [INFERENCE] The size of the Mac's corner inset was not measured here. |
 | `App/SectionTopBar.swift:137-139` `backLeads` | Back leads on a full-screen iPad, and on the agent list there is no Back. | Back always leads on Mac (`\|\| ProcessInfo.processInfo.isiOSAppOnMac`). On an iPad *window* it goes to the right-hand capsule instead. |

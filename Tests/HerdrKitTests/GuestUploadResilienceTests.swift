@@ -136,6 +136,46 @@ final class GuestUploadResilienceTests: XCTestCase {
         XCTAssertTrue(connector.sockets.first?.closed ?? false, "the stalled socket is closed")
     }
 
+    func testARelayTimeoutWaitsForSocketCloseBeforeReturning() async throws {
+        let handshakeStarted = expectation(description: "handshake started")
+        let closeStarted = expectation(description: "socket close entered")
+        let returnedBeforeClose = expectation(description: "call returned before socket close finished")
+        returnedBeforeClose.isInverted = true
+        let returned = expectation(description: "call returned after releasing close")
+        let socket = CloseGatedRelaySocket(handshakeStarted: handshakeStarted, closeStarted: closeStarted)
+        defer { socket.releaseClose() }
+        let connector = CloseGatedRelayConnector(socket: socket)
+        let transport = RelayTransport(
+            guestID: "g_1", endpoint: FakeHost().endpoint, identity: identity, connector: connector)
+        let call = Task { () -> Result<String, Error> in
+            let result: Result<String, Error>
+            do { result = .success(try await transport.roundTrip("x")) }
+            catch { result = .failure(error) }
+            // Observe the public call, not its private arbitration state. Keep close
+            // stalled until the test explicitly releases it, even on the old code.
+            if !socket.closeFinished { returnedBeforeClose.fulfill() }
+            returned.fulfill()
+            return result
+        }
+        await fulfillment(of: [handshakeStarted], timeout: 5)
+        await fulfillment(of: [closeStarted], timeout: 5)
+        await fulfillment(of: [returnedBeforeClose], timeout: 1)
+        socket.releaseClose()
+        let completion = await XCTWaiter.fulfillment(of: [returned], timeout: 5)
+        guard completion == .completed else {
+            XCTFail("the relay call did not return after socket close was released")
+            return
+        }
+        let result = await call.value
+        switch result {
+        case .failure(TransportError.requestTimedOut(let host)):
+            XCTAssertEqual(host, "relay.test")
+        default:
+            XCTFail("expected requestTimedOut, got \(result)")
+        }
+        XCTAssertTrue(socket.closeFinished)
+    }
+
     /// `body`'s result, or nil when it is still running after `limit`, without waiting
     /// for it to end.
     private static func outcome<T: Sendable>(
@@ -168,4 +208,63 @@ private final class ResultBox<T: Sendable>: @unchecked Sendable {
         }
         waiter?.resume(returning: result)
     }
+}
+
+/// Holds close itself, rather than delaying a receive or hoping to win a scheduler
+/// race. The consumer must stay suspended until the test releases this gate.
+private final class CloseGatedRelaySocket: RelaySocket, @unchecked Sendable {
+    private let base = FakeRelaySocket()
+    private let condition = NSCondition()
+    private var closing = false
+    private var released = false
+    private var finished = false
+    private let handshakeStarted: XCTestExpectation
+    private let closeStarted: XCTestExpectation
+    let handshakeSent = DispatchSemaphore(value: 0)
+
+    init(handshakeStarted: XCTestExpectation, closeStarted: XCTestExpectation) {
+        self.handshakeStarted = handshakeStarted
+        self.closeStarted = closeStarted
+    }
+
+    var closeFinished: Bool { condition.withLock { finished } }
+
+    func send(_ message: Data) async throws {
+        handshakeStarted.fulfill()
+        handshakeSent.signal()
+    }
+
+    func receive() async throws -> RelaySocketEvent { try await base.receive() }
+
+    func close() {
+        condition.lock()
+        if !closing {
+            closing = true
+            closeStarted.fulfill()
+        }
+        while !released { condition.wait() }
+        finished = true
+        condition.unlock()
+        base.close()
+    }
+
+    func releaseClose() {
+        condition.withLock {
+            released = true
+            condition.broadcast()
+        }
+    }
+}
+
+private struct CloseGatedRelayConnector: RelaySocketConnector {
+    let socket: CloseGatedRelaySocket
+
+    var roundTripLimit: Duration {
+        // Arm the real production timer only after the call owns its socket.
+        // This is a fixture rendezvous, not a longer transport deadline.
+        XCTAssertEqual(socket.handshakeSent.wait(timeout: .now() + 5), .success)
+        return .milliseconds(300)
+    }
+
+    func connect(to url: URL) -> RelaySocket { socket }
 }

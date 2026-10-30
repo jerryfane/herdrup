@@ -178,6 +178,7 @@ enum DesignTokens {
         static let tabBarMaxWidth: CGFloat = 320
         static let sidebarMin: CGFloat = 320
         static let sidebarMax: CGFloat = 460
+        static let machineCardAvatar: CGFloat = 60
         static let rail: CGFloat = 64
         static let hairline: CGFloat = 1
     }
@@ -270,6 +271,16 @@ enum DesignTokens {
             static let font: String = "machine"
             static let size: CGFloat = 12
             static let weight: SwiftUI.Font.Weight = .regular  // 400
+        }
+        enum MachineCardTitle {
+            static let font: String = "app"
+            static let size: CGFloat = 20
+            static let weight: SwiftUI.Font.Weight = .semibold  // 600
+        }
+        enum MachineHeroTitle {
+            static let font: String = "app"
+            static let size: CGFloat = 24
+            static let weight: SwiftUI.Font.Weight = .bold  // 700
         }
         enum TabLabel {
             static let font: String = "system"

@@ -1,0 +1,397 @@
+{
+  "description": "Native Chat, Terminal, inline writer and saved-host connection references for Herdrup Desktop.",
+  "runtime": "iOS 27.0 (com.apple.CoreSimulator.SimRuntime.iOS-27-0)",
+  "pngEncoding": "Original exported XCUIScreenshot PNG bytes; no recompression or pixel edits.",
+  "statusBarNote": "simctl pins 9:41 but not the date; all images visibly show Fri Oct 30.",
+  "mockClockNote": "en_US/UTC/Gregorian, fixed 2026-10-28T09:41:00Z. Chat timestamps and relative day labels use the pinned clock.",
+  "fixtureNote": "JSON supplies launch flags, unsent writer text and saved-host metadata. Transcript and terminal response fixtures are built into the source files below; not claimed as JSON daemon responses.",
+  "sourceFixtures": [
+    {
+      "file": "App/ChatMockTranscript.swift",
+      "sha256": "93569dc12e47dda955911234e8ce431b4155d6661489b0f078d6630a8f68efc9",
+      "herdrupCommit": "1c21ad11929d6111ae578166e9f39e64f6abc3fd"
+    },
+    {
+      "file": "App/HerdrApp.swift",
+      "sha256": "60d721423a8ef021b5e7e2c47775155c89d441bf106f2328ad910a87bc0df91f",
+      "herdrupCommit": "1c21ad11929d6111ae578166e9f39e64f6abc3fd"
+    },
+    {
+      "file": "HerdrUITests/DesktopDetailReferenceShots.swift",
+      "sha256": "51612e43e7becb69bb3e2cfed0f41e3d1604aeeebe2915f7478269dd44147e34",
+      "herdrupCommit": "1c21ad11929d6111ae578166e9f39e64f6abc3fd"
+    }
+  ],
+  "files": [
+    {
+      "file": "ref-ipad-11-detail-chat.png",
+      "state": "detail-chat",
+      "device": "ipad-11",
+      "simulator": "iPad Air 11-inch (M4)",
+      "points": {
+        "width": 1180,
+        "height": 820
+      },
+      "pixels": {
+        "width": 2360,
+        "height": 1640
+      },
+      "scale": 2,
+      "orientation": "landscape",
+      "appearance": "dark",
+      "dynamicTypeSize": "UICTContentSizeCategoryL",
+      "statusBar": {
+        "heightPoints": 32,
+        "safeAreaTopPoints": 32,
+        "override": "xcrun simctl status_bar <udid> override --time 9:41 --batteryLevel 100 --batteryState charged --cellularMode notSupported --wifiBars 3",
+        "date": "Fri Oct 30"
+      },
+      "mockClock": "2026-10-28T09:41:00Z",
+      "herdrupCommit": "1c21ad11929d6111ae578166e9f39e64f6abc3fd",
+      "fixtureSHA256": "38f1ec400fd95f3c6229d7390e157c9c7b42acc246387093ce01e478ab5e887a",
+      "sha256": "9894fbd81e7bbfc263a460d806517461c2b0054513830f4579bc536aed1fe3c2",
+      "fixture": "HerdrUITests/Fixtures/desktop-reference-detail.json",
+      "runtime": "iOS 27.0 (com.apple.CoreSimulator.SimRuntime.iOS-27-0)",
+      "ciRun": "https://github.com/themartianapp/herdrup/actions/runs/41049693045",
+      "locale": "en_US",
+      "timeZone": "GMT",
+      "timeZoneOffsetSeconds": 0,
+      "calendar": "gregorian",
+      "mock": "chatview",
+      "captureTest": "DesktopDetailReferenceShots/testNativeChatAndTerminalReferences()"
+    },
+    {
+      "file": "ref-ipad-11-detail-host-selection.png",
+      "state": "detail-host-selection",
+      "device": "ipad-11",
+      "simulator": "iPad Air 11-inch (M4)",
+      "points": {
+        "width": 1180,
+        "height": 820
+      },
+      "pixels": {
+        "width": 2360,
+        "height": 1640
+      },
+      "scale": 2,
+      "orientation": "landscape",
+      "appearance": "dark",
+      "dynamicTypeSize": "UICTContentSizeCategoryL",
+      "statusBar": {
+        "heightPoints": 32,
+        "safeAreaTopPoints": 32,
+        "override": "xcrun simctl status_bar <udid> override --time 9:41 --batteryLevel 100 --batteryState charged --cellularMode notSupported --wifiBars 3",
+        "date": "Fri Oct 30"
+      },
+      "mockClock": "2026-10-28T09:41:00Z",
+      "herdrupCommit": "1c21ad11929d6111ae578166e9f39e64f6abc3fd",
+      "fixtureSHA256": "38f1ec400fd95f3c6229d7390e157c9c7b42acc246387093ce01e478ab5e887a",
+      "sha256": "7e7aa8778897b054fb32cb69037f26e5c236b3cde267526c8525d891d178bb73",
+      "fixture": "HerdrUITests/Fixtures/desktop-reference-detail.json",
+      "runtime": "iOS 27.0 (com.apple.CoreSimulator.SimRuntime.iOS-27-0)",
+      "ciRun": "https://github.com/themartianapp/herdrup/actions/runs/41049693045",
+      "locale": "en_US",
+      "timeZone": "GMT",
+      "timeZoneOffsetSeconds": 0,
+      "calendar": "gregorian",
+      "mock": "onboarding",
+      "captureTest": "DesktopDetailReferenceShots/testNativeSavedHostSelectionReference()"
+    },
+    {
+      "file": "ref-ipad-11-detail-terminal.png",
+      "state": "detail-terminal",
+      "device": "ipad-11",
+      "simulator": "iPad Air 11-inch (M4)",
+      "points": {
+        "width": 1180,
+        "height": 820
+      },
+      "pixels": {
+        "width": 2360,
+        "height": 1640
+      },
+      "scale": 2,
+      "orientation": "landscape",
+      "appearance": "dark",
+      "dynamicTypeSize": "UICTContentSizeCategoryL",
+      "statusBar": {
+        "heightPoints": 32,
+        "safeAreaTopPoints": 32,
+        "override": "xcrun simctl status_bar <udid> override --time 9:41 --batteryLevel 100 --batteryState charged --cellularMode notSupported --wifiBars 3",
+        "date": "Fri Oct 30"
+      },
+      "mockClock": "2026-10-28T09:41:00Z",
+      "herdrupCommit": "1c21ad11929d6111ae578166e9f39e64f6abc3fd",
+      "fixtureSHA256": "38f1ec400fd95f3c6229d7390e157c9c7b42acc246387093ce01e478ab5e887a",
+      "sha256": "8478a57306c7986591f5695e9daf97b61e161e3f189425b5b30731d8989773b1",
+      "fixture": "HerdrUITests/Fixtures/desktop-reference-detail.json",
+      "runtime": "iOS 27.0 (com.apple.CoreSimulator.SimRuntime.iOS-27-0)",
+      "ciRun": "https://github.com/themartianapp/herdrup/actions/runs/41049693045",
+      "locale": "en_US",
+      "timeZone": "GMT",
+      "timeZoneOffsetSeconds": 0,
+      "calendar": "gregorian",
+      "mock": "chatview",
+      "captureTest": "DesktopDetailReferenceShots/testNativeChatAndTerminalReferences()"
+    },
+    {
+      "file": "ref-ipad-11-detail-writer-collapsed.png",
+      "state": "detail-writer-collapsed",
+      "device": "ipad-11",
+      "simulator": "iPad Air 11-inch (M4)",
+      "points": {
+        "width": 1180,
+        "height": 820
+      },
+      "pixels": {
+        "width": 2360,
+        "height": 1640
+      },
+      "scale": 2,
+      "orientation": "landscape",
+      "appearance": "dark",
+      "dynamicTypeSize": "UICTContentSizeCategoryL",
+      "statusBar": {
+        "heightPoints": 32,
+        "safeAreaTopPoints": 32,
+        "override": "xcrun simctl status_bar <udid> override --time 9:41 --batteryLevel 100 --batteryState charged --cellularMode notSupported --wifiBars 3",
+        "date": "Fri Oct 30"
+      },
+      "mockClock": "2026-10-28T09:41:00Z",
+      "herdrupCommit": "1c21ad11929d6111ae578166e9f39e64f6abc3fd",
+      "fixtureSHA256": "38f1ec400fd95f3c6229d7390e157c9c7b42acc246387093ce01e478ab5e887a",
+      "sha256": "d5a1653991fa0df46a442fe1c0d6ee648ea1135ed5aa108047241238e9eb1a24",
+      "fixture": "HerdrUITests/Fixtures/desktop-reference-detail.json",
+      "runtime": "iOS 27.0 (com.apple.CoreSimulator.SimRuntime.iOS-27-0)",
+      "ciRun": "https://github.com/themartianapp/herdrup/actions/runs/41049693045",
+      "locale": "en_US",
+      "timeZone": "GMT",
+      "timeZoneOffsetSeconds": 0,
+      "calendar": "gregorian",
+      "mock": "chatview",
+      "captureTest": "DesktopDetailReferenceShots/testNativeInlineWriterReferences()"
+    },
+    {
+      "file": "ref-ipad-11-detail-writer-expanded.png",
+      "state": "detail-writer-expanded",
+      "device": "ipad-11",
+      "simulator": "iPad Air 11-inch (M4)",
+      "points": {
+        "width": 1180,
+        "height": 820
+      },
+      "pixels": {
+        "width": 2360,
+        "height": 1640
+      },
+      "scale": 2,
+      "orientation": "landscape",
+      "appearance": "dark",
+      "dynamicTypeSize": "UICTContentSizeCategoryL",
+      "statusBar": {
+        "heightPoints": 32,
+        "safeAreaTopPoints": 32,
+        "override": "xcrun simctl status_bar <udid> override --time 9:41 --batteryLevel 100 --batteryState charged --cellularMode notSupported --wifiBars 3",
+        "date": "Fri Oct 30"
+      },
+      "mockClock": "2026-10-28T09:41:00Z",
+      "herdrupCommit": "1c21ad11929d6111ae578166e9f39e64f6abc3fd",
+      "fixtureSHA256": "38f1ec400fd95f3c6229d7390e157c9c7b42acc246387093ce01e478ab5e887a",
+      "sha256": "da8f646e4079290953bbad0ee3afb23c943d19210c26fb6d6b68ef603fc71873",
+      "fixture": "HerdrUITests/Fixtures/desktop-reference-detail.json",
+      "runtime": "iOS 27.0 (com.apple.CoreSimulator.SimRuntime.iOS-27-0)",
+      "ciRun": "https://github.com/themartianapp/herdrup/actions/runs/41049693045",
+      "locale": "en_US",
+      "timeZone": "GMT",
+      "timeZoneOffsetSeconds": 0,
+      "calendar": "gregorian",
+      "mock": "chatview",
+      "captureTest": "DesktopDetailReferenceShots/testNativeInlineWriterReferences()"
+    },
+    {
+      "file": "ref-ipad-pro-13-detail-chat.png",
+      "state": "detail-chat",
+      "device": "ipad-pro-13",
+      "simulator": "iPad Pro 13-inch (M5)",
+      "points": {
+        "width": 1376,
+        "height": 1032
+      },
+      "pixels": {
+        "width": 2752,
+        "height": 2064
+      },
+      "scale": 2,
+      "orientation": "landscape",
+      "appearance": "dark",
+      "dynamicTypeSize": "UICTContentSizeCategoryL",
+      "statusBar": {
+        "heightPoints": 32,
+        "safeAreaTopPoints": 32,
+        "override": "xcrun simctl status_bar <udid> override --time 9:41 --batteryLevel 100 --batteryState charged --cellularMode notSupported --wifiBars 3",
+        "date": "Fri Oct 30"
+      },
+      "mockClock": "2026-10-28T09:41:00Z",
+      "herdrupCommit": "1c21ad11929d6111ae578166e9f39e64f6abc3fd",
+      "fixtureSHA256": "38f1ec400fd95f3c6229d7390e157c9c7b42acc246387093ce01e478ab5e887a",
+      "sha256": "6e7989c4075bdfb06b23baba744a430958ae5da633a6aa3386f89ed57d5cb8a5",
+      "fixture": "HerdrUITests/Fixtures/desktop-reference-detail.json",
+      "runtime": "iOS 27.0 (com.apple.CoreSimulator.SimRuntime.iOS-27-0)",
+      "ciRun": "https://github.com/themartianapp/herdrup/actions/runs/41049693045",
+      "locale": "en_US",
+      "timeZone": "GMT",
+      "timeZoneOffsetSeconds": 0,
+      "calendar": "gregorian",
+      "mock": "chatview",
+      "captureTest": "DesktopDetailReferenceShots/testNativeChatAndTerminalReferences()"
+    },
+    {
+      "file": "ref-ipad-pro-13-detail-host-selection.png",
+      "state": "detail-host-selection",
+      "device": "ipad-pro-13",
+      "simulator": "iPad Pro 13-inch (M5)",
+      "points": {
+        "width": 1376,
+        "height": 1032
+      },
+      "pixels": {
+        "width": 2752,
+        "height": 2064
+      },
+      "scale": 2,
+      "orientation": "landscape",
+      "appearance": "dark",
+      "dynamicTypeSize": "UICTContentSizeCategoryL",
+      "statusBar": {
+        "heightPoints": 32,
+        "safeAreaTopPoints": 32,
+        "override": "xcrun simctl status_bar <udid> override --time 9:41 --batteryLevel 100 --batteryState charged --cellularMode notSupported --wifiBars 3",
+        "date": "Fri Oct 30"
+      },
+      "mockClock": "2026-10-28T09:41:00Z",
+      "herdrupCommit": "1c21ad11929d6111ae578166e9f39e64f6abc3fd",
+      "fixtureSHA256": "38f1ec400fd95f3c6229d7390e157c9c7b42acc246387093ce01e478ab5e887a",
+      "sha256": "3f5766234286144ce1d3e4a64e96ed073ea3e715e305999de54dc145cdc27c12",
+      "fixture": "HerdrUITests/Fixtures/desktop-reference-detail.json",
+      "runtime": "iOS 27.0 (com.apple.CoreSimulator.SimRuntime.iOS-27-0)",
+      "ciRun": "https://github.com/themartianapp/herdrup/actions/runs/41049693045",
+      "locale": "en_US",
+      "timeZone": "GMT",
+      "timeZoneOffsetSeconds": 0,
+      "calendar": "gregorian",
+      "mock": "onboarding",
+      "captureTest": "DesktopDetailReferenceShots/testNativeSavedHostSelectionReference()"
+    },
+    {
+      "file": "ref-ipad-pro-13-detail-terminal.png",
+      "state": "detail-terminal",
+      "device": "ipad-pro-13",
+      "simulator": "iPad Pro 13-inch (M5)",
+      "points": {
+        "width": 1376,
+        "height": 1032
+      },
+      "pixels": {
+        "width": 2752,
+        "height": 2064
+      },
+      "scale": 2,
+      "orientation": "landscape",
+      "appearance": "dark",
+      "dynamicTypeSize": "UICTContentSizeCategoryL",
+      "statusBar": {
+        "heightPoints": 32,
+        "safeAreaTopPoints": 32,
+        "override": "xcrun simctl status_bar <udid> override --time 9:41 --batteryLevel 100 --batteryState charged --cellularMode notSupported --wifiBars 3",
+        "date": "Fri Oct 30"
+      },
+      "mockClock": "2026-10-28T09:41:00Z",
+      "herdrupCommit": "1c21ad11929d6111ae578166e9f39e64f6abc3fd",
+      "fixtureSHA256": "38f1ec400fd95f3c6229d7390e157c9c7b42acc246387093ce01e478ab5e887a",
+      "sha256": "5c68ddd15e8753293c2d8cff14f1c1ad3756ebda4eb52a744ac8ba7452908ecc",
+      "fixture": "HerdrUITests/Fixtures/desktop-reference-detail.json",
+      "runtime": "iOS 27.0 (com.apple.CoreSimulator.SimRuntime.iOS-27-0)",
+      "ciRun": "https://github.com/themartianapp/herdrup/actions/runs/41049693045",
+      "locale": "en_US",
+      "timeZone": "GMT",
+      "timeZoneOffsetSeconds": 0,
+      "calendar": "gregorian",
+      "mock": "chatview",
+      "captureTest": "DesktopDetailReferenceShots/testNativeChatAndTerminalReferences()"
+    },
+    {
+      "file": "ref-ipad-pro-13-detail-writer-collapsed.png",
+      "state": "detail-writer-collapsed",
+      "device": "ipad-pro-13",
+      "simulator": "iPad Pro 13-inch (M5)",
+      "points": {
+        "width": 1376,
+        "height": 1032
+      },
+      "pixels": {
+        "width": 2752,
+        "height": 2064
+      },
+      "scale": 2,
+      "orientation": "landscape",
+      "appearance": "dark",
+      "dynamicTypeSize": "UICTContentSizeCategoryL",
+      "statusBar": {
+        "heightPoints": 32,
+        "safeAreaTopPoints": 32,
+        "override": "xcrun simctl status_bar <udid> override --time 9:41 --batteryLevel 100 --batteryState charged --cellularMode notSupported --wifiBars 3",
+        "date": "Fri Oct 30"
+      },
+      "mockClock": "2026-10-28T09:41:00Z",
+      "herdrupCommit": "1c21ad11929d6111ae578166e9f39e64f6abc3fd",
+      "fixtureSHA256": "38f1ec400fd95f3c6229d7390e157c9c7b42acc246387093ce01e478ab5e887a",
+      "sha256": "d82c9d5d43b9e2d73aa8fcfed474bc7e9eb0db953a649d16cee3f420b16a1979",
+      "fixture": "HerdrUITests/Fixtures/desktop-reference-detail.json",
+      "runtime": "iOS 27.0 (com.apple.CoreSimulator.SimRuntime.iOS-27-0)",
+      "ciRun": "https://github.com/themartianapp/herdrup/actions/runs/41049693045",
+      "locale": "en_US",
+      "timeZone": "GMT",
+      "timeZoneOffsetSeconds": 0,
+      "calendar": "gregorian",
+      "mock": "chatview",
+      "captureTest": "DesktopDetailReferenceShots/testNativeInlineWriterReferences()"
+    },
+    {
+      "file": "ref-ipad-pro-13-detail-writer-expanded.png",
+      "state": "detail-writer-expanded",
+      "device": "ipad-pro-13",
+      "simulator": "iPad Pro 13-inch (M5)",
+      "points": {
+        "width": 1376,
+        "height": 1032
+      },
+      "pixels": {
+        "width": 2752,
+        "height": 2064
+      },
+      "scale": 2,
+      "orientation": "landscape",
+      "appearance": "dark",
+      "dynamicTypeSize": "UICTContentSizeCategoryL",
+      "statusBar": {
+        "heightPoints": 32,
+        "safeAreaTopPoints": 32,
+        "override": "xcrun simctl status_bar <udid> override --time 9:41 --batteryLevel 100 --batteryState charged --cellularMode notSupported --wifiBars 3",
+        "date": "Fri Oct 30"
+      },
+      "mockClock": "2026-10-28T09:41:00Z",
+      "herdrupCommit": "1c21ad11929d6111ae578166e9f39e64f6abc3fd",
+      "fixtureSHA256": "38f1ec400fd95f3c6229d7390e157c9c7b42acc246387093ce01e478ab5e887a",
+      "sha256": "ab729309e16b1433682d43ab129f7f9717941a9e65fb5dd1c57da352d9655a5a",
+      "fixture": "HerdrUITests/Fixtures/desktop-reference-detail.json",
+      "runtime": "iOS 27.0 (com.apple.CoreSimulator.SimRuntime.iOS-27-0)",
+      "ciRun": "https://github.com/themartianapp/herdrup/actions/runs/41049693045",
+      "locale": "en_US",
+      "timeZone": "GMT",
+      "timeZoneOffsetSeconds": 0,
+      "calendar": "gregorian",
+      "mock": "chatview",
+      "captureTest": "DesktopDetailReferenceShots/testNativeInlineWriterReferences()"
+    }
+  ]
+}

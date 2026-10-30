@@ -80,17 +80,22 @@ final class ChatViewTests: XCTestCase {
         let settings = app.buttons["Settings"].firstMatch
         XCTAssertTrue(settings.waitForExistence(timeout: 10))
         settings.tap()
-        if UIDevice.current.userInterfaceIdiom == .pad {
-            // The split view's "Text & typing" page holds it on iPad.
-            let page = app.buttons["Text & typing"].firstMatch
-            XCTAssertTrue(page.waitForExistence(timeout: 6))
-            page.tap()
-        }
-        let picker = app.segmentedControls["settings-omp-opens-in"]
+        // Preferences › "omp agents open in" is an inline menu picker on the root list
+        // (proposal B, #572): the iPhone root and the iPad sidebar alike.
+        let picker = app.buttons["settings-omp-opens-in"]
         XCTAssertTrue(picker.waitForExistence(timeout: 6), "Settings should offer the omp default")
-        XCTAssertTrue(picker.buttons["Chat"].isSelected, "Chat should be the default")
-        picker.buttons["Terminal"].tap()
-        XCTAssertTrue(picker.buttons["Terminal"].isSelected)
+        var scrolls = 0
+        while !app.frame.contains(picker.frame), scrolls < 6 {
+            app.swipeUp()
+            scrolls += 1
+        }
+        XCTAssertEqual(picker.value as? String, "Chat", "Chat should be the default")
+        picker.tap()
+        let terminalChoice = app.buttons["Terminal"].firstMatch
+        XCTAssertTrue(terminalChoice.waitForExistence(timeout: 5), "the menu should offer Terminal")
+        terminalChoice.tap()
+        XCTAssertTrue(poll(5, every: 0.3) { picker.value as? String == "Terminal" },
+                      "the picker should now read Terminal (got \(String(describing: picker.value)))")
         attach(app, "chat-settings")
 
         let terminalFirst = launch("chatview", ["HERDR_MOCK_CHAT_OPENS_IN": "terminal"])

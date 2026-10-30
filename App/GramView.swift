@@ -258,35 +258,35 @@ struct GramView: View {
     /// The opened file in its viewer (`gramFileViewer`): QuickLook, or the in-app viewer
     /// for a received web document.
     @State private var preview: GramPreview?
-    /// The in-flight file-open download (see `openFile`), cancelled when the page goes
-    /// away so a late completion can't strand a temp file after cleanup already ran.
-    @State private var openFileTask: Task<Void, Never>?
-    /// The in-flight export download, cancelled with the page for the same reason as
-    /// `openFileTask`.
-    @State private var saveFileTask: Task<Void, Never>?
+    /// The reader's open and save downloads, and the image prefetches, live OUTSIDE the
+    /// page (#574), in the connection's store (`RootView` holds it): leaving Gram for
+    /// Agents (a tab switch on iPhone, a section switch on iPad, which rebuilds this view)
+    /// must not end them. See `GramDownloadStore`.
+    @Environment(\.gramDownloads) private var downloads
+    /// The page's WAIT on the reader's download (`followHeldDownload`), not the download:
+    /// cancelled when the page goes off screen, so a late completion never presents a
+    /// viewer or an export picker over another tab, and started again when it comes back.
+    @State private var heldWait: Task<Void, Never>?
     /// The message id whose file the owner is opening or saving, to show its card's ring.
     /// One at a time; the image prefetch never takes this slot.
-    @State private var downloadingFileFor: String?
+    private var downloadingFileFor: String? { downloads.held?.id }
     #if DEBUG
     /// Bumped at each touch-down under the HERDR_REDRAW_ON_TOUCH mock knob: a page pass, as
     /// a poll landing mid-tap would make (DebugTouchRedraw).
     @State private var debugTouchRedraws = 0
     #endif
-    /// Bytes of the reply received so far for the in-flight download, against the
-    /// bytes expected. The owner's open fetches a file with `gram.get_file`, ONE base64
-    /// reply, so this counts SSH channel bytes — about 4/3 of the file — the only
-    /// progress that request gives. (`gram.get_file_chunk` exists; the guest page uses
-    /// it, this page does not.)
+    /// Bytes of the reply received so far for the reader's download, against the bytes
+    /// expected (`GramDownloadStore.Held.progress`). The owner's open fetches a file with
+    /// `gram.get_file`, ONE base64 reply, so this counts SSH channel bytes — about 4/3 of
+    /// the file — the only progress that request gives. (`gram.get_file_chunk` exists; the
+    /// guest page uses it, this page does not.)
     ///
     /// STAYS NIL UNTIL A CALLBACK ACTUALLY ARRIVES. Only the Citadel transport reports
     /// bytes; a mock or a local socket reports none, and seeding this from the file
     /// size alone would pin a determinate ring at 0% for the whole download, which is
     /// exactly the lying ring the spinning one exists to avoid. The card's ring spins
     /// while this is nil.
-    @State private var downloadBytes: (received: Int, total: Int)?
-    /// Every running file download by message id, so an open or save of an image the feed
-    /// is prefetching joins that transfer instead of starting a second.
-    @State private var fetches = Fetches()
+    private var downloadBytes: (received: Int, total: Int)? { downloads.held?.progress }
     /// Bounds the image prefetches running at once (`GramImagePreview`).
     @State private var prefetchSlots = AsyncSlots(limit: GramImagePreview.maxConcurrentPrefetches)
     /// A Gram file downloaded and staged for export through the system document
@@ -486,16 +486,23 @@ struct GramView: View {
             }
             .ignoresSafeArea()
         }
-        // Gram is a persistent tab: coming back picks up the uploads leaving it stopped.
-        .onAppear { uploader.resume() }
-        // Backstop: on the way out, cancel an in-flight file open, so a late completion
-        // can't strand a temp file after `gramFileViewer`'s cleanup already ran.
+        // Gram is a persistent tab: coming back picks up the uploads leaving it stopped,
+        // and waits again on a download the reader started before leaving (#574): its ring
+        // is back on the card and the file opens when it lands.
+        .onAppear {
+            uploader.resume()
+            followHeldDownload()
+        }
         .onDisappear {
             // Gram went off screen: the next time it shows, the "N unread" rule is captured
             // afresh instead of staying on a message read during this visit.
             unreadRuleCaptured = false
-            openFileTask?.cancel()
-            saveFileTask?.cancel()
+            // Stop WAITING on the reader's download, never the download (#574: this used to
+            // cancel it, so a switch to Agents lost it). It keeps running in the store and
+            // lands in the cache; a wait left running would present the viewer or the export
+            // picker over another tab, and strand a temp file after the viewer's cleanup ran.
+            heldWait?.cancel()
+            heldWait = nil
             // Leaving Gram stops its attachments' uploads (a send already waiting on one
             // keeps it); `onAppear` resumes them.
             uploader.pause()
@@ -1016,6 +1023,7 @@ struct GramView: View {
                 downloadBytes: downloadBytes,
                 onOpenFile: { s in openFile(id: s.id, expectedBytes: Self.expectedReplyBytes(for: s.file?.size ?? 0)) },
                 onSaveFile: { s in saveFile(id: s.id, expectedBytes: Self.expectedReplyBytes(for: s.file?.size ?? 0)) },
+                onCancelDownload: { s in cancelDownload(id: s.id) },
                 // UNSAVE DOES NOT EVICT. Unsaving stops keeping the message in the Saved
                 // tab; the message itself may still be in the inbox, and discarding its
                 // bytes here would re-download the next open — defeating the feature.
@@ -1234,6 +1242,7 @@ struct GramView: View {
                 fontScale: uiFontScale,
                 onOpenFile: { openFile(id: entry.message.id, expectedBytes: Self.expectedReplyBytes(for: entry.message.file?.size ?? 0)) },
                 onSaveFile: { saveFile(id: entry.message.id, expectedBytes: Self.expectedReplyBytes(for: entry.message.file?.size ?? 0)) },
+                onCancelDownload: { cancelDownload(id: entry.message.id) },
                 onPrefetchImage: { await prefetchImage(entry.message) },
                 onToggleSave: { savedGrams.toggle(entry.message) },
                 onDelete: { delete(entry.message) },
@@ -2156,23 +2165,55 @@ struct GramView: View {
             return
         }
 
-        downloadingFileFor = id
-        downloadBytes = nil
-        openFileTask = Task {
-            defer { downloadingFileFor = nil; downloadBytes = nil }
+        // The download is the connection's, not this page's (#574): it runs on through a
+        // switch to Agents and lands in the cache; the page only waits on it.
+        guard downloads.start(id: id, purpose: .open, expectedBytes: expectedBytes, transfer: transfer(id)) else { return }
+        followHeldDownload()
+    }
+
+    /// Waits on the reader's open or save and finishes it here when it lands: presents the
+    /// file, or hands it to the export picker. Run when the reader starts one and again each
+    /// time the page comes on screen, so a download started before a switch to Agents has
+    /// its ring back and opens when it lands (#574). Going off screen ends the WAIT, never
+    /// the download: one that lands while the reader is away is simply in the cache, and
+    /// the next tap opens it at once; one that failed meanwhile is reported on return.
+    private func followHeldDownload() {
+        if let failure = downloads.takeFailure() {
+            reportDownloadFailure(failure.error, purpose: failure.purpose)
+        }
+        guard let held = downloads.held else { return }
+        heldWait?.cancel()
+        let wait = downloads.join(id: held.id)
+        // Captured before the wait: a disconnect that wipes the cache meanwhile bumps it,
+        // and the export below must not write the payload back to disk after sign-out.
+        let epoch = Downloads.currentEpoch
+        heldWait = Task {
             do {
-                let fetched = try await download(id: id, expectedBytes: expectedBytes)
-                // The page went away mid-download (task cancelled in .onDisappear): stop
-                // before writing a temp file, so a late completion can't strand one.
+                // Reserve before scheduling this task: even an immediate cache fill
+                // must deliver the requested open/save to the active page.
+                guard let fetched = try await wait() else { return }
+                // The page went off screen as it landed: present nothing over another tab.
                 if Task.isCancelled { return }
-                present(data: fetched.data, name: fetched.name, mime: fetched.mime, cachedAt: fetched.cached?.url)
+                switch held.purpose {
+                case .open:
+                    present(data: fetched.data, name: fetched.name, mime: fetched.mime, cachedAt: fetched.cached?.url)
+                case .save:
+                    try stageExport(name: fetched.name, data: fetched.data, epoch: epoch)
+                }
             } catch is CancellationError {
-                // The page went away; nothing to report.
-            } catch let error as APIError {
-                sendError = "Couldn't open the file: \(error.message)"
+                // The page went off screen, or the download was cancelled: nothing to report.
             } catch {
-                sendError = "Couldn't open the file."
+                reportDownloadFailure(error, purpose: held.purpose)
             }
+        }
+    }
+
+    private func reportDownloadFailure(_ error: Error, purpose: GramDownloadStore.Purpose) {
+        let verb = purpose == .open ? "open" : "save"
+        if let error = error as? APIError {
+            sendError = "Couldn't \(verb) the file: \(error.message)"
+        } else {
+            sendError = "Couldn't \(verb) the file."
         }
     }
 
@@ -2216,53 +2257,47 @@ struct GramView: View {
             }
         }
 
-        downloadingFileFor = id
-        downloadBytes = nil
-        let epoch = Downloads.currentEpoch
-        // TRACKED, so the page's cleanup can cancel it. This task was untracked, which
-        // made its own `Task.isCancelled` check unreachable: nothing ever cancelled it.
-        saveFileTask = Task {
-            defer { downloadingFileFor = nil; downloadBytes = nil }
-            do {
-                let (name, _, data, _) = try await download(id: id, expectedBytes: expectedBytes)
-                if Task.isCancelled { return }
-                // The SAME window the epoch exists for applies to the export copy: the
-                // continuation can run after disconnect() wiped the cache but before
-                // SwiftUI delivers onDisappear, so Task.isCancelled is still false here.
-                // Writing the export dir then would leave the whole payload on disk
-                // after sign-out — the cache guard alone does not cover it.
-                guard Downloads.currentEpoch == epoch else { return }
-                // A per-export temp dir so the file keeps its real name (the picker uses
-                // the file's own name) without colliding with the preview temp file.
-                let dir = FileManager.default.temporaryDirectory
-                    .appendingPathComponent(UUID().uuidString, isDirectory: true)
-                try FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
-                let fileURL = dir.appendingPathComponent(GramStaging.safeFileName(name))
-                try data.write(to: fileURL, options: [.atomic, .completeFileProtection])
-                exportFile = ExportFile(url: fileURL, dir: dir)
-            } catch is CancellationError {
-                // The page went away; nothing to report.
-            } catch let error as APIError {
-                sendError = "Couldn't save the file: \(error.message)"
-            } catch {
-                sendError = "Couldn't save the file."
-            }
-        }
+        // The connection's download, as an open's (#574); `followHeldDownload` exports it.
+        guard downloads.start(id: id, purpose: .save, expectedBytes: expectedBytes, transfer: transfer(id)) else { return }
+        followHeldDownload()
     }
 
-    /// The message's file from the daemon, stored in the download cache, through the ONE
-    /// transfer running for that id: an open, a save and the image prefetch of the same
-    /// file share it (`Fetches`). Progress goes to `report`, which draws it only while the
-    /// owner's own open or save of this id runs, so a prefetch an open joins shows its
-    /// progress from then on.
-    private func download(id: String, expectedBytes: Int?) async throws -> Fetches.Fetched {
-        try await fetches.fetch(id: id) {
+    /// Hands downloaded bytes to the export picker under the file's real name.
+    private func stageExport(name: String, data: Data, epoch: Int) throws {
+        // The SAME window the epoch exists for applies to the export copy: the bytes can
+        // land after disconnect() wiped the cache but before the wait is cancelled. Writing
+        // the export dir then would leave the whole payload on disk after sign-out — the
+        // cache guard alone does not cover it.
+        guard Downloads.currentEpoch == epoch else { return }
+        // A per-export temp dir so the file keeps its real name (the picker uses the
+        // file's own name) without colliding with the preview temp file.
+        let dir = FileManager.default.temporaryDirectory
+            .appendingPathComponent(UUID().uuidString, isDirectory: true)
+        try FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
+        let fileURL = dir.appendingPathComponent(GramStaging.safeFileName(name))
+        try data.write(to: fileURL, options: [.atomic, .completeFileProtection])
+        exportFile = ExportFile(url: fileURL, dir: dir)
+    }
+
+    /// The reader's cancel of their own open or save (the message's menu): the transfer
+    /// ends, and the next open starts afresh.
+    private func cancelDownload(id: String) {
+        downloads.cancel(id: id)
+    }
+
+    /// The message's file from the daemon, stored in the download cache. Run by the
+    /// connection's `GramDownloadStore` as the ONE transfer for that id: an open, a save and
+    /// the image prefetch of the same file share it, and its progress draws on the card
+    /// while the reader's own open or save of this id runs. Captures the client, never the
+    /// page: it outlives the page.
+    private func transfer(_ id: String) -> GramDownloadStore.Transfer {
+        let client = client
+        return { report in
             let epoch = Downloads.currentEpoch
-            let (name, mime, data) = try await client.gramGetFile(id: id, onBytesReceived: { received in
-                Task { @MainActor in report(received, of: expectedBytes, for: id) }
-            })
-            // Every caller went away mid-download (each cancelled with its row or the
-            // page): stop before writing any file, so a late completion can't strand one.
+            let (name, mime, data) = try await client.gramGetFile(id: id, onBytesReceived: report)
+            // Cancelled (the reader's cancel, the session's end, or the last prefetch
+            // scrolled away): stop before writing any file, so a late completion can't
+            // strand one.
             try Task.checkCancellation()
             // Keep the bytes for next time. A failure here is not an error: an open
             // proceeds from a temp file and the next open simply downloads again. Written
@@ -2282,7 +2317,7 @@ struct GramView: View {
     /// The rules (`GramImagePreview`): images only, none over the size cap (those keep the
     /// placeholder until opened), at most two at once. It never takes `downloadingFileFor`,
     /// so an open or save of any file is never refused or delayed by it, and an open of
-    /// this image while it runs joins its transfer (`download`) rather than starting one.
+    /// this image while it runs adopts its transfer (`GramDownloadStore`) rather than starting one.
     private func prefetchImage(_ message: GramMessage) async {
         guard let file = message.file, GramImagePreview.shouldPrefetch(file),
               await Self.cachedOffMain(message.id) == nil
@@ -2296,7 +2331,7 @@ struct GramView: View {
         // An open may have cached it while this waited for a slot.
         guard await Self.cachedOffMain(message.id) == nil else { return }
         // A failure leaves the placeholder; a tap still opens normally.
-        _ = try? await download(id: message.id, expectedBytes: Self.expectedReplyBytes(for: file.size))
+        _ = try? await downloads.fetch(id: message.id, transfer: transfer(message.id))
     }
 
     /// `Downloads.cached` reads the file's metadata from disk: off the main thread on paths
@@ -2305,93 +2340,11 @@ struct GramView: View {
         await Task.detached(priority: .userInitiated) { Downloads.cached(id: id) }.value
     }
 
-    /// Apply one progress callback. Three rules the raw callback cannot enforce:
-    ///
-    /// - IDENTITY: a callback still in flight when the reader starts another download
-    ///   must not write into that one's bar, so it carries the id it began with.
-    /// - MONOTONIC: each chunk hops onto the main actor in its own task, and that
-    ///   enqueue order is not FIFO-guaranteed, so a late-landing smaller value would
-    ///   run the bar backwards. The received figure only ever grows.
-    /// - COALESCED: a 40 MB file is ~56 MB of base64 in ~32 KB chunks, i.e. ~1.7k
-    ///   callbacks, each of which would otherwise re-evaluate this whole page. One
-    ///   percent of the file is the smallest step worth a redraw; the final chunk
-    ///   always lands so the bar reaches its end.
-    @MainActor
-    private func report(_ received: Int, of expected: Int?, for id: String) {
-        guard downloadingFileFor == id, let total = expected, total > 0 else { return }
-        let clamped = min(received, total)
-        if let current = downloadBytes {
-            guard clamped >= current.received + total / 100 || clamped >= total else { return }
-        }
-        downloadBytes = (max(clamped, downloadBytes?.received ?? 0), total)
-    }
-
     /// The reply size to expect for a file of `size` bytes, in WIRE bytes: base64
     /// inflates it by 4/3 and the JSON envelope adds a few hundred.
     static func expectedReplyBytes(for size: UInt64) -> Int? {
         guard size > 0 else { return nil }
         return Int(Double(size) * 4.0 / 3.0) + 512
-    }
-
-    /// The running file downloads, one per message id, shared by everyone who wants that
-    /// file: the image prefetch, an open and a save. A cancelled caller stops waiting at
-    /// once; the transfer itself is cancelled only when no caller is left waiting on it, so
-    /// a prefetch scrolled away while an open waits on its transfer leaves it running.
-    @MainActor
-    final class Fetches {
-        typealias Fetched = (name: String, mime: String, data: Data, cached: CachedGramFile?)
-
-        @MainActor
-        private final class Entry {
-            var waiters: [UUID: CheckedContinuation<Fetched, Error>] = [:]
-            var task: Task<Void, Never>?
-        }
-
-        private var entries: [String: Entry] = [:]
-
-        nonisolated init() {}
-
-        /// Waits on the transfer running for `id`, starting it with `start` if none is.
-        func fetch(id: String, start: @escaping @MainActor () async throws -> Fetched) async throws -> Fetched {
-            let waiter = UUID()
-            return try await withTaskCancellationHandler {
-                try await withCheckedThrowingContinuation { (continuation: CheckedContinuation<Fetched, Error>) in
-                    if Task.isCancelled {
-                        continuation.resume(throwing: CancellationError())
-                        return
-                    }
-                    let entry = entries[id] ?? begin(id: id, start: start)
-                    entry.waiters[waiter] = continuation
-                }
-            } onCancel: {
-                Task { @MainActor in self.leave(waiter, id: id) }
-            }
-        }
-
-        private func begin(id: String, start: @escaping @MainActor () async throws -> Fetched) -> Entry {
-            let entry = Entry()
-            entries[id] = entry
-            entry.task = Task { @MainActor in
-                let result: Result<Fetched, Error>
-                do { result = .success(try await start()) } catch { result = .failure(error) }
-                // Freed first, so a fetch after a failure starts afresh.
-                if entries[id] === entry { entries[id] = nil }
-                let waiters = entry.waiters.values
-                entry.waiters = [:]
-                for waiter in waiters { waiter.resume(with: result) }
-            }
-            return entry
-        }
-
-        /// A cancelled caller stops waiting; the last one out ends the transfer.
-        private func leave(_ waiter: UUID, id: String) {
-            guard let entry = entries[id], let continuation = entry.waiters.removeValue(forKey: waiter) else { return }
-            continuation.resume(throwing: CancellationError())
-            if entry.waiters.isEmpty {
-                entries[id] = nil
-                entry.task?.cancel()
-            }
-        }
     }
 
     /// Downloaded gram files, kept so a second open does not re-fetch over SSH.
@@ -2461,12 +2414,11 @@ struct GramView: View {
         /// Sign-out and account removal: downloaded bytes must not survive the account
         /// that could read them.
         ///
-        /// The epoch is bumped FIRST. `disconnect()` is synchronous and cancels nothing:
-        /// the only cancellation is the Gram page's `onDisappear`, which SwiftUI runs
-        /// during the teardown that `disconnect()` itself triggers — strictly after this
-        /// has already returned. So a download whose bytes have landed can reach `store`
-        /// after the wipe. Bumping first makes that store a no-op, and `store` re-checks
-        /// afterwards so a write that slipped through is removed again.
+        /// The epoch is bumped FIRST. `disconnect()` then cancels the connection's
+        /// downloads (`GramDownloadStore.cancelAll`), but cancellation is cooperative: a
+        /// download whose bytes have already landed can still reach `store` after the
+        /// wipe. Bumping first makes that store a no-op, and `store` re-checks afterwards
+        /// so a write that slipped through is removed again.
         static func invalidate() {
             lock.withLock { epoch += 1 }
             GramFileCache.removeAll(in: root)
@@ -2736,6 +2688,7 @@ private struct GramSavedFeed: View {
     let downloadBytes: (received: Int, total: Int)?
     let onOpenFile: (SavedGram) -> Void
     let onSaveFile: (SavedGram) -> Void
+    let onCancelDownload: (SavedGram) -> Void
     let onUnsave: (SavedGram) -> Void
 
     /// How many of the newest saved messages are drawn. Grows by a window per arrival at the
@@ -2801,6 +2754,7 @@ private struct GramSavedFeed: View {
                         downloadProgress: downloadingFileFor == s.id ? downloadBytes : nil,
                         onOpenFile: { onOpenFile(s) },
                         onSaveFile: { onSaveFile(s) },
+                        onCancelDownload: { onCancelDownload(s) },
                         onUnsave: { onUnsave(s) }
                     )
                     .accessibilityElement(children: .contain)
@@ -2963,6 +2917,9 @@ struct GramRow: View, Equatable {
     var fontScale: Double = 1
     var onOpenFile: () -> Void
     var onSaveFile: () -> Void
+    /// Ends the reader's own open or save of this file (`GramDownloadStore.cancel`): it
+    /// outlives the page now, so leaving no longer stops it (#574). The owner's only.
+    var onCancelDownload: () -> Void = {}
     /// Fetches the image attachment into the download cache without opening it (see
     /// `GramView.prefetchImage`); returns when it is cached, refused or failed.
     var onPrefetchImage: () async -> Void
@@ -3112,11 +3069,16 @@ struct GramRow: View, Equatable {
     }
 
     /// The message's one menu, on every part of it (the attachment cards included): the
-    /// file's Save to Files, then the message actions.
+    /// file's Save to Files (or, while the reader's download of it runs, its cancel), then
+    /// the message actions.
     @StableMenuBuilder
     private var menu: [StableMenuItem] {
         if message.file != nil && viewer == .owner {
-            StableMenuItem("Save to Files", systemImage: "square.and.arrow.down", action: onSaveFile)
+            if isDownloadingFile {
+                StableMenuItem("Cancel Download", systemImage: "xmark.circle", action: onCancelDownload)
+            } else {
+                StableMenuItem("Save to Files", systemImage: "square.and.arrow.down", action: onSaveFile)
+            }
         }
         if !message.text.isEmpty {
             StableMenuItem("Copy", systemImage: "doc.on.doc") {
@@ -3267,7 +3229,7 @@ struct GramRow: View, Equatable {
     }
 
     static func age(from date: Date) -> String {
-        let seconds = max(0, Date().timeIntervalSince(date))
+        let seconds = max(0, GramDates.clockNow().timeIntervalSince(date))
         switch seconds {
         case ..<60: return "now"
         case ..<3600: return "\(Int(seconds / 60))m"

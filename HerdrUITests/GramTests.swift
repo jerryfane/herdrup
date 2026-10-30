@@ -1174,6 +1174,50 @@ final class GramTests: XCTestCase {
                       "the open fetched the zip itself; probe says \(calls.label)")
     }
 
+    /// #574: a download started in Gram keeps going while the reader is on Agents. The zip
+    /// (g2) is held in flight for 20 s (`HERDR_MOCK_GRAM_FILE_DELAY`); the reader opens it,
+    /// goes to Agents (the phone's tab bar, the iPad's sidebar) and comes back. The card's
+    /// ring is still there, the file opens when its bytes land, and the daemon was asked for
+    /// it ONCE: the page going off screen used to cancel the download, so it never landed and
+    /// the reader had to tap again, which asked again.
+    func testADownloadKeepsGoingWhileTheReaderIsOnAgents() {
+        let app = launchGram(environment: ["HERDR_MOCK_GRAM_FILE_DELAY": "g2=20"])
+        let file = attachmentCard(app, message: "g2")
+        XCTAssertTrue(file.waitForExistence(timeout: 10), "the zip should draw as a file card")
+        reveal(file, in: app, older: false)
+        file.tap()
+        let downloading = NSPredicate(format: "value BEGINSWITH %@", "Downloading")
+        XCTAssertTrue(waitForPredicate(downloading, object: file, timeout: 5),
+                      "the card should show its download; value \(file.value ?? "nil")")
+        let calls = probe(app, "gram-get-file-calls")
+        XCTAssertTrue(waitForGetFileCalls(calls, "g2", 1, timeout: 5),
+                      "the open asked the daemon for the zip; probe says \(calls.label)")
+
+        // The phone's tab bar, or the iPad's sidebar (where the page is rebuilt per section).
+        let sections: XCUIElement = hasSidebar ? app : app.tabBars.firstMatch
+        let agents = sections.buttons["Agents"].firstMatch
+        XCTAssertTrue(agents.waitForExistence(timeout: 5))
+        agents.tap()
+        let covered = NSPredicate(format: "exists == false OR hittable == false")
+        XCTAssertTrue(waitForPredicate(covered, object: file, timeout: 5), "Agents should cover Gram")
+        // Long enough for the page's teardown to have run, well inside the 20 s hold.
+        Thread.sleep(forTimeInterval: 2)
+        sections.buttons["Gram"].firstMatch.tap()
+
+        XCTAssertTrue(file.waitForExistence(timeout: 10), "back on Gram, the zip's card is drawn")
+        XCTAssertTrue(waitForPredicate(downloading, object: file, timeout: 5),
+                      "back on Gram, the download's ring is on the card again; value \(file.value ?? "nil")")
+        let opened = probe(app, "gram-opened-file")
+        // Any name: the mock answers every non-image file with the same fixture.
+        XCTAssertTrue(waitForLabel(opened, matching: "opened:.+", timeout: 40),
+                      "the download should finish and open the zip; probe says \(opened.label)")
+        // Past the probe's poll, so a second request would show.
+        Thread.sleep(forTimeInterval: 1)
+        XCTAssertTrue(waitForGetFileCalls(calls, "g2", 1, timeout: 1),
+                      "the download must not have started again; probe says \(calls.label)")
+        attach(app, "gram-download-after-agents")
+    }
+
     /// iPad/Mac: the sidebar lists Gram's two conversations, Gram selected, and selecting Saved
     /// swaps the feed in place (the mock inbox's senders leave; Saved holds only local copies,
     /// and no test saves one). Selecting Gram brings them back.
