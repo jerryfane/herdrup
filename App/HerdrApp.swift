@@ -107,6 +107,10 @@ struct RootView: View {
     @State private var openGuest: GuestAccess?
     /// Whether launch already decided to open the only shared machine.
     @State private var didAutoOpenGuest = false
+    /// The connection's Gram downloads (#574): here, above the tab view and the split view,
+    /// so a download started on the Gram page keeps going on Agents. Cancelled when the
+    /// connection goes (`disconnect`, `reconnect`, `switchSession`).
+    @State private var gramDownloads = GramDownloadStore()
 
     #if DEBUG
     /// One stable driver instance for the whole stress-test process. Recreating it
@@ -134,6 +138,7 @@ struct RootView: View {
             #endif
         }
         .preferredColorScheme(.dark)
+        .environment(\.gramDownloads, gramDownloads)
         .fullScreenCover(item: $invites.pending) { pending in
             inviteAccept(pending.invite)
         }
@@ -648,6 +653,9 @@ struct RootView: View {
         // Downloaded gram files are readable without a connection, so they must not
         // survive the session that fetched them.
         GramView.Downloads.invalidate()
+        // And the downloads still running end with it (#574: they outlive the Gram page,
+        // not the connection). After the epoch bump, so one landing now is refused.
+        gramDownloads.cancelAll()
     }
 
     /// Drops and re-establishes the connection with the RETAINED credentials —
@@ -658,6 +666,9 @@ struct RootView: View {
         guard let creds = credentials else { return }
         let closing = transport
         Task { await closing?.close() }
+        // The running Gram downloads ride the closed transport: end them, so the page
+        // offers a fresh open on the new connection instead of a ring that only fails.
+        gramDownloads.cancelAll()
         let newTransport = CitadelTransport(credentials: creds, hostKeyPolicy: pins)
         let newClient = HerdrClient(transport: newTransport)
         transport = newTransport
@@ -688,6 +699,8 @@ struct RootView: View {
         transport = scoped
         client = newClient
         session += 1
+        // Another herdr server, whose message ids are not these: the downloads go too.
+        gramDownloads.cancelAll()
         registerPush(with: newClient, credentials: creds)      // each session is its own herdr server
         registerActivityPush(with: newClient)
     }
