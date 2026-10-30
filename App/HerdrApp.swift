@@ -129,7 +129,14 @@ struct RootView: View {
         return Group {
             #if DEBUG
             if let mock = ScreenshotMock.mode {
-                mockView(mock)
+                if ProcessInfo.processInfo.environment["HERDR_DESKTOPREF_CAPTURE"] == "1" {
+                    let _ = DesktopReferenceMock.prepared
+                    mockView(mock)
+                        .transaction { $0.disablesAnimations = true; $0.animation = nil }
+                        .overlay(alignment: .topLeading) { DesktopReferenceProbe().frame(width: 1, height: 1) }
+                } else {
+                    mockView(mock)
+                }
             } else {
                 liveContent
             }

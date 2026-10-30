@@ -32,3 +32,25 @@ A method a state has no key for is refused as `unknown_method`.
 | `desktop-reference-avatar.png` | `e4d4139d5914062cd06d5b6cbd8ade1d5fddf83c20ee575d4d83b8d81de38a4a` |
 
 `desktop-reference-avatar.png` is atlas's uploaded picture in the avatars state: a 256×256, 16-colour PNG of 559 bytes (a sunset over water). `desktop-reference-avatars.json` carries the same bytes as base64 under that sha256, and `DesktopReferenceShots` checks both before the launch. Like the roster above, change these only together with the sha256 here, in the test and in the manifest, and the references.
+
+## desktop-reference-detail.json
+
+Synthetic capture inputs for `DesktopDetailReferenceShots`, sha256
+`38f1ec400fd95f3c6229d7390e157c9c7b42acc246387093ce01e478ab5e887a`.
+The file supplies quiet-mock environment flags, an unsent writer draft and three
+reserved `.example.invalid` saved-host metadata rows. Host metadata is supplied
+through the launch argument domain; no Keychain entry or SSH connection is created.
+
+These screenshots use the real `chatview` and `onboarding` surfaces, not the
+control/resize harness. The transcript and terminal output are built-in fixtures
+in `App/ChatMockTranscript.swift` and `MockTransport` at the image's recorded source
+commit; this JSON is not claimed to contain that daemon output. Chat fixture dates
+and separators honor the pinned clock. The writer's software keyboard is dismissed
+through its real Collapse keyboard action before collapsed/expanded capture.
+
+Run `ci.yml` with `only_suite=DesktopDetailReferenceShots`, `only_device=ipad` for both
+reference sizes. It exports Chat, Terminal, collapsed writer, expanded writer and
+saved-host selection images. The saved-host chooser is connection home, not the
+Settings federation list or a fabricated connected-host dropdown. Images remain
+pending until the native run and visual inspection pass; existing54 PNGs are unchanged.
+

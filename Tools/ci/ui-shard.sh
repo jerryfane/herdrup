@@ -347,7 +347,7 @@ sys.exit(1 if missing else 0)
 # rounds on the device see the real status bar.
 DESKTOP_REFERENCE_STATUS_BAR=(--time 9:41 --batteryLevel 100 --batteryState charged
   --cellularMode notSupported --wifiBars 3)
-DESKTOP_REFERENCE_CLASSES=(DesktopReferenceShots DesktopGramReferenceShots DesktopSettingsReferenceShots)
+DESKTOP_REFERENCE_CLASSES=(DesktopReferenceShots DesktopGramReferenceShots DesktopSettingsReferenceShots DesktopDetailReferenceShots)
 desktop_reference_round() {
   local label="$1" udid="$2" bundle_id class round status=0
   shift 2
@@ -603,7 +603,7 @@ case "$shard" in
       ipad|ipad-pro-13) label=iPad; udid="$IPAD_UDID" ;;
       *)    label=iPhone; udid="$IPHONE_UDID" ;;
     esac
-    if [[ "$ONLY_SUITE" = DesktopReferenceShots || "$ONLY_SUITE" = DesktopGramAndSettingsReferences || "$ONLY_SUITE" = DesktopGramReferenceShots || "$ONLY_SUITE" = DesktopSettingsReferenceShots || "$ONLY_SUITE" = DesktopGramReferenceShots/* || "$ONLY_SUITE" = DesktopSettingsReferenceShots/* ]]; then
+    if [[ "$ONLY_SUITE" = DesktopReferenceShots || "$ONLY_SUITE" = DesktopGramAndSettingsReferences || "$ONLY_SUITE" = DesktopGramReferenceShots || "$ONLY_SUITE" = DesktopSettingsReferenceShots || "$ONLY_SUITE" = DesktopDetailReferenceShots || "$ONLY_SUITE" = DesktopGramReferenceShots/* || "$ONLY_SUITE" = DesktopSettingsReferenceShots/* || "$ONLY_SUITE" = DesktopDetailReferenceShots/* ]]; then
       if [ "$label" != iPad ]; then
         echo "::error::desktop reference groups require only_device=ipad or ipad-pro-13"
         exit 1

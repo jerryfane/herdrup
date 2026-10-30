@@ -51,7 +51,7 @@ class DesktopReferenceCaptureCase: XCTestCase {
     /// state's fixture, desktop-reference-<served>.json; nil serves the desktop's agents.json.
     func launch(
         _ state: String, served name: String? = nil, sha256 expectedSHA256: String? = nil,
-        environment: [String: String] = [:]
+        environment: [String: String] = [:], arguments: [String] = []
     ) throws -> (XCUIApplication, String) {
         guard UIDevice.current.userInterfaceIdiom == .pad else {
             throw XCTSkip("the desktop references are iPad screenshots")
@@ -78,6 +78,7 @@ class DesktopReferenceCaptureCase: XCTestCase {
             "-UIPreferredContentSizeCategoryName", Self.contentSize,
             "-AppleLanguages", "(en)", "-AppleLocale", "en_US",
         ]
+        app.launchArguments += arguments
         app.launch()
 
         let probe = app.otherElements["desktopref-probe"]
@@ -188,6 +189,7 @@ class DesktopReferenceCaptureCase: XCTestCase {
         var fields = conditions(app.otherElements["desktopref-probe"])
         fields["state"] = state
         fields["device"] = device
+        fields["mock"] = app.launchEnvironment["HERDR_SCREENSHOT_MOCK"]
         fields["fixture"] = served.map { "desktop-reference-\($0.name).json" } ?? "\(Self.fixtureName).json"
         fields["fixtureSHA256"] = served?.sha256 ?? Self.fixtureSHA256
         fields["pixels"] = "\(pixels.0)x\(pixels.1)"
