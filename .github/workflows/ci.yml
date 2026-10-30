@@ -1,348 +1,67 @@
-# Simulator compile-check, shared-terminal interaction receipts, and core tests.
-# PR/manual only: no signing secrets or release uploads.
-name: CI
+name: Gram real Citadel Linux evidence
 
+# Temporary evidence-branch replacement of the registered CI workflow. Never merge.
 on:
-  # PULL REQUESTS, NOT EVERY PUSH.
-  #
-  # Full simulator CI runs for PRs, not every work-in-progress branch push.
-  # Standard hosted runners are free for this public repository, but macOS concurrency
-  # is limited. Avoid duplicate runs and cancel superseded PR heads below.
-  # Protected main requires the aggregate device gate plus the Linux/font checks.
-  # workflow_dispatch remains available for deliberate full or focused runs.
-  pull_request:
-    paths-ignore:
-      - "**/*.md"
-      - "docs/**"
-      - ".github/ISSUE_TEMPLATE/**"
-      - "LICENSE"
-  # A FOCUSED DISPATCH MODE, so one suite can be iterated without paying for the full
-  # matrix: `only_suite` runs just that class on the iPhone destination and skips the
-  # iPad rounds and the package regressions. A PR run is unaffected — the automatic
-  # trigger carries no inputs, so the full matrix remains the gate.
   workflow_dispatch:
-    inputs:
-      only_suite:
-        description: "Run only this HerdrUITests class (e.g. TerminalControlTests). Empty runs the full matrix."
-        required: false
-        default: ""
-      only_device:
-        description: "Destination for a focused run: iphone or ipad. DesktopReferenceShots on ipad runs on both reference iPads (13-inch and 11-inch)."
-        required: false
-        default: "iphone"
 
-concurrency:
-  group: ci-${{ github.ref }}
-  cancel-in-progress: true
+permissions:
+  contents: read
 
 jobs:
-  # THE 369 HerdrKit TESTS, WHICH UNTIL NOW RAN NOWHERE (herdrup#189).
-  #
-  # ci.yml built the app and ran the XCUITest and never invoked `swift test`, so every
-  # test under Tests/HerdrKitTests was written, maintained and executed by nothing —
-  # including the wire-protocol tests, which are the ones where silence is expensive: a
-  # wrong CodingKey decodes as nil rather than throwing, so the app quietly loses a field
-  # instead of failing. A failing test also sat unnoticed on main because of this.
-  #
-  # It needs no macOS runner. HerdrKit is pure Swift with no UI framework, so it builds
-  # and tests on Linux in about 40 seconds — the cheapest job in the repo, on the runner
-  # class that is free for public repositories.
-  herdrkit:
-    name: HerdrKit and SwiftTerm (Linux)
+  evidence:
+    name: Real Citadel / ${{ matrix.app }} app / both servers
     runs-on: ubuntu-latest
     container: swift:6.1
-    steps:
-      - name: Checkout
-        uses: actions/checkout@v4
-
-      # LoginShellCommandTests runs the app's SSH exec commands through every login
-      # shell it finds, because sshd hands them to the ACCOUNT's shell and a fish
-      # account broke every channel (herdrup#276). The container has only sh, bash
-      # and dash; without these the test skips the shells that actually broke.
-      - name: Install login shells
-        run: |
-          apt-get update -qq
-          DEBIAN_FRONTEND=noninteractive apt-get install -y -qq --no-install-recommends fish zsh tcsh csh
-
-      - name: Build
-        run: swift build
-
-      - name: Test
-        run: swift test
-
-      - name: Test vendored SwiftTerm core
-        run: swift test --package-path Vendor/SwiftTerm
-
-
-  # The shipped symbol font is a PRIVATE-USE-ONLY SUBSET of the upstream Nerd Fonts
-  # artifact, because no cascade ordering can be right while the font also maps 14
-  # non-private-use codepoints — see Tools/subset-symbols-font.py for the two bugs that
-  # proved it. A committed binary nobody can re-derive is indistinguishable from a
-  # hand-edited one, so this re-runs the subset over the retained upstream input and
-  # fails if the bytes differ.
-  #
-  # ITS OWN JOB, on the plain runner, NOT a step in the Swift job: the `swift:6.1`
-  # container carries no python3, so as a step there it exited 127 and turned the Linux
-  # job red on this PR. Nothing here needs Swift, and nothing in Swift needs this.
-  #
-  # The design-token check rides on this job for the same reason: it needs python3 and
-  # git, not Swift, and this is the cheapest job that has them.
-  symbol-font-subset:
-    name: Symbol font is the upstream subset
-    runs-on: ubuntu-latest
-    steps:
-      - name: Checkout
-        uses: actions/checkout@v4
-
-      - name: Verify the symbol font is the upstream subset
-        run: |
-          set -euo pipefail
-          python3 -m venv /tmp/fontenv
-          # PINNED: this compares sha256 byte-exactly, so an unpinned fontTools would
-          # turn a future upstream release into a red X on unrelated PRs.
-          /tmp/fontenv/bin/pip install --quiet 'fonttools==4.65.0'
-          /tmp/fontenv/bin/python Tools/subset-symbols-font.py \
-            Tools/upstream/SymbolsNerdFontMono-Regular.ttf --check
-
-      # App/Generated/DesignTokens.swift is written from design/tokens.json (shared with
-      # Herdrup Desktop) by Tools/tokens/generate.py. Regenerate it and fail if the
-      # committed copy differs, so the JSON and the Swift the app builds cannot drift.
-      - name: Verify the design tokens are generated
-        run: |
-          set -euo pipefail
-          python3 Tools/tokens/generate.py
-          if ! git diff --exit-code -- App/Generated \
-            || [ -n "$(git status --porcelain --untracked-files=all -- App/Generated)" ]; then
-            git status --short -- App/Generated
-            echo "::error::App/Generated is stale: edit design/tokens.json, run python3 Tools/tokens/generate.py, commit both."
-            exit 1
-          fi
-
-  # THE DEVICE SUITE, AS PARALLEL SIMULATOR JOBS. It used to be one serial job: the
-  # iPhone suite (~45 min of tests), then the iPad rounds (~25 min) waiting behind it,
-  # ~90 min per green run and 2-3 h whenever a failure triggered a whole-suite rerun.
-  # Each shard builds for itself, which is cheaper than shipping DerivedData between
-  # jobs. Booting the simulator during the build was measured to slow both on the
-  # 3-CPU runner (build 11-14 min against 3 min), so the boot waits for the build.
-  # Tools/ci/ui-shard.sh defines what each shard runs. The settings-gram shard builds
-  # its own optimized Distribution app instead (herdrup#416). Four macOS jobs stay under
-  # the account's limit of five concurrent macOS jobs, which other repos share.
-  uitest:
-    name: ui (${{ matrix.shard }})
-    runs-on: macos-latest
+    timeout-minutes: 30
     strategy:
-      # Every shard reports its own evidence even when another shard fails.
       fail-fast: false
       matrix:
-        shard: ${{ fromJSON(github.event.inputs.only_suite == '' && '["iphone-terminal","iphone-app","ipad","settings-gram"]' || '["focused"]') }}
-    # Worst test/build rounds (iPad), including Chat UX and Gram column: 25 + 20 + 5 + 5 + 20 + 10,
-    # SwiftTerm build 10 + test 15, six 10-min diagnostic rounds + SwiftTerm's 15 = 185m.
-    # At most nine boot checks: first 10m, next eight 5m, each with 15s kill grace.
-    # That adds <53m, leaving >17m for setup/build/upload inside the 255m ceiling.
-    # The deadline is a failure ceiling, not the expected green-run duration.
-    timeout-minutes: 255
-    env:
-      SHARD: ${{ matrix.shard }}
-      ONLY_SUITE: ${{ github.event.inputs.only_suite }}
-      ONLY_DEVICE: ${{ github.event.inputs.only_device }}
+        include:
+          - app: baseline
+            ref: 9876878edea599b347a9788c387107775d848fdc
+          - app: current
+            ref: ea7f4f5c9c505f449c592b18c6bd05c1d5d7f7f3
     steps:
-      - uses: actions/checkout@v4
-
-      - name: Record native runner capacity
-        run: |
-          printf 'Runner: %s; environment: %s; OS: %s\n' "${RUNNER_NAME:-unknown}" "${RUNNER_ENVIRONMENT:-unknown}" "${RUNNER_OS:-unknown}"
-          df -Pk "$GITHUB_WORKSPACE"
-
-      # SwiftTerm is vendored; cache any remaining resolved remote packages.
-      # xcodebuild re-resolves against the generated project's package settings.
-      - name: Cache Swift packages
-        uses: actions/cache@v4
+      - name: Checkout temporary evidence harness
+        uses: actions/checkout@v4
         with:
-          path: SourcePackages
-          key: spm-${{ runner.os }}-${{ hashFiles('project.yml') }}
-          restore-keys: |
-            spm-${{ runner.os }}-
+          path: evidence
+          persist-credentials: false
 
-      - name: Select Xcode and assert the iOS SDK
-        run: |
-          echo "Xcodes present:"; ls -d /Applications/Xcode*.app || true
-          LATEST=$(ls -d /Applications/Xcode*.app | sort -V | tail -1)
-          echo "selecting: $LATEST"; sudo xcode-select -s "$LATEST"; xcodebuild -version
-          SDK=$(xcodebuild -showsdks | grep -oE 'iphonesimulator[0-9.]+' | sed 's/iphonesimulator//' | sort -V | tail -1)
-          echo "newest iOS simulator SDK: ${SDK:-<none>}"
-
-      - name: Download the Metal toolchain
-        # SwiftTerm >=1.12.0 bundles Apple/Metal/Shaders.metal unconditionally; Xcode 26
-        # ships the Metal shader compiler as a separate component. Idempotent — a no-op
-        # if already present. Without it `CompileMetalFile` fails.
-        run: |
-          xcodebuild -downloadComponent MetalToolchain 2>&1 | tail -20 || \
-            echo "::warning::-downloadComponent MetalToolchain returned nonzero (may already be present); continuing"
-
-      - name: Install XcodeGen
-        # Skip Homebrew's auto-update (it re-indexes every formula on a cold runner,
-        # a minute-plus of pure overhead) — we only need the already-bottled xcodegen.
-        # coreutils supplies `gtimeout`, which bounds each test invocation below;
-        # macOS ships no `timeout` of its own.
-        run: HOMEBREW_NO_AUTO_UPDATE=1 brew install xcodegen coreutils
-
-      - name: Generate project
-        run: xcodegen generate
-
-      - name: Select required iPhone and iPad simulators
-        id: simulators
-        run: |
-          xcrun simctl list devices available --json > SimulatorDevices.json
-          python3 - <<'PY'
-          import json, os, re
-          with open("SimulatorDevices.json") as source:
-              devices = json.load(source)["devices"]
-          runtimes = [
-              (tuple(map(int, match.group(1).split("-"))), name)
-              for name in devices
-              if (match := re.fullmatch(r"com\.apple\.CoreSimulator\.SimRuntime\.iOS-(\d+(?:-\d+)*)", name))
-              and any(device.get("isAvailable", True) for device in devices[name])
-          ]
-          if not runtimes:
-              raise SystemExit("::error::no available iOS simulator runtime")
-          _, runtime = max(runtimes)
-          available = [device for device in devices[runtime] if device.get("isAvailable", True)]
-          phones = [device for device in available if device["name"].startswith("iPhone")]
-          pads = [device for device in available if device["name"].startswith("iPad")]
-          if not phones or not pads:
-              raise SystemExit(f"::error::{runtime} requires both an iPhone and an iPad; no substitute or skip")
-          ipad = next(
-              (device for device in pads if "iPad Pro" in device["name"] and "13-inch" in device["name"]),
-              pads[0],
-          )
-          # Herdrup Desktop's second reference size (DesktopReferenceShots): an 1180x820 pt
-          # iPad at @2x. The iPad Air 11-inch is that size, and so is the base iPad (A16);
-          # the iPad Pro 11-inch is not (1210x834).
-          ipad11 = next(
-              (device for device in pads if device["name"].startswith("iPad Air 11-inch")),
-              next((device for device in pads if device["name"].startswith("iPad (A16)")), None),
-          )
-          if ipad11 is None:
-              raise SystemExit(f"::error::{runtime} has no 1180x820 iPad (iPad Air 11-inch or iPad (A16)); no substitute or skip")
-          with open(os.environ["GITHUB_ENV"], "a") as output:
-              for key, device in [("IPHONE_UDID", phones[0]), ("IPAD_UDID", ipad), ("IPAD11_UDID", ipad11)]:
-                  output.write(f"{key}={device['udid']}\n")
-                  print(f"{runtime}: {key}={device['udid']} ({device['name']})")
-          PY
-
-      # Reuse only a successful optimized BUILD on a rerun of this exact run/head.
-      # No restore prefix and no test-result caching: the regression and crash guard
-      # always execute. Products include the .xctestrun and test-host bundles.
-      - name: Identify the optimized build toolchain
-        if: matrix.shard == 'settings-gram'
-        id: settings_toolchain
-        run: |
-          XCODE=$(xcodebuild -version)
-          SDK=$(xcrun --sdk iphonesimulator --show-sdk-build-version)
-          OS=$(sw_vers -buildVersion)
-          KEY=$(printf '%s\n' "$XCODE" "$SDK" "$OS" "$RUNNER_ARCH" "$GITHUB_WORKSPACE" | shasum -a 256 | cut -d ' ' -f 1)
-          echo "key=$KEY" >> "$GITHUB_OUTPUT"
-
-      - name: Restore this run's optimized build products
-        if: matrix.shard == 'settings-gram'
-        id: settings_products
-        uses: actions/cache/restore@v4
+      - name: Checkout exact production app source
+        uses: actions/checkout@v4
         with:
-          path: .build-dd-settings-stack/Build/Products
-          key: settings-products-v1-${{ github.run_id }}-${{ github.sha }}-${{ steps.settings_toolchain.outputs.key }}
+          ref: ${{ matrix.ref }}
+          path: app
+          persist-credentials: false
 
-      - name: Build optimized app and tests for simulator
-        if: matrix.shard == 'settings-gram' && steps.settings_products.outputs.cache-hit != 'true'
-        run: Tools/ci/ui-shard.sh settings-build
-
-      # Save before testing: a failing test must not discard a valid build, but a
-      # failed build must never be published. Reruns still test the complete shard.
-      - name: Save optimized build products for this run's reruns
-        if: matrix.shard == 'settings-gram' && steps.settings_products.outputs.cache-hit != 'true'
-        uses: actions/cache/save@v4
-        with:
-          path: .build-dd-settings-stack/Build/Products
-          key: ${{ steps.settings_products.outputs.cache-primary-key }}
-
-      # Every shard needs the Debug app: settings-gram runs GramTests on it after its
-      # optimized Settings regression.
-      - name: Build app and tests for simulator (SwiftTerm 1.15.0 + Metal)
+      - name: Install disposable SSH and sandbox dependencies
+        shell: bash
         run: |
-          set -o pipefail
-          xcodebuild build-for-testing \
-            -project Herdr.xcodeproj -scheme Herdr \
-            -destination "platform=iOS Simulator,id=${IPHONE_UDID}" \
-            -derivedDataPath .build-dd \
-            -clonedSourcePackagesDirPath SourcePackages \
-            CODE_SIGNING_ALLOWED=NO | xcbeautify || xcodebuild build-for-testing \
-            -project Herdr.xcodeproj -scheme Herdr \
-            -destination "platform=iOS Simulator,id=${IPHONE_UDID}" \
-            -derivedDataPath .build-dd \
-            -clonedSourcePackagesDirPath SourcePackages \
-            CODE_SIGNING_ALLOWED=NO
+          set -euo pipefail
+          # Do not let package installation start a system-wide sshd.
+          printf '#!/bin/sh\nexit 101\n' > /usr/sbin/policy-rc.d
+          chmod 755 /usr/sbin/policy-rc.d
+          apt-get update -qq
+          DEBIAN_FRONTEND=noninteractive apt-get install -y -qq --no-install-recommends \
+            openssh-server openssh-client python3 curl ca-certificates openssl \
+            procps util-linux tmux git
 
-      - name: Check the built bundle version
-        # READS THE BUILT PRODUCT, not the generated source plist. That distinction is
-        # the whole point: xcodegen writes the literal "$(MARKETING_VERSION)" into
-        # App/Info.plist and Xcode substitutes it during the build, so a source-plist
-        # check reports an unsubstituted variable and proves nothing about what ships.
-        # An earlier version of this step made exactly that mistake.
-        #
-        # The bug this exists for was invisible for months: nothing set
-        # CFBundleShortVersionString, so xcodegen wrote its own default "1.0" while
-        # project.yml said MARKETING_VERSION 0.1, and it surfaced only when Apple closed
-        # the 1.0 train (altool 90186) and every upload started failing. Comparing the
-        # BUILT value against project.yml proves the setting actually reaches the bundle.
+      - name: Build once and measure both disposable servers
+        shell: bash
+        env:
+          GRAM_EVIDENCE_EXPECTED_APP_SHA: ${{ matrix.ref }}
+          GRAM_EVIDENCE_APP_LABEL: ${{ matrix.app }}
         run: |
-          # build-for-testing also produces a runner .app, whose version is unrelated.
-          APP=.build-dd/Build/Products/Debug-iphonesimulator/Herdr.app
-          if [ ! -d "$APP" ]; then echo "::error::main app missing at $APP"; exit 1; fi
-          echo "built app: $APP"
-          BUILT=$(/usr/libexec/PlistBuddy -c 'Print :CFBundleShortVersionString' "$APP/Info.plist")
-          EXPECTED=$(grep -m1 'MARKETING_VERSION:' project.yml | sed 's/.*MARKETING_VERSION:[[:space:]]*//' | tr -d '" ')
-          echo "built CFBundleShortVersionString=$BUILT  project.yml MARKETING_VERSION=$EXPECTED"
-          if [ -z "$BUILT" ]; then echo "::error::built app has no CFBundleShortVersionString"; exit 1; fi
-          case "$BUILT" in
-            *'$('*) echo "::error::CFBundleShortVersionString did not substitute: $BUILT"; exit 1 ;;
-          esac
-          if [ "$BUILT" != "$EXPECTED" ]; then
-            echo "::error::built version ($BUILT) does not match project.yml MARKETING_VERSION ($EXPECTED) — the setting is not reaching the bundle"
-            exit 1
-          fi
+          bash evidence/Tools/ci/gram-real-citadel-evidence.sh \
+            "$GITHUB_WORKSPACE/app" "$GITHUB_WORKSPACE/evidence" \
+            "$GITHUB_WORKSPACE/gram-evidence"
 
-      - name: Run the ${{ matrix.shard }} device shard
-        run: Tools/ci/ui-shard.sh "$SHARD"
-
-      - name: Export simulator screenshots
-        if: always()
-        run: |
-          for bundle in TestReceipts/*.xcresult; do
-            [ -d "$bundle" ] || continue
-            xcrun xcresulttool export attachments --path "$bundle" \
-              --output-path "${bundle%.xcresult}-attachments"
-          done
-
-      - name: Upload terminal receipts and first-failure diagnostics
+      - name: Upload sanitized measurements only
         if: always()
         uses: actions/upload-artifact@v4
         with:
-          name: terminal-test-results-${{ matrix.shard }}
-          path: |
-            TestReceipts/
-            SimulatorDevices.json
-          if-no-files-found: ignore
-
-  # The required status check on main. It keeps the name the branch protection rule
-  # already requires, and passes only if every device shard passed.
-  build-and-uitest:
-    needs: uitest
-    if: always()
-    runs-on: ubuntu-latest
-    steps:
-      - name: Require every device shard to pass
-        run: |
-          if [ "${{ needs.uitest.result }}" != success ]; then
-            echo "::error::device shards: ${{ needs.uitest.result }}"
-            exit 1
-          fi
-          echo "all device shards passed"
+          name: gram-real-citadel-linux-${{ matrix.app }}-${{ github.run_id }}
+          path: gram-evidence/*.json
+          if-no-files-found: error
+          retention-days: 7
