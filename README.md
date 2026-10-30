@@ -184,6 +184,12 @@ The streaming upload channel requires macOS 15; macOS 14 keeps the per-chunk pat
 Tests that open the streaming channel skip on macOS 14, matching the production
 availability guard; teardown and never-started-channel checks still run there.
 
+The reconnect-history UI receipt recognizes the fixture's numbered history rows
+before and after real swipes, requiring earlier rows to become visible instead of
+requiring a fixed percentage of changed pixels. Update-retry coverage reads the
+retained failed state directly after its failure reason appears; it does not add
+a second short polling deadline to that already-observed state.
+
 SwiftTerm is vendored at [`Vendor/SwiftTerm`](Vendor/SwiftTerm), based on upstream v1.15.0,
 commit `dd2fb8ac5b861e7bf617c872895e338f38165648`. Local changes retain viewport anchors and terminal
 modes during geometry/font commits, preserve archived row widths when the app opts in, and expose
