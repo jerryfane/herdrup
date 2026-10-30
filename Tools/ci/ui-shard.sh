@@ -45,10 +45,25 @@ SETTINGS_PROJECT=(-project Herdr.xcodeproj -scheme Herdr -configuration Distribu
   ONLY_ACTIVE_ARCH=YES CODE_SIGNING_ALLOWED=NO)
 
 recorder=
+# BOUNDED: SIGINT asks the recorder to finish the video; one that never exits is killed
+# after 60 s. Run 40728450580's iPad shard (Xcode 27.1) logged "simulator ... failed to
+# become ready within 5m" for iPadResize while recordVideo ran, then nothing for four hours
+# until the 255m job timeout: its receipts hold a 0-byte terminal-resize-iPad.mp4 next to
+# an unfinished terminal-resize-iPad.mp4.sb-* temp file, so the recorder never exited and
+# the old bare `wait` here never returned.
 stop_recording() {
   if [ -n "$recorder" ]; then
     kill -INT "$recorder" 2>/dev/null || true
-    wait "$recorder" || true
+    local waited=0
+    while kill -0 "$recorder" 2>/dev/null && [ "$waited" -lt 60 ]; do
+      sleep 1
+      waited=$((waited + 1))
+    done
+    if kill -0 "$recorder" 2>/dev/null; then
+      echo "::warning::screen recorder $recorder did not stop within 60 s of SIGINT; killed (video incomplete)"
+      kill -KILL "$recorder" 2>/dev/null || true
+    fi
+    wait "$recorder" 2>/dev/null || true
     recorder=
   fi
 }
@@ -60,19 +75,75 @@ trap stop_recording EXIT
 # boot gets 10m; later readiness checks of the same device keep the shorter 5m.
 # Per device, because settings-gram cold-boots the iPad and then the iPhone.
 cold_booted=" "
+# Devices that bootstatus reported ready earlier in this job. A later round on one of them
+# asks CoreSimulator nothing: on Xcode 27, with the screen recorder running, the second
+# readiness check of an iPad that had just been reported ready hung its whole 5m in three
+# focused iPad runs in a row (40828227115, 40834877074 with empty logs; 40839462725, whose
+# stamped log shows the hang is the first command, `simctl list devices`, and a 60 s
+# bounded `simctl list` before it timed out too). Only `simctl shutdown` takes a device
+# out of this set (settings-gram, before its iPhone round); xcodebuild reports a device
+# that died some other way.
+ready_devices=" "
+# After bootstatus reports a device ready (and the screen recorder starts), CoreSimulator
+# can stop answering every simctl request for minutes on Xcode 27: the ipad shard of
+# 40827550901 waited 3.5 min for its second readiness check to print anything; focused
+# iPad runs waited past 5m in that check (above) and, with the check skipped, in
+# `simctl install` (40844294026, and 40822219713 / 40823615938 with no recorder at all).
+# So an install first waits until the service answers a cheap query. Each probe is
+# bounded so a wedged one is abandoned, and the busiest processes are logged while the
+# service is silent, as the receipt of what it is busy with. Free when it answers.
+service_settle_budget=900
+wait_for_simulator_service() {
+  local log="$1" start probe=0
+  start=$(date +%s)
+  while :; do
+    probe=$((probe + 1))
+    if "$TIMEOUT_BIN" --signal=TERM --kill-after=5s 30s xcrun simctl list devices >/dev/null 2>&1; then
+      echo "$(date -u +%FT%TZ) CoreSimulator answered after $(( $(date +%s) - start )) s ($probe probes)" | tee -a "$log"
+      return 0
+    fi
+    if [ $(( $(date +%s) - start )) -ge "$service_settle_budget" ]; then
+      echo "::error::CoreSimulator did not answer simctl within ${service_settle_budget}s of the boot; see $log"
+      return 1
+    fi
+    {
+      echo "$(date -u +%FT%TZ) probe $probe: simctl list did not answer in 30 s; busiest processes:"
+      ps -axo pid,etime,pcpu,rss,comm | sort -k3 -nr | head -8
+    } >>"$log" 2>&1
+  done
+}
 boot_simulator() {
   local udid="$1" log="$2" status=0 budget=10m
+  case "$ready_devices" in *" $udid "*)
+    echo "$(date -u +%FT%TZ) $udid was ready earlier in this job: no boot, no bootstatus" | tee "$log"
+    return 0
+    ;;
+  esac
   case "$cold_booted" in *" $udid "*) budget=5m ;; esac
   cold_booted="$cold_booted$udid "
+  # Each step is stamped in the log before it starts: simctl's own output is block-buffered
+  # into the pipe and lost when the timeout kills it, which left only empty logs to read.
   "$TIMEOUT_BIN" --signal=TERM --kill-after=15s "$budget" bash -c '
-    # An already-booted device rejects boot; bootstatus is the readiness authority.
-    xcrun simctl boot "$1" || true
+    # Boot only a device that is not booted; bootstatus is the readiness authority.
+    # On Xcode 27, `simctl boot` of an iPad that had just finished booting hung with no
+    # output: run 40728450580 (iPadResize-boot.log empty, "failed to become ready within
+    # 5m") and run 40774306376 with no recorder running ("IPAD-REC-DIAG norec-boot
+    # exit=124 secs=307"), while bootstatus on the same iPad answered "Device already
+    # booted". Xcode 26 rejected the same call at once ("Unable to boot device in current
+    # state: Booted"), which this used to rely on.
+    echo "$(date -u +%FT%TZ) simctl list devices"
+    if ! xcrun simctl list devices | grep -F "($1)" | grep -qF "(Booted)"; then
+      echo "$(date -u +%FT%TZ) simctl boot $1"
+      xcrun simctl boot "$1" || true
+    fi
+    echo "$(date -u +%FT%TZ) simctl bootstatus $1 -b"
     exec xcrun simctl bootstatus "$1" -b
   ' _ "$udid" 2>&1 | tee "$log" || status=$?
   if [ "$status" -ne 0 ]; then
     echo "::error::simulator $udid failed to become ready within $budget (exit $status); see $log"
     return 1
   fi
+  ready_devices="$ready_devices$udid "
 }
 
 # Installs the app under test after boot and before xcodebuild's first launch, and fails
@@ -96,15 +167,23 @@ install_app_under_test() {
     echo "::error::cannot read CFBundleIdentifier from $app"
     return 1
   }
+  echo "$(date -u +%FT%TZ) waiting for CoreSimulator to answer" >"$log"
+  wait_for_simulator_service "$log" || return 1
   start=$(date +%s)
-  echo "$(date -u +%FT%TZ) install $bundle_id from $app on $udid" >"$log"
+  echo "$(date -u +%FT%TZ) install $bundle_id from $app on $udid" >>"$log"
   if ! "$TIMEOUT_BIN" --signal=TERM --kill-after=15s 5m \
       xcrun simctl install "$udid" "$app" >>"$log" 2>&1; then
     echo "::error::installing $bundle_id on $udid failed or timed out; see $log"
     return 1
   fi
+  echo "$(date -u +%FT%TZ) simctl install returned after $(( $(date +%s) - start )) s" >>"$log"
   # simctl install returns when installd is done; the container proves the system has it.
-  if ! "$TIMEOUT_BIN" --signal=TERM --kill-after=15s 1m \
+  # 5m, as the install. Run 40728450580 (Xcode 27.1, first install after a cold boot) logged
+  # only the install line on two iPhones before "no app container ... (or the query timed
+  # out)", 169 s and 204 s after the install began. The query prints the path or an error,
+  # so an empty log means the old 1m bound killed it while the simulator was still busy;
+  # the same run's other cold-boot install took 186 s against 26-84 s on Xcode 26.
+  if ! "$TIMEOUT_BIN" --signal=TERM --kill-after=15s 5m \
       xcrun simctl get_app_container "$udid" "$bundle_id" app >>"$log" 2>&1; then
     echo "::error::$bundle_id has no app container on $udid after install (or the query timed out); see $log"
     return 1
@@ -112,10 +191,14 @@ install_app_under_test() {
   echo "$(date -u +%FT%TZ) installed in $(( $(date +%s) - start )) s" | tee -a "$log"
 }
 
-# Prints one -only-testing argument per failed test case in an .xcresult.
+# Prints one -only-testing argument per failed test case in an .xcresult. A runner that
+# crashes while bootstrapping is recorded as a failed "Test Case" named like
+# "HerdrUITests-Runner (21391) encountered an error" (run 40728450580, iPhoneStatusMotion);
+# passed to xcodebuild, it failed with "Unknown build action '(21391)'". Only Class/method
+# identifiers are tests to rerun.
 failed_tests() {
   xcrun xcresulttool get test-results tests --path "$1" 2>/dev/null | python3 -c '
-import json, sys
+import json, re, sys
 try:
     data = json.load(sys.stdin)
 except ValueError:
@@ -124,7 +207,9 @@ def walk(node, bundle):
     if node.get("nodeType") in ("UI test bundle", "Unit test bundle"):
         bundle = node.get("name")
     if node.get("nodeType") == "Test Case" and node.get("result") == "Failed" and bundle:
-        print("-only-testing:%s/%s" % (bundle, node["nodeIdentifier"].removesuffix("()")))
+        identifier = node["nodeIdentifier"].removesuffix("()")
+        if re.fullmatch(r"\w+/\w+", identifier):
+            print("-only-testing:%s/%s" % (bundle, identifier))
     for child in node.get("children", []):
         walk(child, bundle)
 for node in data.get("testNodes", []):
@@ -342,7 +427,11 @@ case "$shard" in
       -skip-testing:HerdrUITests/AgentFoldersTests -skip-testing:HerdrUITests/NeedsYouPillTests
       -skip-testing:HerdrUITests/ServerUpdateUITests -skip-testing:HerdrUITests/DesktopReferenceShots)
     for class in "${TERMINAL_CLASSES[@]}"; do skip+=("-skip-testing:HerdrUITests/$class"); done
-    run_suite iPhoneApp "$IPHONE_UDID" 30m -only-testing:HerdrUITests "${skip[@]}" || failed=1
+    # 40m: on the Xcode 27 image every class ran slower. Run 40728450580 logged "iPhoneApp
+    # exceeded its 30m budget" on its 79th case; its 69 cases that passed there and on
+    # Xcode 26 took 1738 s against 1351 s in run 40686976698 (x1.29), whose whole round
+    # took 25 min, so a green round now needs ~33 min.
+    run_suite iPhoneApp "$IPHONE_UDID" 40m -only-testing:HerdrUITests "${skip[@]}" || failed=1
     swiftterm_api iPhone "$IPHONE_UDID" || failed=1
     # Herdrup Desktop's 11-inch references; the 13-inch ones run in the ipad shard. This
     # shard had the most room (31 min against the ipad shard's 60 in run 40655871305).
@@ -454,6 +543,7 @@ case "$shard" in
     # ~17% slower runner) spent 21.7 min in 36 finished cases and hit the old 25m with
     # two cases left; 35m leaves room for the suite to grow.
     xcrun simctl shutdown "$IPAD_UDID" >/dev/null 2>&1 || true
+    ready_devices="${ready_devices/ $IPAD_UDID / }"
     run_suite iPhoneGram "$IPHONE_UDID" 35m -only-testing:HerdrUITests/GramTests || failed=1
     ;;
   focused)
@@ -466,10 +556,24 @@ case "$shard" in
       echo "::notice::focused dispatch: HerdrUITests/DesktopReferenceShots on both reference iPads"
       desktop_reference_round iPadDesktopReference "$IPAD_UDID" || failed=1
       xcrun simctl shutdown "$IPAD_UDID" >/dev/null 2>&1 || true
+      # A shut-down device must be booted and checked again by any later round.
+      ready_devices="${ready_devices/ $IPAD_UDID / }"
       desktop_reference_round iPad11DesktopReference "$IPAD11_UDID" || failed=1
     else
+      # The iPad as the ipad shard prepares it: boot, then the screen recorder, then the
+      # rounds. Focused iPad runs that went straight to the install (40822219713,
+      # 40823615938) hung in `simctl install` for its whole 5m on Xcode 27; the ipad shard,
+      # which starts the recorder first, installed the same build on the same device in
+      # 17 s (40794761077). The video is also the receipt a focused iPad run lacked.
+      if [ "$label" = iPad ]; then
+        boot_simulator "$udid" TestReceipts/iPad-focused-recording-boot.log || exit 1
+        xcrun simctl io "$udid" recordVideo TestReceipts/focused-iPad.mp4 \
+          > TestReceipts/focused-iPad-video.log 2>&1 &
+        recorder=$!
+      fi
       echo "::notice::focused dispatch: HerdrUITests/$ONLY_SUITE on $label only"
       run_suite "$label-$ONLY_SUITE" "$udid" 25m "-only-testing:HerdrUITests/$ONLY_SUITE" || failed=1
+      stop_recording
     fi
     ;;
   *)

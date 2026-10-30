@@ -88,6 +88,13 @@ struct LiveTerminalView: UIViewRepresentable {
     /// desktop to this device's width while nobody's looking; it re-takes the lock when fronted
     /// again. Only the lock lifecycle changes — the stream and the SwiftTerm view stay warm.
     var isForeground: Bool = true
+    /// Another surface (the Chat view) is drawn over this terminal, which stays mounted and
+    /// sized under it. The terminal view is then hidden: on iOS 27 neither SwiftUI's
+    /// `.accessibilityHidden` and `.opacity(0)` on the representable nor accessibility flags
+    /// written here keep it out of the accessibility hit test, where it answered for the chat
+    /// drawn above it. Hiding it stops nothing else: the stream, the emulator and the layout
+    /// (frames, PTY size) keep running, and it draws again when shown.
+    var accessibilityCovered: Bool = false
     /// Inactive or background (another app in front on Mac, Control Center, app switcher):
     /// the front pane's caret holds still too, like the status dot (#427).
     @Environment(\.scenePhase) private var scenePhase
@@ -196,6 +203,18 @@ struct LiveTerminalView: UIViewRepresentable {
     func makeCoordinator() -> Coordinator { Coordinator(client: client, paneID: paneID) }
 
     func makeUIView(context: Context) -> TerminalSurfaceView {
+        // ONE TERMINAL PER COORDINATOR. On iOS 27 SwiftUI can call makeUIView again for the
+        // same view identity, with the same Coordinator, while the first call is still
+        // running: building the terminal view below runs a nested graph update that makes
+        // the representable again (run 40790301938: `1341ms ix:b makeUIView`, `1399ms ix:b
+        // makeUIView`, then `1585ms attach hadSurface=false` from the nested call and `2069ms
+        // attach hadSurface=true` from the outer one, whose host is the one kept; the nested
+        // call's view is freed without dismantleUIView). Each attach started a `pane.stream`,
+        // so the pane opened twice and the second cancelled the first. The Coordinator's
+        // stream, emulator and geometry state belong to the surface it attached first, so a
+        // repeated call, nested or later, hands that surface back and SwiftUI moves it into
+        // the host it keeps.
+        if let mounted = context.coordinator.mountedSurface { return mounted }
         // BEFORE attach, which starts the stream and the geometry drain.
         context.coordinator.viewOnly = viewOnly
         context.coordinator.setPredictionMode(viewOnly ? .off : PredictiveEchoSetting.mode(predictiveEcho))
@@ -219,6 +238,9 @@ struct LiveTerminalView: UIViewRepresentable {
                                           userInputToken: userInputToken,
                                           loadEarlierHistoryToken: loadEarlierHistoryToken)
         surface.terminal.getTerminal().preservesScrollbackLayout = true
+        // The nested call described above has attached its own surface by now: keep that
+        // one (its stream is already open) and drop the view built here.
+        if let mounted = context.coordinator.mountedSurface { return mounted }
         context.coordinator.attach(surface)
         return surface
     }
@@ -253,6 +275,7 @@ struct LiveTerminalView: UIViewRepresentable {
         // while the scene is not active, holds its caret steady: the blink is a repeating
         // animation that keeps the window compositing (#427).
         terminalView.caretBlinkPaused = !isForeground || scenePhase != .active || Self.steadyCaret
+        terminalView.isHidden = accessibilityCovered
         context.coordinator.directFocusIntended = wantsTerminalKeyFocus && !viewOnly
         context.coordinator.performJumpToTail(ifTokenChanged: jumpToTailToken)
         context.coordinator.loadEarlierHistory(ifTokenChanged: loadEarlierHistoryToken)
@@ -344,6 +367,7 @@ struct LiveTerminalView: UIViewRepresentable {
 
     static func dismantleUIView(_ uiView: TerminalSurfaceView, coordinator: Coordinator) {
         coordinator.stop()
+        coordinator.mountedSurface = nil
     }
 
     /// Holds the terminal and, during a resize, the retained frame that covers it.
@@ -791,6 +815,9 @@ struct LiveTerminalView: UIViewRepresentable {
         /// The container that owns the terminal and the resize cover. Same object for
         /// this coordinator's whole life; the terminal is never rebuilt for a resize.
         private weak var surface: TerminalSurfaceView?
+        /// The surface `attach` was given, held strongly until `dismantleUIView`, so a repeated
+        /// `makeUIView` for this Coordinator can return it instead of building a second one.
+        fileprivate(set) var mountedSurface: TerminalSurfaceView?
         private var streamTask: Task<Void, Never>?
         /// The single serialized resize drain, if running. Only ever ONE at a time —
         /// it awaits each set_pty_size before the next (so remote resizes can't
@@ -1582,6 +1609,7 @@ struct LiveTerminalView: UIViewRepresentable {
             let view = surface.terminal
             self.view = view
             self.surface = surface
+            mountedSurface = surface
             view.allowsFocus = !viewOnly
             view.terminalDelegate = self
             prediction.attach(to: view)
