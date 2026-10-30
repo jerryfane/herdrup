@@ -2367,10 +2367,11 @@ struct TerminalHomeView: View {
     /// pill + the agents list; detail = the selected agent's LIVE TERMINAL (or Gram / Settings for
     /// those sections). Reuses the SAME views + terminal machinery as the phone layout — only the
     /// arrangement differs. iPhone / narrow width keeps the tab-bar-with-terminal-over layout.
-    private var iPadLayout: some View {
+    private var adaptiveLayout: some View {
         GeometryReader { geometry in
         agentActions(
-        NavigationSplitView(columnVisibility: $columnVisibility) {
+        NavigationSplitView(columnVisibility: $columnVisibility,
+                            preferredCompactColumn: .constant(.detail)) {
             ZStack {
                 Palette.ground.ignoresSafeArea()
                 VStack(spacing: 0) {
@@ -2475,7 +2476,7 @@ struct TerminalHomeView: View {
                 //
                 // No transition: a sliding rail animates the detail column's width, and
                 // every intermediate width reflows the live terminal (see `toggleSidebar`).
-                if columnVisibility == .detailOnly { sidebarRail }
+                if hSizeClass == .regular && columnVisibility == .detailOnly { sidebarRail }
                 detailColumn
             }
             // A floor under the detail column, so a window just wider than two columns keeps
@@ -2565,22 +2566,29 @@ struct TerminalHomeView: View {
     private var detailColumn: some View {
         ZStack(alignment: .topLeading) {
                 Palette.groundMachine.ignoresSafeArea()
-                // Base layer: the switch renders Gram / Settings and the agents placeholder.
-                // The terminal container is deliberately NOT in here — it is the
-                // always-mounted overlay below.
-                switch selectedTab {
-                case .agents:
-                    if frontID == nil {
-                        SelectAgentPlaceholder(lines: glyphFieldLines, spotlight: glyphFieldSpotlight)
+                // One tab tree and one terminal container survive compact/regular changes.
+                // Only the surrounding navigation chrome and the Agents list placement vary.
+                TabView(selection: tabSelection) {
+                    Group {
+                        if hSizeClass == .regular {
+                            SelectAgentPlaceholder(lines: glyphFieldLines, spotlight: glyphFieldSpotlight)
+                        } else {
+                            agentsTab
+                        }
                     }
-                case .gram:
+                    .tag(HomeTab.agents)
+                    .tabItem { Label(HomeTab.agents.label, systemImage: HomeTab.agents.icon) }
+
                     GramView(client: client, unread: gramUnread,
                              showingSaved: $gramShowingSaved,
                              refreshToken: gramRefreshToken,
                              readAllToken: gramReadAllToken,
                              searchText: $gramSearch,
                              newestToken: gramNewestToken)
-                case .settings:
+                        .tag(HomeTab.gram)
+                        .tabItem { Label(HomeTab.gram.label, systemImage: HomeTab.gram.icon) }
+                        .modifier(GramUnreadBadge(unread: gramUnread))
+
                     SettingsView(
                         client: client,
                         agents: agents,
@@ -2588,15 +2596,15 @@ struct TerminalHomeView: View {
                         connected: error == nil && !loading,
                         canReconnect: rejectedFingerprint == nil,
                         onReconnect: onReconnect,
-                        detail: settingsAnchor ?? .machines,
+                        detail: hSizeClass == .regular ? (settingsAnchor ?? .machines) : nil,
                         serverUpdate: serverUpdate)
+                        .tag(HomeTab.settings)
+                        .badge(settingsBadge)
+                        .tabItem { Label(HomeTab.settings.label, systemImage: HomeTab.settings.icon) }
                 }
-                // Keep-mounted terminal container, hoisted ABOVE the `switch` so switching to
-                // Settings/Gram never removes it from the view tree. Previously it lived inside
-                // `case .agents`, so navigating away unmounted every pane and closed its
-                // pane.stream — which is what forced a full reconnect/reload on return. Now it
-                // mirrors the phone's sibling overlay (`:1297`): visible + interactive only when
-                // an agent pane is fronted, otherwise fully inert, and the panes stay warm.
+                .tint(Palette.text)
+                .toolbar(hSizeClass == .regular ? .hidden : .visible, for: .tabBar)
+                // A hidden front pane drops key focus and the PTY lock without unmounting.
                 PaneKeepAliveContainer(
                     client: client, slots: slots, frontID: frontID,
                     // Hidden behind Settings/Gram (frontID stays set here) → not presented, so
@@ -2605,7 +2613,9 @@ struct TerminalHomeView: View {
                     onClose: { frontID = nil; Task { await load() } },
                     onNavigate: { slot, delta in navigate(from: slot, delta: delta) })
                     .opacity(selectedTab == .agents && frontID != nil ? 1 : 0)
+                    .offset(x: selectedTab == .agents && frontID != nil ? 0 : 40)
                     .allowsHitTesting(selectedTab == .agents && frontID != nil)
+                    .animation(.easeOut(duration: 0.26), value: selectedTab == .agents && frontID != nil)
         }
     }
 
@@ -3119,73 +3129,7 @@ struct TerminalHomeView: View {
         // Observe the text-size setting so the home re-renders at the new
         // `Typography.scale` on change (identity unchanged → @State preserved).
         let _ = uiFontScale
-        return Group {
-            if hSizeClass == .regular {
-                iPadLayout
-            } else {
-            ZStack {
-            // Apple's standard tab bar (Liquid Glass automatically on iOS 26, the clean
-            // standard bar below that) replaces the old hand-built pill (#88). Terminal
-            // is NOT a tab — it fronts a keep-mounted pane over everything (below).
-            TabView(selection: tabSelection) {
-                agentsTab
-                    .tag(HomeTab.agents)
-                    .tabItem { Label(HomeTab.agents.label, systemImage: HomeTab.agents.icon) }
-
-                // Gram and Settings were modal covers; they are persistent tabs now.
-                // Both are nav-agnostic and take no onClose as tabs (no close button).
-                GramView(client: client, unread: gramUnread,
-                         showingSaved: $gramShowingSaved,
-                         newestToken: gramNewestToken)
-                    .tag(HomeTab.gram)
-                    .tabItem { Label(HomeTab.gram.label, systemImage: HomeTab.gram.icon) }
-                    .modifier(GramUnreadBadge(unread: gramUnread))
-
-                SettingsView(
-                    client: client,
-                    agents: agents,
-                    host: host,
-                    connected: error == nil && !loading,
-                    // Withhold reconnect during a host-key rejection — reconnecting then
-                    // would first-contact-trust the next key (same gate as the recovery
-                    // screen's withheld retry).
-                    canReconnect: rejectedFingerprint == nil,
-                    onReconnect: onReconnect,
-                    serverUpdate: serverUpdate)
-                    .tag(HomeTab.settings)
-                    .badge(settingsBadge)
-                    .tabItem { Label(HomeTab.settings.label, systemImage: HomeTab.settings.icon) }
-            }
-            .tint(Palette.text)
-            // Recently-opened terminals kept MOUNTED so reopening + swiping between them is
-            // instant (nothing torn down or re-streamed). Overlays the list: a fronted pane
-            // covers it and captures touches; otherwise the overlay is fully inert.
-            PaneKeepAliveContainer(
-                client: client, slots: slots, frontID: frontID,
-                // Always presented on iPhone: a fronted pane covers the whole screen and the
-                // tab bar hides, so there is no foreground-while-hidden state to guard against.
-                isPresented: true,
-                onClose: { frontID = nil; Task { await load() } },
-                onNavigate: { slot, delta in navigate(from: slot, delta: delta) })
-                .opacity(frontID != nil ? 1 : 0)
-                // Ease the list<->terminal transition instead of a hard cut: the terminal
-                // slides in from the right (and back out on close) while it fades. We animate
-                // the `frontID` STATE, not a gesture, so BOTH entry points — the header
-                // chevron and the left-edge swipe (EdgeSwipeBack fires a discrete onClose) —
-                // get the same motion, and neither EdgeSwipeBack nor the pane's
-                // foreground/PTY handoff is touched. Only nil<->non-nil animates; paging
-                // between panes (frontID stays non-nil) is unaffected.
-                .offset(x: frontID != nil ? 0 : 40)
-                .allowsHitTesting(frontID != nil)
-                // Key the animation on the BOOLEAN (shown vs not), NOT on frontID itself:
-                // frontID also changes when swipe-paging A->B (both non-nil), and
-                // `value: frontID` would fire the animation into the subtree then —
-                // cross-fading the inner pane swap and disturbing the paging XCUITest.
-                // `frontID != nil` only flips on the list<->terminal open/close.
-                .animation(.easeOut(duration: 0.26), value: frontID != nil)
-            }
-            }
-        }
+        return adaptiveLayout
         #if DEBUG
         .overlay(alignment: .topLeading) {
             if ScreenshotMock.mode != nil { StatusMotionProbe() }
