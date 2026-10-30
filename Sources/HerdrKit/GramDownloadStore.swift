@@ -37,6 +37,8 @@ public final class GramDownloadStore {
     public typealias Report = @Sendable (_ received: Int) -> Void
     /// Fetches a file, keeps it in the download cache, and returns it.
     public typealias Transfer = @MainActor (_ report: @escaping Report) async throws -> Fetched
+    /// A page reserves this synchronously, then waits in its cancellable page task.
+    public typealias Wait = @MainActor () async throws -> Fetched?
 
     /// What the reader asked for when they started the download.
     public enum Purpose: Sendable, Equatable {
@@ -105,6 +107,7 @@ public final class GramDownloadStore {
         var kept = false
         /// The waiters that are a page's `join`, which reports a failure; a prefetch does not.
         var joined: Set<UUID> = []
+        var result: Result<Fetched?, Error>?
     }
 
     private var entries: [String: Entry] = [:]
@@ -112,7 +115,8 @@ public final class GramDownloadStore {
     /// own ring, never one a later open of the same file started.
     private var heldEntry: Entry?
     /// See `takeFailure`.
-    private var unreported: Failure?
+    private var unreported: (entry: Entry, failure: Failure)?
+    private var sessionGeneration = 0
 
     public nonisolated init() {}
 
@@ -137,16 +141,24 @@ public final class GramDownloadStore {
     /// cancelled caller stops waiting at once (CancellationError); the transfer is cancelled
     /// when no caller is left waiting on it, unless the reader's open or save keeps it.
     public func fetch(id: String, transfer: @escaping Transfer) async throws -> Fetched {
+        try Task.checkCancellation()
         // Never nil: the transfer is started when none runs.
-        guard let fetched = try await wait(id: id, starting: transfer) else { throw CancellationError() }
+        let entry = entries[id] ?? begin(id: id, transfer: transfer)
+        guard let fetched = try await wait(entry: entry, id: id, joining: false) else { throw CancellationError() }
         return fetched
     }
 
-    /// Waits on the transfer running for `id`; nil at once when none is (it has ended: its
-    /// bytes are in the cache, or it failed). Leaving (the caller cancelled) never ends a
-    /// held download.
-    public func join(id: String) async throws -> Fetched? {
-        try await wait(id: id, starting: nil)
+    /// Reserves the current transfer synchronously, before scheduling the page task.
+    /// The returned wait retains its result if it finishes before that task runs. Once
+    /// the wait is released, successful bytes are retained only by the download cache.
+    /// A reservation made after completion returns nil; it never starts another transfer.
+    public func join(id: String) -> Wait {
+        let entry = entries[id]
+        let generation = sessionGeneration
+        return {
+            guard self.sessionGeneration == generation else { throw CancellationError() }
+            return try await self.wait(entry: entry, id: id, joining: true)
+        }
     }
 
     /// The reader's explicit cancel: ends the transfer for `id` whoever waits on it. Every
@@ -160,13 +172,14 @@ public final class GramDownloadStore {
     /// The session ended (disconnect, sign-out, another session): every transfer stops,
     /// and an unreported failure from that connection must not follow the reader into the next.
     public func cancelAll() {
+        sessionGeneration += 1
         for id in Array(entries.keys) { cancel(id: id) }
         unreported = nil
     }
 
     // MARK: - Transfers
 
-    private func wait(id: String, starting transfer: Transfer?) async throws -> Fetched? {
+    private func wait(entry: Entry?, id: String, joining: Bool) async throws -> Fetched? {
         let waiter = UUID()
         return try await withTaskCancellationHandler {
             try await withCheckedThrowingContinuation { (continuation: CheckedContinuation<Fetched?, Error>) in
@@ -174,15 +187,22 @@ public final class GramDownloadStore {
                     continuation.resume(throwing: CancellationError())
                     return
                 }
-                guard let entry = entries[id] ?? transfer.map({ begin(id: id, transfer: $0) }) else {
+                guard let entry else {
                     continuation.resume(returning: nil)
                     return
                 }
+                if let result = entry.result {
+                    if joining, unreported?.entry === entry { unreported = nil }
+                    continuation.resume(with: result)
+                    return
+                }
                 entry.waiters[waiter] = continuation
-                if transfer == nil { entry.joined.insert(waiter) }
+                if joining { entry.joined.insert(waiter) }
             }
         } onCancel: {
-            Task { @MainActor in self.leave(waiter, id: id) }
+            Task { @MainActor in
+                if let entry { self.leave(waiter, entry: entry, id: id) }
+            }
         }
     }
 
@@ -211,11 +231,12 @@ public final class GramDownloadStore {
     /// Resumes every waiter with `result` and clears the ring if it is this transfer's. The
     /// held download's failure with nobody waiting is kept for `takeFailure`.
     private func end(_ entry: Entry, with result: Result<Fetched?, Error>) {
+        entry.result = result
         if heldEntry === entry, let shown = storedHeld {
             heldEntry = nil
             held = nil
             if entry.joined.isEmpty, case .failure(let error) = result, !(error is CancellationError) {
-                unreported = Failure(id: shown.id, purpose: shown.purpose, error: error)
+                unreported = (entry, Failure(id: shown.id, purpose: shown.purpose, error: error))
             }
         }
         let waiters = entry.waiters
@@ -227,16 +248,16 @@ public final class GramDownloadStore {
     /// coming back reports it rather than the download vanishing without a word.
     public func takeFailure() -> Failure? {
         defer { unreported = nil }
-        return unreported
+        return unreported?.failure
     }
 
     /// A cancelled caller stops waiting; the last one out ends a transfer nobody keeps.
-    private func leave(_ waiter: UUID, id: String) {
-        guard let entry = entries[id], let continuation = entry.waiters.removeValue(forKey: waiter) else { return }
+    private func leave(_ waiter: UUID, entry: Entry, id: String) {
+        guard let continuation = entry.waiters.removeValue(forKey: waiter) else { return }
         entry.joined.remove(waiter)
         continuation.resume(throwing: CancellationError())
         guard entry.waiters.isEmpty, !entry.kept else { return }
-        entries[id] = nil
+        if entries[id] === entry { entries[id] = nil }
         entry.task?.cancel()
     }
 

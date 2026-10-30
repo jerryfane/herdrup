@@ -307,6 +307,10 @@ in the message menu to stop it explicitly. Disconnecting, reconnecting, or switc
 sessions also cancels running downloads and discards errors deferred while you were away,
 so the next connection cannot show the previous connection's download failure. This lifetime
 applies to the owner's Gram; guest file downloads still stop when their page disappears.
+The active page reserves its result before scheduling its wait, so an immediate completion
+still opens or exports the file. The reservation owns those bytes only while the page waits;
+the store does not keep completed successful payloads after the page leaves. Sign-out also
+invalidates a completed reservation before it can be presented.
 
 Gram's composer is the terminal's: attach, mic and send sit where they do in a pane. Type @ to
 send to one agent: a “Send to one agent” list opens above the composer, and picking one puts a

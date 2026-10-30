@@ -39,7 +39,7 @@ These are pixel-exact screenshots of herdrup's Agents home on iPad, in landscape
 
    When only Gram/Settings capture actions change, `only_suite=DesktopGramAndSettingsReferences` captures those two classes on both devices without repeating accepted agent-list captures. Preserve each image's actual source head and CI run; every image in a delivered set must still use the same runtime and capture conditions. Settings uses the synthetic connected host `reference-hub`, not a live connection.
 
-   A single Gram state can be regenerated on both pinned devices with a method selector, for example `only_suite=DesktopGramReferenceShots/testGramSavedReference` and `only_device=ipad`. Its receipt name replaces the selector's slash with a hyphen; the class-presence check remains required.
+   Bare `DesktopGramReferenceShots` and `DesktopSettingsReferenceShots` selectors capture only that class with the same clean install, status-bar override and execution check. Either class also accepts a method selector, for example `only_suite=DesktopGramReferenceShots/testGramSavedReference`. With `only_device=ipad`, both pinned devices run; receipt names replace the method selector's slash with a hyphen. Reference selectors reject iPhone rather than producing skipped captures.
    Use `only_device=ipad-pro-13` to replace only a failed 13-inch capture while retaining an already accepted 11-inch image. The default `ipad` still runs both; neither mode retries a failed round or hides its result.
 
 2. Download the attachments:

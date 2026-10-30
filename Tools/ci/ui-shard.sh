@@ -603,7 +603,7 @@ case "$shard" in
       ipad|ipad-pro-13) label=iPad; udid="$IPAD_UDID" ;;
       *)    label=iPhone; udid="$IPHONE_UDID" ;;
     esac
-    if [[ "$ONLY_SUITE" = DesktopReferenceShots || "$ONLY_SUITE" = DesktopGramAndSettingsReferences || "$ONLY_SUITE" = DesktopGramReferenceShots/* ]]; then
+    if [[ "$ONLY_SUITE" = DesktopReferenceShots || "$ONLY_SUITE" = DesktopGramAndSettingsReferences || "$ONLY_SUITE" = DesktopGramReferenceShots || "$ONLY_SUITE" = DesktopSettingsReferenceShots || "$ONLY_SUITE" = DesktopGramReferenceShots/* || "$ONLY_SUITE" = DesktopSettingsReferenceShots/* ]]; then
       if [ "$label" != iPad ]; then
         echo "::error::desktop reference groups require only_device=ipad or ipad-pro-13"
         exit 1
@@ -612,7 +612,7 @@ case "$shard" in
       reference_classes=("${DESKTOP_REFERENCE_CLASSES[@]}")
       if [ "$ONLY_SUITE" = DesktopGramAndSettingsReferences ]; then
         reference_classes=(DesktopGramReferenceShots DesktopSettingsReferenceShots)
-      elif [[ "$ONLY_SUITE" = DesktopGramReferenceShots/* ]]; then
+      elif [[ "$ONLY_SUITE" != DesktopReferenceShots ]]; then
         reference_classes=("$ONLY_SUITE")
       fi
       echo "::notice::focused dispatch: $ONLY_SUITE on ${ONLY_DEVICE:-ipad}"

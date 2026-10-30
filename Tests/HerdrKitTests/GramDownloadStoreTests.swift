@@ -57,7 +57,8 @@ final class GramDownloadStoreTests: XCTestCase {
     /// The page's wait on a download, as `GramView` runs it: a task the page cancels when it
     /// goes off screen.
     private func page(_ store: GramDownloadStore, _ id: String) -> Task<GramDownloadStore.Fetched?, Error> {
-        Task { @MainActor in try await store.join(id: id) }
+        let wait = store.join(id: id)
+        return Task { @MainActor in try await wait() }
     }
 
     /// A card's image prefetch: a task the card cancels when it scrolls away.
@@ -119,8 +120,68 @@ final class GramDownloadStoreTests: XCTestCase {
         XCTAssertEqual(started, ["g2"], "from the one transfer: nothing started again")
         XCTAssertNil(store.held, "the ring goes when the file lands")
         XCTAssertFalse(store.isRunning("g2"))
-        let after = try await store.join(id: "g2")
+        let after = try await store.join(id: "g2")()
         XCTAssertNil(after, "nothing to join once it has landed: the file is in the cache")
+    }
+
+    /// The active page reserves before it schedules its wait. A fast transfer can
+    /// finish in between; both Open and Save must still receive the actual file.
+    func testAReservedPageReceivesCompletionBeforeItStartsWaiting() async throws {
+        for purpose in [GramDownloadStore.Purpose.open, .save] {
+            let store = GramDownloadStore()
+            store.start(id: "fast", purpose: purpose, expectedBytes: nil) { _ in
+                ("fast.zip", "application/zip", Data("payload".utf8), nil)
+            }
+            let wait = store.join(id: "fast")
+            await until("the transfer finishes before the page waits") { !store.isRunning("fast") }
+            let fetched = try await wait()
+            XCTAssertEqual(fetched?.name, "fast.zip")
+            XCTAssertEqual(fetched?.data, Data("payload".utf8))
+            XCTAssertNil(store.held)
+        }
+    }
+
+    func testAReservedPageReceivesFailureBeforeItStartsWaitingOnce() async {
+        let store = GramDownloadStore()
+        store.start(id: "fast", purpose: .save, expectedBytes: nil) { _ in throw Refused() }
+        let wait = store.join(id: "fast")
+        await until("the failure precedes the page wait") { !store.isRunning("fast") }
+        do {
+            _ = try await wait()
+            XCTFail("The active page must receive the failure")
+        } catch {
+            XCTAssertTrue(error is Refused)
+        }
+        XCTAssertNil(store.takeFailure(), "The page already received the error")
+    }
+
+    func testAReservedAdoptedPrefetchDeliversItsCompletedFile() async throws {
+        let store = GramDownloadStore()
+        let card = prefetch(store, "adopted")
+        await until("prefetch is in flight") { pending["adopted"] != nil }
+        store.start(id: "adopted", purpose: .open, expectedBytes: nil, transfer: transfer("adopted"))
+        let wait = store.join(id: "adopted")
+        await finish("adopted")
+        _ = try await card.value
+        let fetched = try await wait()
+        XCTAssertEqual(fetched?.data, Data("adopted".utf8))
+        XCTAssertEqual(started, ["adopted"], "Adoption must not duplicate the transfer")
+    }
+
+    func testSignOutInvalidatesACompletedPageReservation() async {
+        let store = GramDownloadStore()
+        store.start(id: "fast", purpose: .save, expectedBytes: nil) { _ in
+            ("private.zip", "application/zip", Data("private".utf8), nil)
+        }
+        let wait = store.join(id: "fast")
+        await until("the file lands before sign-out") { !store.isRunning("fast") }
+        store.cancelAll()
+        do {
+            _ = try await wait()
+            XCTFail("A previous session's file must not be presented")
+        } catch {
+            XCTAssertTrue(error is CancellationError)
+        }
     }
 
     /// A download that lands with no page waiting (the reader is on Agents) just ends: the

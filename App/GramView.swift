@@ -2183,14 +2183,15 @@ struct GramView: View {
         }
         guard let held = downloads.held else { return }
         heldWait?.cancel()
-        let store = downloads
+        let wait = downloads.join(id: held.id)
         // Captured before the wait: a disconnect that wipes the cache meanwhile bumps it,
         // and the export below must not write the payload back to disk after sign-out.
         let epoch = Downloads.currentEpoch
         heldWait = Task {
             do {
-                // nil: it already ended (landed, or failed with its own report).
-                guard let fetched = try await store.join(id: held.id) else { return }
+                // Reserve before scheduling this task: even an immediate cache fill
+                // must deliver the requested open/save to the active page.
+                guard let fetched = try await wait() else { return }
                 // The page went off screen as it landed: present nothing over another tab.
                 if Task.isCancelled { return }
                 switch held.purpose {
