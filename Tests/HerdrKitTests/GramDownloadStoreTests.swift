@@ -92,6 +92,35 @@ final class GramDownloadStoreTests: XCTestCase {
         for _ in 0..<20 { try? await Task.sleep(nanoseconds: 1_000_000) }
     }
 
+    /// Cancellation races fetch's registration, including after it creates the transfer.
+    /// Every schedule must release an unowned transfer; no timing outcome is required.
+    func testCancellationRacingPrefetchRegistrationRetiresTheTransfer() async {
+        for _ in 0..<100 {
+            let store = GramDownloadStore()
+            let entered = DispatchSemaphore(value: 0)
+            let fetch = Task { @MainActor in
+                entered.signal()
+                return try await store.fetch(id: "race") { _ in
+                    try await Task.sleep(nanoseconds: 60_000_000_000)
+                    return ("race.txt", "text/plain", Data(), nil)
+                }
+            }
+            let cancellation = Task.detached {
+                entered.wait()
+                fetch.cancel()
+            }
+            let cancelled = await isCancellation(fetch)
+            XCTAssertTrue(cancelled)
+            await cancellation.value
+            await until("cancelled prefetch must not retain its transfer") {
+                !store.isRunning("race")
+            }
+            let leaked = store.isRunning("race")
+            store.cancelAll()
+            if leaked { return }
+        }
+    }
+
     /// The bug: leaving Gram (a tab switch) cancelled the page's wait, and with it the
     /// download. Now the wait ends and the download does not; the page coming back joins
     /// the SAME transfer and gets the file when it lands.

@@ -253,9 +253,11 @@ public final class GramDownloadStore {
 
     /// A cancelled caller stops waiting; the last one out ends a transfer nobody keeps.
     private func leave(_ waiter: UUID, entry: Entry, id: String) {
-        guard let continuation = entry.waiters.removeValue(forKey: waiter) else { return }
+        let continuation = entry.waiters.removeValue(forKey: waiter)
         entry.joined.remove(waiter)
-        continuation.resume(throwing: CancellationError())
+        continuation?.resume(throwing: CancellationError())
+        // Cancellation may win before registration. No continuation does not imply
+        // there is no transfer: fetch already created it before entering wait.
         guard entry.waiters.isEmpty, !entry.kept else { return }
         if entries[id] === entry { entries[id] = nil }
         entry.task?.cancel()
