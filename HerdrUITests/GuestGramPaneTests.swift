@@ -270,7 +270,7 @@ final class GuestGramPaneTests: XCTestCase {
         // visible button is disabled. This is not a physical keyboard event.
         app.buttons["guest-fixture-send-shortcut"].tap()
         finish.tap()
-        let chip = app.buttons["attachment-remove-delayed-report.pdf"]
+        let chip = app.buttons["Remove delayed-report.pdf"]
         XCTAssertTrue(chip.waitForExistence(timeout: 10))
         XCTAssertTrue(poll(10, every: 0.25) { send.isEnabled })
         send.tap()
