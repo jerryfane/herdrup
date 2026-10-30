@@ -44,13 +44,13 @@ jobs:
             device_type: iPad Pro 13-inch (M5)
             udid_var: IPAD_UDID
     # Worst rounds (iPhone): 5 + 20 + 15 + 35 + 10 = 85m of tests, five 10-min diagnostic
-    # reruns = 50m, a 10m cold boot. Leaves 35m for setup (runtime download or restore and
+    # reruns = 50m, a 10m cold boot. Leaves 35m for setup (runtime download and
     # import, build) and the upload. The iPad's rounds are shorter. A ceiling, not a duration.
     timeout-minutes: 180
     env:
       SHARD: ${{ matrix.shard }}
       RUNTIME_VERSION: "26.5"
-      # In the workspace, where actions/cache resolves relative paths.
+      # Temporary export, removed after import to leave room for the build.
       RUNTIME_DIR: .ios-runtime
     steps:
       - uses: actions/checkout@v4
@@ -93,18 +93,10 @@ jobs:
       - name: Generate project
         run: xcodegen generate
 
-      # Cache the complete exported runtime bundle, including its metadata.
-      # Xcode 27's -exportPath writes an .exportedBundle directory, not a .dmg.
-      # -importPlatform consumes that bundle on a fresh runner.
-      - name: Restore the iOS ${{ env.RUNTIME_VERSION }} runtime image
-        id: runtime_cache
-        uses: actions/cache/restore@v4
-        with:
-          path: ${{ env.RUNTIME_DIR }}
-          key: ios-runtime-${{ env.RUNTIME_VERSION }}-${{ runner.arch }}-v1
+      # Download directly: the measured runtime cache restore was slower than Apple.
+      # Xcode 27 exports a complete .exportedBundle directory, not a .dmg.
 
       - name: Download the iOS ${{ env.RUNTIME_VERSION }} runtime image
-        if: steps.runtime_cache.outputs.cache-hit != 'true'
         run: |
           set -o pipefail
           mkdir -p "$RUNTIME_DIR"
@@ -145,18 +137,8 @@ jobs:
           fi
           echo "RUNTIME=$RUNTIME" >> "$GITHUB_ENV"
 
-      # Saved once the import has proved the image good, and before the tests, so a test
-      # failure still leaves the next run a cached image. Both devices miss together on a
-      # cold cache; the second save finds the key taken and only warns.
-      - name: Save the iOS ${{ env.RUNTIME_VERSION }} runtime image
-        if: steps.runtime_cache.outputs.cache-hit != 'true'
-        uses: actions/cache/save@v4
-        with:
-          path: ${{ env.RUNTIME_DIR }}
-          key: ${{ steps.runtime_cache.outputs.cache-primary-key }}
-
       - name: Remove the runtime image
-        # Installed and cached: the build and the simulators need the disk.
+        # Installed: the build and the simulators need the disk.
         run: rm -rf "$RUNTIME_DIR"; df -Pk "$GITHUB_WORKSPACE"
 
       - name: Create the ${{ matrix.device_type }} on iOS ${{ env.RUNTIME_VERSION }}

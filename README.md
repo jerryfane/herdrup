@@ -212,9 +212,10 @@ a real main-branch failure. Each selected class must execute tests; an empty
 result cannot pass. The iPad display recorder starts before its first test session,
 matching the main iPad shard's cold-start preparation.
 
-The runtime cache stores Xcode's complete `.exportedBundle`, keyed by OS version
-and runner architecture, rather than live simulator state. A cache hit still
-imports the runtime and runs every selected test; test results are never cached.
+Each job downloads Xcode's complete `.exportedBundle` directly from Apple, imports
+it, then removes the export to free disk space. Runtime caching was measured and
+removed: restoring the 8.4 GB cache took 196 seconds versus 77 seconds for a direct
+download. Every selected test runs; test results are never cached.
 
 The shared native composer reconciles external text edits after the SwiftUI layout pass,
 using the current binding rather than a captured layout value. This preserves newer
