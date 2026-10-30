@@ -511,9 +511,10 @@ func testDictationStartDisarmsEvenIfPermissionIsDenied() throws {
         app.descendants(matching: .any).matching(identifier: "terminal-attachment").firstMatch
     }
 
-    /// Long-press the reply field and tap Paste. Returns false when the menu never offered
-    /// it, so the caller can fail with its own message.
+    /// Focus the editor before its one long-press, then use the real Paste action.
+    /// A press on an unfocused editor can only place the caret on iOS 27.
     private func pasteIntoReply(_ field: XCUIElement) -> Bool {
+        field.tap()
         field.press(forDuration: 1)
         let paste = app.descendants(matching: .any)
             .matching(NSPredicate(format: "label == %@", "Paste"))
