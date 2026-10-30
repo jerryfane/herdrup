@@ -6791,7 +6791,7 @@ struct TerminalPaneContent: View {
         if type.conforms(to: .fileURL) {
             loadingReplyAttachment = true
             ctrlArmed = false
-            _ = provider.loadObject(ofClass: URL.self) { url, _ in
+            let stage: @Sendable (URL?) -> Void = { url in
                 var refusal: String?
                 let attachment: ComposerAttachment? = url.flatMap { source in
                     let scoped = source.startAccessingSecurityScopedResource()
@@ -6831,6 +6831,18 @@ struct TerminalPaneContent: View {
                 Task { @MainActor in
                     finishReplyAttachmentPaste(attachment)
                     if let refusal { actionNote = refusal }
+                }
+            }
+            _ = provider.loadObject(ofClass: URL.self) { url, _ in
+                if let url {
+                    stage(url)
+                    return
+                }
+                // Finder can supply file-url bytes without vending an NSURL object.
+                // Resolve that reference instead of attaching its icon or URL text.
+                provider.loadDataRepresentation(forTypeIdentifier: type.identifier) { data, _ in
+                    let source = data.flatMap { URL(dataRepresentation: $0, relativeTo: nil) }
+                    stage(source?.isFileURL == true ? source : nil)
                 }
             }
             return true
