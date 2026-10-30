@@ -15,13 +15,13 @@ final class DesktopSettingsReferenceShots: DesktopReferenceCaptureCase {
     func testSettingsMachinesReferences() throws {
         let (app, device) = try launch("settings", served: "settings-machines",
                                        sha256: Self.settingsMachinesSHA256)
-        let (index, detail) = try openReferenceSettings(app)
+        let (index, detail, detailViewport) = try openReferenceSettings(app)
         XCTAssertTrue(detail.staticTexts["atlas-mini"].waitForExistence(timeout: 20),
                       "machine.status must load, rather than capturing the empty fallback")
         XCTAssertTrue(detail.staticTexts["reachable · 2 agents"].waitForExistence(timeout: 20),
                       "the reachable saved profile must match both agent machine IDs")
-        requireSettingsVisible(app.buttons["settings-machine-card"], in: index)
-        requireSettingsVisible(app.descendants(matching: .any)["settings-machine-hero"], in: detail)
+        requireSettingsVisible(app.buttons["settings-machine-card"], in: index.frame)
+        requireSettingsVisible(app.descendants(matching: .any)["settings-machine-hero"], in: detailViewport)
         capture(app, device: device, state: "settings-machines-index")
 
         // Pin to a reproducible boundary, not a device-specific partial swipe distance.
@@ -38,12 +38,12 @@ final class DesktopSettingsReferenceShots: DesktopReferenceCaptureCase {
             ("guest-lab", "1 agent"),
         ]
         for (name, status) in profileRows {
-            requireSettingsVisible(detail.staticTexts[name], in: detail)
-            requireSettingsVisible(detail.staticTexts[status], in: detail)
+            requireSettingsVisible(detail.staticTexts[name], in: detailViewport)
+            requireSettingsVisible(detail.staticTexts[status], in: detailViewport)
         }
         requireSettingsVisible(detail.buttons.matching(
-            NSPredicate(format: "label BEGINSWITH %@", "How to add a machine")).firstMatch, in: detail)
-        requireSettingsVisible(reach, in: detail)
+            NSPredicate(format: "label BEGINSWITH %@", "How to add a machine")).firstMatch, in: detailViewport)
+        requireSettingsVisible(reach, in: detailViewport)
         XCTAssertTrue(reach.label.contains("5 machines") && reach.label.contains("5 agents")
                       && reach.label.contains("1 offline"),
                       "the footer counts this box plus four agent-derived peers, not saved profiles")
@@ -55,12 +55,12 @@ final class DesktopSettingsReferenceShots: DesktopReferenceCaptureCase {
     func testSettingsEmptyMachinesReference() throws {
         let (app, device) = try launch("settings", served: "settings-empty",
                                        sha256: Self.settingsEmptySHA256)
-        let (_, detail) = try openReferenceSettings(app)
-        requireSettingsVisible(detail.staticTexts["No saved machines yet."], in: detail)
+        let (_, detail, detailViewport) = try openReferenceSettings(app)
+        requireSettingsVisible(detail.staticTexts["No saved machines yet."], in: detailViewport)
         requireSettingsVisible(detail.buttons.matching(
-            NSPredicate(format: "label BEGINSWITH %@", "How to add a machine")).firstMatch, in: detail)
+            NSPredicate(format: "label BEGINSWITH %@", "How to add a machine")).firstMatch, in: detailViewport)
         let reach = detail.descendants(matching: .any)["settings-federation-reach"]
-        requireSettingsVisible(reach, in: detail)
+        requireSettingsVisible(reach, in: detailViewport)
         XCTAssertTrue(reach.label.contains("1 machine") && reach.label.contains("0 agents"),
                       "the empty card must not retain peers from the populated fixture")
         XCTAssertFalse(detail.buttons["Federate"].exists)
@@ -74,28 +74,28 @@ final class DesktopSettingsReferenceShots: DesktopReferenceCaptureCase {
     func testSettingsAboutIndexReference() throws {
         let (app, device) = try launch("settings", served: "settings-machines",
                                        sha256: Self.settingsMachinesSHA256)
-        let (index, detail) = try openReferenceSettings(app)
+        let (index, detail, detailViewport) = try openReferenceSettings(app)
         XCTAssertTrue(detail.staticTexts["reachable · 2 agents"].waitForExistence(timeout: 20))
         let footer = index.staticTexts.matching(NSPredicate(format: "label BEGINSWITH %@", "herdrup mobile ")).firstMatch
         for _ in 0..<12 where !footer.isHittable { index.swipeUp() }
         for _ in 0..<3 { index.swipeUp() }
-        requireSettingsVisible(index.staticTexts["ABOUT"], in: index)
-        requireSettingsVisible(index.buttons["settings-discord"], in: index)
+        requireSettingsVisible(index.staticTexts["ABOUT"], in: index.frame)
+        requireSettingsVisible(index.buttons["settings-discord"], in: index.frame)
         for link in ["Privacy Policy", "Terms of Service", "Open source on GitHub"] {
             requireSettingsVisible(index.descendants(matching: .any).matching(
-                NSPredicate(format: "label == %@", link)).firstMatch, in: index)
+                NSPredicate(format: "label == %@", link)).firstMatch, in: index.frame)
         }
-        requireSettingsVisible(footer, in: index)
-        requireSettingsVisible(index.staticTexts["dark only, on purpose"], in: index)
+        requireSettingsVisible(footer, in: index.frame)
+        requireSettingsVisible(index.staticTexts["dark only, on purpose"], in: index.frame)
         XCTAssertTrue(app.buttons["settings-machine-card"].isSelected,
                       "scrolling About into view must not invent an About destination")
-        requireSettingsVisible(app.descendants(matching: .any)["settings-machine-hero"], in: detail)
+        requireSettingsVisible(app.descendants(matching: .any)["settings-machine-hero"], in: detailViewport)
         capture(app, device: device, state: "settings-about-index")
     }
 
     /// Navigate via the section picker and machine card, never a rendered test-only view.
     /// Geometry rejects a compact/pushed Settings page masquerading as an iPad split.
-    private func openReferenceSettings(_ app: XCUIApplication) throws -> (XCUIElement, XCUIElement) {
+    private func openReferenceSettings(_ app: XCUIApplication) throws -> (XCUIElement, XCUIElement, CGRect) {
         let settings = app.buttons["Settings"].firstMatch
         XCTAssertTrue(settings.waitForHittable(timeout: 20))
         settings.tap()
@@ -111,17 +111,33 @@ final class DesktopSettingsReferenceShots: DesktopReferenceCaptureCase {
         let index = app.scrollViews.containing(.button, identifier: "settings-machine-card").firstMatch
         let detail = app.scrollViews.containing(.any, identifier: "settings-machine-hero").firstMatch
         XCTAssertTrue(index.exists && detail.exists)
-        XCTAssertGreaterThan(detail.frame.minX, index.frame.maxX - 1,
-                             "the Settings index and Machines detail must be distinct split columns")
+        // iOS 27 exposes the detail scroll container from x=0 even though its visible
+        // content starts beside the sidebar (confirmed in both first-run failure videos).
+        // Prove the split with simultaneously visible children, not that container's origin.
+        XCTAssertGreaterThan(hero.frame.minX, index.frame.maxX - 1,
+                             "the Machines hero must lie to the right of the Settings index")
+        XCTAssertGreaterThan(hero.frame.minX, card.frame.maxX,
+                             "the selected machine card and hero must occupy separate columns")
+        XCTAssertGreaterThan(min(card.frame.maxY, hero.frame.maxY),
+                             max(card.frame.minY, hero.frame.minY),
+                             "both column children must be visible side by side, not stacked")
+        let detailViewport = detail.frame.intersection(CGRect(
+            x: index.frame.maxX, y: app.frame.minY,
+            width: max(0, app.frame.maxX - index.frame.maxX), height: app.frame.height))
+        XCTAssertFalse(detailViewport.isEmpty, "the Machines column must have a visible viewport")
+        requireSettingsVisible(card, in: index.frame)
+        requireSettingsVisible(hero, in: detailViewport)
         XCTAssertTrue(app.staticTexts["Machines"].exists)
-        return (index, detail)
+        return (index, detail, detailViewport)
     }
 
-    private func requireSettingsVisible(_ element: XCUIElement, in scroll: XCUIElement,
+    private func requireSettingsVisible(_ element: XCUIElement, in viewport: CGRect,
                                         file: StaticString = #filePath, line: UInt = #line) {
         XCTAssertTrue(element.waitForHittable(timeout: 10), "required reference content is not visible",
                       file: file, line: line)
-        XCTAssertTrue(scroll.frame.contains(element.frame), "required reference content is clipped",
+        XCTAssertFalse(element.frame.isEmpty, "required reference content has no visible bounds",
+                       file: file, line: line)
+        XCTAssertTrue(viewport.contains(element.frame), "required reference content is clipped",
                       file: file, line: line)
     }
 

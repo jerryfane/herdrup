@@ -23,11 +23,11 @@ on:
   workflow_dispatch:
     inputs:
       only_suite:
-        description: "Run only this HerdrUITests class (e.g. TerminalControlTests). Empty runs the full matrix."
+        description: "HerdrUITests class, DesktopReferenceShots (all references), or DesktopGramAndSettingsReferences. Empty runs the full matrix."
         required: false
         default: ""
       only_device:
-        description: "Destination for a focused run: iphone or ipad. DesktopReferenceShots on ipad runs on both reference iPads (13-inch and 11-inch)."
+        description: "Destination: iphone or ipad. Both desktop reference groups require ipad and capture both reference sizes."
         required: false
         default: "iphone"
 

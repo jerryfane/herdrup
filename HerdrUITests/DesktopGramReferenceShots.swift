@@ -12,8 +12,11 @@ final class DesktopGramReferenceShots: DesktopReferenceCaptureCase {
         let (app, device) = try launchGramReference()
         let owner = gramElement(app, "gram-bubble-gr-owner")
         XCTAssertTrue(owner.waitForHittable(timeout: 10))
-        XCTAssertTrue(app.staticTexts["New messages"].waitForExistence(timeout: 10),
-                      "the one initially unread message leaves the real entry unread rule")
+        // The entry rule counts unread messages; "New messages" is the separate
+        // arrival button shown only when a new message arrives while reading history.
+        let unread = app.staticTexts["1 unread"]
+        XCTAssertTrue(unread.waitForHittable(timeout: 10),
+                      "the one initially unread message leaves the visible entry unread rule")
         let file = gramElement(app, "gram-bubble-gr-file")
             .buttons["gram-attachment-open"].firstMatch
         XCTAssertTrue(file.waitForHittable(timeout: 10))
@@ -101,6 +104,7 @@ final class DesktopGramReferenceShots: DesktopReferenceCaptureCase {
         XCTAssertTrue(mention.waitForHittable(timeout: 5))
         mention.tap()
         field.typeText("Please review the attached notes.")
+        finishGramComposerReference(app)
         XCTAssertTrue(app.buttons["gram-send-button"].isEnabled)
         XCTAssertTrue((field.value as? String ?? "").hasPrefix("@vetrina "))
         capture(app, device: device, state: "gram-composer-attachment")
@@ -115,6 +119,7 @@ final class DesktopGramReferenceShots: DesktopReferenceCaptureCase {
         // Finish the mention without choosing either identity. With the caret in the
         // body, the real picker closes and the persistent ambiguity reason is visible.
         field.typeText("@clientloop Please review the attachment.")
+        finishGramComposerReference(app)
         let send = app.buttons["gram-send-button"]
         XCTAssertTrue(send.waitForExistence(timeout: 5))
         XCTAssertFalse(send.isEnabled)
@@ -165,13 +170,27 @@ final class DesktopGramReferenceShots: DesktopReferenceCaptureCase {
         XCTAssertTrue(field.waitForHittable(timeout: 5))
         field.tap()
         field.typeText(query)
+        // Submit the sidebar's ordinary TextField without clearing its filter.
+        // A focused caret blink is real UI motion, not a reason to relax PNG stability.
+        field.typeText("\n")
+        XCTAssertEqual(field.value as? String, query)
+        XCTAssertTrue(app.keyboards.firstMatch.waitForNonExistence(timeout: 5))
+    }
+
+    private func finishGramComposerReference(_ app: XCUIApplication) {
+        // Use the production dismissal action; keep the draft, mention routing and
+        // attachment intact while removing the caret from the captured reference.
+        let collapse = app.buttons["Collapse keyboard"]
+        XCTAssertTrue(collapse.waitForHittable(timeout: 5))
+        collapse.tap()
+        XCTAssertTrue(app.keyboards.firstMatch.waitForNonExistence(timeout: 5))
     }
 
     private func attachGramReferenceFile(_ app: XCUIApplication) {
         let attach = app.buttons["gram-attach-button"]
         XCTAssertTrue(attach.waitForHittable(timeout: 5))
         attach.tap()
-        let files = app.buttons["Files"].firstMatch
+        let files = app.buttons["composer-attach-file"]
         XCTAssertTrue(files.waitForHittable(timeout: 5))
         files.tap()
         let chip = gramElement(app, "gram-attachment")
@@ -196,10 +215,15 @@ final class DesktopGramReferenceShots: DesktopReferenceCaptureCase {
         // Small real drags keep a target from jumping straight across the viewport.
         // Keep the whole target clear of the floating header and composer, not merely hittable.
         func visible() -> Bool {
-            guard element.exists && element.isHittable else { return false }
+            guard element.exists else { return false }
             let header = gramElement(app, "gram-header-pill")
             let visibleTop = header.exists ? header.frame.maxY : feed.frame.minY
-            return element.frame.minY >= visibleTop && element.frame.maxY <= feed.frame.maxY
+            let frame = element.frame
+            // XCTest cannot compute an activation point for a bubble clipped above
+            // the viewport. Reveal its complete frame before asking for hittability.
+            guard !frame.isEmpty, frame.minY >= visibleTop,
+                  frame.maxY <= feed.frame.maxY else { return false }
+            return element.isHittable
         }
         for _ in 0..<18 where !visible() {
             let start = feed.coordinate(withNormalizedOffset: CGVector(dx: 0.85, dy: 0.30))

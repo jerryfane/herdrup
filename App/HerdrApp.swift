@@ -349,6 +349,7 @@ struct RootView: View {
             // every capture of a state is the same picture. See DesktopReferenceMock.
             let _ = DesktopReferenceMock.prepared
             TerminalHomeView(client: HerdrClient(transport: DesktopReferenceMockTransport()), onDisconnect: {},
+                             host: DesktopReferenceMock.state == .settings ? "reference-hub" : "",
                              onTrustHostKey: { _ in false })
                 .transaction { $0.disablesAnimations = true; $0.animation = nil }
                 .overlay(alignment: .topLeading) { DesktopReferenceProbe().frame(width: 1, height: 1) }

@@ -35,16 +35,19 @@ These are pixel-exact screenshots of herdrup's Agents home on iPad, in landscape
      -f only_suite=DesktopReferenceShots -f only_device=ipad
    ```
 
-   With `only_device=ipad`, the focused shard runs the class on both reference iPads (`desktop_reference_round` in `Tools/ci/ui-shard.sh`). Each round does the following: fresh install, dark appearance, `simctl status_bar override`, then the class. A full PR run produces the same pictures: the 13-inch round runs in the `ipad` shard and the 11-inch round in the `iphone-app` shard.
+   With `only_device=ipad`, the focused shard runs the agent-list, Gram and Settings reference classes on both reference iPads (`desktop_reference_round` in `Tools/ci/ui-shard.sh`). Each class keeps its own bounded round and class-presence check. A full PR run produces the same pictures: the 13-inch rounds run in the `ipad` shard and the 11-inch rounds in the `iphone-app` shard.
+
+   When only Gram/Settings capture actions change, `only_suite=DesktopGramAndSettingsReferences` captures those two classes on both devices without repeating accepted agent-list captures. Preserve each image's actual source head and CI run; every image in a delivered set must still use the same runtime and capture conditions. Settings uses the synthetic connected host `reference-hub`, not a live connection.
 
 2. Download the attachments:
 
    ```sh
-   gh run download <run-id> -R themartianapp/herdrup -n terminal-test-results-focused -D /tmp/refs
+   gh run download <run-id> -R themartianapp/herdrup -n terminal-test-results-focused \
+     -D "$HOME/.local/state/herdr/reference-receipts/<run-id>"
    ```
 
-   The PNGs and their `.json` conditions are in `/tmp/refs/TestReceipts/iPadDesktopReference-first-attachments/` and `/tmp/refs/TestReceipts/iPad11DesktopReference-first-attachments/`. Each folder's `manifest.json` (written by `xcresulttool`) maps an exported file to its attachment name, `ref-<device>-<state>.png` or `.json`. The status-bar override that was used is in `TestReceipts/iPad*DesktopReference-status-bar.txt`.
+   Within that download, PNGs and their `.json` conditions are in `TestReceipts/iPadDesktopReference-<class>-first-attachments/` and `TestReceipts/iPad11DesktopReference-<class>-first-attachments/`. Each folder's `manifest.json` (written by `xcresulttool`) maps an exported file to its attachment name, `ref-<device>-<state>.png` or `.json`. The status-bar override is in `TestReceipts/iPad*DesktopReference-status-bar.txt`.
 
-3. Copy each `ref-*.png` here under its attachment name. Recompress losslessly with `zopflipng` (the `zopfli` Python package's `zopfli.png.optimize`), which keeps the decoded pixels identical and saves about 25%. Rebuild `manifest.json` from the `.json` conditions, the status-bar receipts and each PNG's `sha256sum`, and set `herdrupCommit` to the head the run built. Look at every picture before committing it.
+3. Copy each `ref-*.png` to its reference set under its attachment name. Lossless recompression is optional; verify identical decoded pixels if used. Rebuild `manifest.json` from the `.json` conditions, status-bar receipts and each PNG's SHA-256, and set each image's `herdrupCommit` and `ciRun` to the source that actually produced it. Look at every picture before committing the complete set.
 
 `herdrupCommit` is the pull request head that produced the pictures (per file; the served states have their own, with their `ciRun`). The merge commit on `main` has a different sha but the same app code.
