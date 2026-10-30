@@ -334,8 +334,16 @@ struct RootView: View {
             TerminalHomeView(client: HerdrClient(transport: ForgetCapableMockTransport()), onDisconnect: {},
                              onTrustHostKey: { _ in false }, livePaneIDs: MockWireFixtures.demoLivePaneIDs)
         case .needsYou:
-            TerminalHomeView(client: HerdrClient(transport: NeedsYouMockTransport()), onDisconnect: {},
-                             onTrustHostKey: { _ in false })
+            VStack(spacing: 0) {
+                if NeedsYouMockTransport.manualWaiting {
+                    Button("Start waiting") { NeedsYouMockTransport.startWaiting() }
+                        .accessibilityIdentifier("fixture-start-waiting")
+                        .buttonStyle(.bordered)
+                        .padding(8)
+                }
+                TerminalHomeView(client: HerdrClient(transport: NeedsYouMockTransport()), onDisconnect: {},
+                                 onTrustHostKey: { _ in false })
+            }
         case .folders:
             let _ = AgentFoldersMockTransport.prepared
             TerminalHomeView(client: HerdrClient(transport: AgentFoldersMockTransport()), onDisconnect: {},
