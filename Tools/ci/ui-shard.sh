@@ -296,8 +296,8 @@ sys.exit(1 if missing else 0)
 ' "$@"
 }
 
-# Herdrup Desktop's reference screenshots (DesktopReferenceShots, herdrup-desktop#16) on
-# one reference iPad. The pictures must be the same on every run, so the app starts from a
+# Herdrup Desktop's agent-list, Gram and Settings reference screenshots on one iPad.
+# Each class keeps its own bounded round as the reference set grows. The app starts from a
 # fresh install (no UserDefaults left by earlier rounds), the device is dark, and the status
 # bar is pinned: 9:41, full battery, charged, no cellular, three Wi-Fi bars. simctl takes
 # only a plain time here: it rejected both ISO date-times (`…Z` and `…+00:00`) as "non-ISO"
@@ -306,8 +306,9 @@ sys.exit(1 if missing else 0)
 # rounds on the device see the real status bar.
 DESKTOP_REFERENCE_STATUS_BAR=(--time 9:41 --batteryLevel 100 --batteryState charged
   --cellularMode notSupported --wifiBars 3)
+DESKTOP_REFERENCE_CLASSES=(DesktopReferenceShots DesktopGramReferenceShots DesktopSettingsReferenceShots)
 desktop_reference_round() {
-  local label="$1" udid="$2" bundle_id status=0
+  local label="$1" udid="$2" bundle_id class round status=0
   boot_simulator "$udid" "TestReceipts/$label-boot.log" || return 1
   bundle_id=$(/usr/libexec/PlistBuddy -c 'Print :CFBundleIdentifier' "$APP_UNDER_TEST/Info.plist") || return 1
   xcrun simctl uninstall "$udid" "$bundle_id" >/dev/null 2>&1 || true
@@ -317,8 +318,11 @@ desktop_reference_round() {
     echo "xcrun simctl status_bar <udid> override ${DESKTOP_REFERENCE_STATUS_BAR[*]}"
     xcrun simctl status_bar "$udid" list
   } | tee "TestReceipts/$label-status-bar.txt"
-  run_suite "$label" "$udid" 15m -only-testing:HerdrUITests/DesktopReferenceShots || status=1
-  check_classes_ran "TestReceipts/$label-first.xcresult" DesktopReferenceShots || status=1
+  for class in "${DESKTOP_REFERENCE_CLASSES[@]}"; do
+    round="$label-$class"
+    run_suite "$round" "$udid" 15m "-only-testing:HerdrUITests/$class" || status=1
+    check_classes_ran "TestReceipts/$round-first.xcresult" "$class" || status=1
+  done
   xcrun simctl status_bar "$udid" clear || true
   xcrun simctl ui "$udid" appearance light || true
   return "$status"
@@ -425,7 +429,8 @@ case "$shard" in
     skip=(-skip-testing:HerdrUITests/GramTests -skip-testing:HerdrUITests/StatusMotionTests
       -skip-testing:HerdrUITests/ChatViewTests -skip-testing:HerdrUITests/ChatUXSmokeTests -skip-testing:HerdrUITests/PagingTests
       -skip-testing:HerdrUITests/AgentFoldersTests -skip-testing:HerdrUITests/NeedsYouPillTests
-      -skip-testing:HerdrUITests/ServerUpdateUITests -skip-testing:HerdrUITests/DesktopReferenceShots)
+      -skip-testing:HerdrUITests/ServerUpdateUITests)
+    for class in "${DESKTOP_REFERENCE_CLASSES[@]}"; do skip+=("-skip-testing:HerdrUITests/$class"); done
     for class in "${TERMINAL_CLASSES[@]}"; do skip+=("-skip-testing:HerdrUITests/$class"); done
     # 40m: on the Xcode 27 image every class ran slower. Run 40728450580 logged "iPhoneApp
     # exceeded its 30m budget" on its 79th case; its 69 cases that passed there and on
