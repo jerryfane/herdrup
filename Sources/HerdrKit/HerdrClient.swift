@@ -907,6 +907,11 @@ public actor HerdrClient {
                 await onProgress?(offset, max(total, offset))
             }
         }
+        // Frames ride ahead of their acks (`GramUploadChannel.maxFramesInFlight`), so
+        // the last few are not known to be staged — or rejected — until every ack is in.
+        if streaming, let channel {
+            try await channel.finish()
+        }
         // One terminal report at the bytes ACTUALLY read, so a determinate bar always
         // lands on 100%. `(offset, offset)`, not `max(total, offset)`: a file that
         // SHRANK after the stat would otherwise leave the bar at `offset/total` — 50%
