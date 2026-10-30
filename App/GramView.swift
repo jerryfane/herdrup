@@ -182,7 +182,8 @@ struct GramView: View {
     /// unread goes from none to some, so a later unread message gets its own rule.
     @State private var unreadRule: UnreadRule?
     @State private var unreadRuleCaptured = false
-    /// True once the feed has been scrolled to its newest message for this appearance. The
+    /// True once the feed has been scrolled to where it opens (the first unread message, else
+    /// the newest) for this appearance. The
     /// first layout starts at the TOP, before the scroll runs, so until then rows appearing
     /// are not being read and the top sentinel is not a request for older messages.
     @State private var didInitialScroll = false
@@ -628,6 +629,7 @@ struct GramView: View {
         }
         .padding(.horizontal, 16)
         .padding(.top, 8)
+        .topEdgeClearance(base: 8, rowHeight: 44)
         .padding(.bottom, 6)
         .frame(maxWidth: .infinity)
     }
@@ -717,6 +719,8 @@ struct GramView: View {
         }
         .padding(.horizontal, 16)
         .padding(.top, 4)
+        // Off the glass on iPhone Duo's cover, whose status bar is on the side (top inset 0).
+        .topEdgeClearance(base: 4, rowHeight: 44)
         .padding(.bottom, 8)
     }
 
@@ -1119,9 +1123,14 @@ struct GramView: View {
                 landed: $didInitialScroll,
                 anchorID: $pageAnchorID,
                 newestRequest: newestToken,
-                onOpen: { if !unreadRuleCaptured { captureUnreadRule() } },
+                onOpen: {
+                    if !unreadRuleCaptured { captureUnreadRule() }
+                    drawUnreadOpenTarget()
+                },
+                // At the first unread message when there is one, else at the newest.
+                openAt: unreadOpenTarget,
                 onLanded: feedLanded,
-                // Read when it is ON SCREEN, once the feed has landed on the newest message.
+                // Read when it is ON SCREEN, once the feed has landed where it opens.
                 onRowSeen: { entry in markReadIfNeeded(entry.message) },
                 onSentinelArrival: requestOlderPage,
                 onBottomReached: { showingNewMessages = false },
@@ -1232,7 +1241,7 @@ struct GramView: View {
                 message: entry.message,
                 isDownloadingFile: downloadingFileFor == entry.message.id,
                 downloadProgress: downloadingFileFor == entry.message.id ? downloadBytes : nil,
-                // Not before the feed has landed on the newest message: the
+                // Not before the feed has landed where it opens: the
                 // first layout passes through the top rows, never seen.
                 feedLanded: didInitialScroll,
                 visibleTop: headerBottom,
@@ -2471,10 +2480,32 @@ struct GramView: View {
         unreadRule = unread.last.map { UnreadRule(messageID: $0.id, count: unread.count) }
     }
 
-    /// The feed has landed on the newest message (`WindowedBottomFeed` saw its bottom marker
-    /// come on screen after the scroll was issued): from now on rows that appear are being
-    /// read. The rows already on screen are read one turn later, once this layout pass's
-    /// appear/disappear callbacks have dropped the top rows the first layout built.
+    /// Where the inbox opens: the first unread message, the row the "N unread" rule sits on,
+    /// so the reader starts where the unread messages begin; nil (the newest message) when
+    /// nothing is unread. Read on open, right after `captureUnreadRule`. Only while that
+    /// message is still unread, so a feed shown again later in the same visit (Saved and
+    /// back, a search's "No matches" and back) after the reader has read it opens at the
+    /// newest, and only while it is shown (a search may filter it out).
+    private func unreadOpenTarget() -> String? {
+        guard let id = unreadRule?.messageID,
+              visibleMessages.contains(where: { $0.id == id && $0.isUnread }) else { return nil }
+        return id
+    }
+
+    /// Widens the drawn window to the first unread message when it is older than the window,
+    /// so the feed has its row to open at.
+    private func drawUnreadOpenTarget() {
+        guard let id = unreadOpenTarget(),
+              let index = visibleMessages.firstIndex(where: { $0.id == id }),
+              index >= renderLimit else { return }
+        renderLimit = index + 1
+    }
+
+    /// The feed has landed where it opens (`WindowedBottomFeed` saw its bottom marker come on
+    /// screen, or the first unread row reach the top, after the scroll was issued): from now
+    /// on rows that appear are being read. The rows already on screen are read one turn
+    /// later, once this layout pass's appear/disappear callbacks have dropped the top rows
+    /// the first layout built.
     private func feedLanded() {
         Task { @MainActor in
             for message in messages where feedVisibility.rows.contains(message.id) {
@@ -2899,7 +2930,7 @@ struct GramRow: View, Equatable {
     /// transport reports them. nil means no measurement — the card's ring spins rather
     /// than showing a share that is not driven by anything.
     var downloadProgress: (received: Int, total: Int)?
-    /// The feed has landed on the newest message: before that its first layout passes
+    /// The feed has landed where it opens: before that its first layout passes
     /// through rows the reader never sees, so an image card must not fetch for them.
     var feedLanded: Bool
     /// The floating header's bottom edge in `GramView.feedPageSpace` (0 until measured): an
@@ -3344,9 +3375,23 @@ private struct GramFloatingHeader<Bar: View>: ViewModifier {
                     }
                     .background {
                         GramGroundFade()
-                            .ignoresSafeArea(edges: .top)
                             .allowsHitTesting(false)
                             .accessibilityHidden(true)
+                    }
+                    // Above the header, the status bar's band is solid ground, not the top of
+                    // the fade: stretched over iPhone Duo's 82 pt band (inner display held
+                    // tall) the fade left the messages scrolled up there showing through,
+                    // under the clock. Sized from the header's own distance to the window
+                    // top, which is exactly the band (0 where the status bar is on the side).
+                    .background(alignment: .top) {
+                        GeometryReader { geometry in
+                            let band = max(0, geometry.frame(in: .global).minY)
+                            Palette.ground
+                                .frame(width: geometry.size.width, height: band)
+                                .offset(y: -band)
+                        }
+                        .allowsHitTesting(false)
+                        .accessibilityHidden(true)
                     }
                     // The controls sit on top of the page, so VoiceOver meets them before
                     // the feed, as when the header was the first row: without this the
