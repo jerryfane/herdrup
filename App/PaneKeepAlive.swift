@@ -74,5 +74,8 @@ struct PaneKeepAliveContainer: View {
                     .accessibilityHidden(!isFront)
             }
         }
+        // A retained front slot is not an on-screen accessibility surface while
+        // another home section is presented.
+        .accessibilityHidden(!isPresented)
     }
 }
