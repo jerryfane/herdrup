@@ -51,6 +51,13 @@ through its real Collapse keyboard action before collapsed/expanded capture.
 Run `ci.yml` with `only_suite=DesktopDetailReferenceShots`, `only_device=ipad` for both
 reference sizes. It exports Chat, Terminal, collapsed writer, expanded writer and
 saved-host selection images. The saved-host chooser is connection home, not the
-Settings federation list or a fabricated connected-host dropdown. Images remain
-pending until the native run and visual inspection pass; existing54 PNGs are unchanged.
+Settings federation list or a fabricated connected-host dropdown.
+
+Run [41049693045](https://github.com/themartianapp/herdrup/actions/runs/41049693045)
+at `1c21ad11929d6111ae578166e9f39e64f6abc3fd` passed all three capture cases on each
+iPad (six executions, zero failures/skips). The ten original exported PNGs are in
+[`design/reference/detail`](../../design/reference/detail/manifest.json), with
+per-image source, input and PNG hashes, dimensions, native mock route and conditions.
+All ten images were visually inspected. The app clock is pinned; the system status
+bar date is the runner's actual Fri Oct 30. The earlier 54 PNGs are unchanged.
 
