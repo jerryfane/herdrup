@@ -1011,10 +1011,15 @@ struct TerminalInteractionRoot: View {
     /// ONLY the spacer, never the harness itself: the probe's ten-per-second tick would
     /// otherwise re-render the pane under test (see `KeyboardSpacerBox`).
     @ObservedObject private var spacer = TerminalInteractionHarness.shared.spacer
-    private let client: HerdrClient = {
+    // Match ChatViewMockHome: a preference write belongs to once-per-process
+    // fixture setup, not a View initializer that its own AppStorage update repeats.
+    private static let freshChatPreference: Void = {
         if TerminalInteractionDriver.chatReceipt {
             UserDefaults.standard.set(ChatPreference.terminal, forKey: ChatPreference.key)
         }
+    }()
+    private let client: HerdrClient = {
+        _ = TerminalInteractionRoot.freshChatPreference
         return HerdrClient(transport: MockTransport(interactionDriver: TerminalInteractionHarness.driver))
     }()
     var body: some View {
