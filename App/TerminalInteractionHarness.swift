@@ -1049,8 +1049,8 @@ struct TerminalInteractionRoot: View {
                     node = current.superview
                 }
                 records.append([
-                    "identifier": identifier, "frame": NSStringFromCGRect(rect),
-                    "accessibilityFrame": NSStringFromCGRect(editor.accessibilityFrame),
+                    "identifier": identifier, "frame": NSCoder.string(for: rect),
+                    "accessibilityFrame": NSCoder.string(for: editor.accessibilityFrame),
                     "editable": editor.isEditable, "firstResponder": editor.isFirstResponder,
                     "hitClass": hit.map { String(describing: type(of: $0)) } ?? "nil",
                     "hitIdentifier": hit?.accessibilityIdentifier ?? "",
