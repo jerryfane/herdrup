@@ -362,11 +362,17 @@ desktop_reference_round() {
     echo "xcrun simctl status_bar <udid> override ${DESKTOP_REFERENCE_STATUS_BAR[*]}"
     xcrun simctl status_bar "$udid" list
   } | tee "TestReceipts/$label-status-bar.txt"
+  # Match focused iPad runs: record before installation, including simulator failures
+  # that happen before XCTest can attach its own recording.
+  xcrun simctl io "$udid" recordVideo "TestReceipts/$label-reference.mp4" \
+    > "TestReceipts/$label-reference-video.log" 2>&1 &
+  recorder=$!
   for class in "${classes[@]}"; do
     round="$label-${class//\//-}"
     run_suite "$round" "$udid" 15m "-only-testing:HerdrUITests/$class" || status=1
     check_classes_ran "TestReceipts/$round-first.xcresult" "${class%%/*}" || status=1
   done
+  stop_recording
   xcrun simctl status_bar "$udid" clear || true
   xcrun simctl ui "$udid" appearance light || true
   return "$status"
