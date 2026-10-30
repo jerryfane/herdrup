@@ -1,0 +1,92 @@
+{
+  "state": "avatars",
+  "ping": {
+    "type": "pong",
+    "version": "0.9.5",
+    "protocol": 22,
+    "capabilities": {
+      "live_handoff": true,
+      "pane_input_stream": true,
+      "gram_upload_stream": true,
+      "agent_session_transfer": true,
+      "agent_session_transfer_harnesses": [
+        "claude",
+        "codex",
+        "omp"
+      ],
+      "events_v2": true,
+      "agent_forget": true,
+      "api_bridge_multi": true,
+      "pane_history": true,
+      "agent_transcript": true,
+      "agent_answer": true,
+      "agent_avatar": true
+    }
+  },
+  "agent.list": {
+    "type": "agent_list",
+    "agents": [
+      {
+        "pane_id": "w1:p1",
+        "terminal_id": "t1",
+        "workspace_id": "w1",
+        "tab_id": "w1:t1",
+        "focused": false,
+        "revision": 10,
+        "name": "atlas",
+        "agent": "claude",
+        "agent_status": "blocked",
+        "cwd": "/home/dev/atlas",
+        "terminal_title_stripped": "asking to deploy to staging",
+        "avatar": {
+          "style": "image",
+          "mascot": null,
+          "sha256": "e4d4139d5914062cd06d5b6cbd8ade1d5fddf83c20ee575d4d83b8d81de38a4a",
+          "updated_unix_ms": 1793094060000
+        },
+        "status_since_unix_ms": 1793180220000
+      },
+      {
+        "pane_id": "w1:p2",
+        "terminal_id": "t2",
+        "workspace_id": "w1",
+        "tab_id": "w1:t1",
+        "focused": false,
+        "revision": 11,
+        "name": "nova",
+        "agent": "codex",
+        "agent_status": "working",
+        "cwd": "/home/dev/nova",
+        "terminal_title_stripped": "⠋ writing the migration",
+        "avatar": {
+          "style": "mascot",
+          "mascot": "cub",
+          "sha256": null,
+          "updated_unix_ms": 1793094060000
+        },
+        "status_since_unix_ms": 1793178240000
+      },
+      {
+        "pane_id": "w1:p3",
+        "terminal_id": "t3",
+        "workspace_id": "w1",
+        "tab_id": "w1:t1",
+        "focused": false,
+        "revision": 12,
+        "name": "quill",
+        "agent": "omp",
+        "agent_status": "working",
+        "cwd": "/home/dev/quill",
+        "terminal_title_stripped": "π > drafting the changelog",
+        "status_since_unix_ms": 1793172660000
+      }
+    ]
+  },
+  "agent.avatar.get": {
+    "e4d4139d5914062cd06d5b6cbd8ade1d5fddf83c20ee575d4d83b8d81de38a4a": {
+      "type": "agent_avatar_image",
+      "mime": "image/png",
+      "data_base64": "iVBORw0KGgoAAAANSUhEUgAAAQAAAAEABAMAAACuXLVVAAAAFVBMVEX/sEBAqqoSXnC6Vm5cPoAsNG4YJkiax+GEAAAB1UlEQVR42u3czVHDMBCGYTsKd9ICFaiEHFIAF1qgOS4UoMOWkE5SQMQMBy5hYIh+dm3Wen0BxmvPgz7JkjWB+XVa99hNAAAAAAAAAAAAAAAAAAAAAAAAAFY+9hciAAAAAAAAAAAAAAAAAAAAAACMDtj3XHx9//r60nGPuf3it5vvH56bAafGC7N8//m0MCD9DPO4ZCdM95vEFJBKQjEEpLJuYQZIpR3TCJCbTukB/vw10wIA6TirAchdp/sBd/tZMgaIQkUPIKuUdABEqaYVkNWKGgGiWOVyTZhVyxoAolxXC8jqhd76gBhU1gCySamnCMQkLUctUPV4yVtsgbpZVrbXApULnbzF58DKgNo3DiGCwqP0c0Qf1a9wFyIAoAs4V9/5TAQAAAAAAACALiBW3zkSAQBdQKi9cSACbUC0eQwQQTkg2AwCTxFEkz7oqQWCSRdwNQyjRRdw1QLBpHRn0q5x8hPB/MRkBAAAAACjA37/bLnNn+TPj0QAwM8oOBABAAAAAIw6Fyz1v4lul0ZEAOB/jYIDEQAAAAAAb8e2SyP2iAB4GgXsEQEAAADAsHMBe0QAGAXsEQEAAAAAc4Hx0og9IgCeRgF7RAAAAAAw7FzAHtGQgE/i6EY4VPSlbAAAAABJRU5ErkJggg=="
+    }
+  }
+}

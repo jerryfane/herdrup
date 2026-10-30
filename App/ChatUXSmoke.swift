@@ -93,8 +93,8 @@ enum ChatUXSmoke {
                             "text": "The discovery board:\n\n```svg\n\(ownerSVG)\n```\n\nAnd a broken one:\n\n```svg\n<svg viewBox=\"0 0 10 10\"><rect width=\"4\"></svg>\n```",
                             "ts_ms": timestamp + 2])
         }
-        // A long session's refreshes bring nothing new, as an idle agent's polls do.
-        if responses > 1, !longSession {
+        // Presentation-only tests hold the transcript; refresh/streaming tests keep updates.
+        if responses > 1, !longSession, environment["HERDR_CHAT_UX_STATIC"] != "1" {
             entries.append(["id": "ux-incoming", "kind": "reply", "final": true,
                             "text": "Incoming café update after refresh.", "ts_ms": timestamp + 3])
             entries.append(["id": "ux-incoming-later", "kind": "reply", "final": true,

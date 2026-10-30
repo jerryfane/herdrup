@@ -77,16 +77,18 @@ final class SettingsTests: XCTestCase {
     func testJavaScriptPreviewSwitchFlipsAndExplainsItself() {
         let app = XCUIApplication.launched(mock: "settings")
 
-        let heading = app.staticTexts["HTML PREVIEWS"]
+        // Proposal B (#572): the switch is an inline row of the root's Preferences group,
+        // its explanation the row's subtitle.
+        let heading = app.staticTexts["PREFERENCES"]
+        XCTAssertTrue(heading.waitForExistence(timeout: 10), "Settings should carry a Preferences group")
+
+        let row = app.staticTexts["Run JavaScript in previews"]
+        XCTAssertTrue(row.waitForExistence(timeout: 10))
         var scrolls = 0
-        while !heading.exists, scrolls < 8 {
+        while !app.frame.contains(row.frame), scrolls < 8 {
             app.swipeUp()
             scrolls += 1
         }
-        XCTAssertTrue(heading.waitForExistence(timeout: 10), "Settings should carry an HTML previews section")
-
-        let row = app.staticTexts["Run JavaScript"]
-        XCTAssertTrue(row.waitForExistence(timeout: 10))
 
         let willRun = app.staticTexts.containing(
             NSPredicate(format: "label CONTAINS[c] %@", "will run")).firstMatch
@@ -344,5 +346,54 @@ final class SettingsTests: XCTestCase {
                            "\(state): the old unconditional line is still shown")
             app.terminate()
         }
+    }
+
+    /// PROPOSAL B's SUGGESTIONS (#572): an update waiting and an exhausted account show as
+    /// rows under the machine card, each with its count, and each opens the page that acts
+    /// on it. The `serverupdate` mock offers herdr 0.9.5 to a 0.9.3 mac-mini, and its
+    /// accounts are the shared fixture, where `acc-claude-2` ("Claude Pro (personal)") is
+    /// exhausted. Without the suggestions group neither identifier exists; a row wired to
+    /// the wrong page fails on the page title it lands on.
+    func testSuggestionsShowUpdateAndExhaustedAccountAndOpenTheirPages() {
+        let app = XCUIApplication.launched(mock: "serverupdate", environment: ["HERDR_MOCK_UPDATE": "available"])
+        let settingsTab = app.tabBars.buttons["Settings"].exists
+            ? app.tabBars.buttons["Settings"] : app.buttons["Settings"].firstMatch
+        XCTAssertTrue(settingsTab.waitForExistence(timeout: 15))
+        settingsTab.tap()
+
+        let card = app.buttons["settings-machine-card"]
+        XCTAssertTrue(card.waitForExistence(timeout: 15), "the machine card should lead Settings")
+        XCTAssertTrue(card.label.contains("mac-mini"), "the card names the machine (got \(card.label))")
+
+        let update = app.buttons["settings-suggestion-update"]
+        XCTAssertTrue(update.waitForExistence(timeout: 15), "an available herdr update is a suggestion")
+        XCTAssertTrue(update.label.contains("Update herdr to 0.9.5"), "got \(update.label)")
+        let exhausted = app.buttons["settings-suggestion-exhausted"]
+        XCTAssertTrue(exhausted.waitForExistence(timeout: 15), "an exhausted account is a suggestion")
+        XCTAssertTrue(exhausted.label.contains("Claude Pro (personal)"), "got \(exhausted.label)")
+        XCTAssertGreaterThan(exhausted.frame.minY, update.frame.minY, "the update leads, the account follows")
+        XCTAssertGreaterThan(update.frame.minY, card.frame.maxY, "suggestions sit under the machine card")
+        attach(app, "settings-b-suggestions")
+
+        // The update opens Machines, where the shipped update card waits.
+        update.tap()
+        XCTAssertTrue(app.staticTexts["server-update-title"].firstMatch.waitForExistence(timeout: 15),
+                      "the update suggestion should open Machines and its update card")
+        XCTAssertTrue(app.staticTexts["Machines"].firstMatch.exists)
+        attach(app, "settings-b-machines")
+
+        // Back to the root (iPhone) — on the iPad the sidebar stays beside the detail.
+        if UIDevice.current.userInterfaceIdiom != .pad {
+            let back = app.buttons["Back"].firstMatch
+            XCTAssertTrue(back.waitForExistence(timeout: 5))
+            back.tap()
+        }
+        XCTAssertTrue(exhausted.waitForExistence(timeout: 10))
+        exhausted.tap()
+        XCTAssertTrue(app.staticTexts["ACCOUNTS"].waitForExistence(timeout: 10),
+                      "the exhausted suggestion should open Accounts")
+        XCTAssertTrue(app.staticTexts["exhausted"].firstMatch.waitForExistence(timeout: 10),
+                      "Accounts should show the exhausted account's status")
+        attach(app, "settings-b-accounts")
     }
 }

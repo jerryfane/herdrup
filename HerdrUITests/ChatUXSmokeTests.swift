@@ -209,7 +209,7 @@ final class ChatUXSmokeTests: XCTestCase {
     /// source, search still finds words that are only in the diagram source, and after a
     /// relaunch the diagram comes back from the disk cache at the same size.
     func testMermaidReplyRendersADiagramThatOpensTheViewer() {
-        let app = launch(mermaid: true)
+        let app = launch(mermaid: true, environment: ["HERDR_CHAT_UX_STATIC": "1"])
         let block = app.descendants(matching: .any)["chat-mermaid"].firstMatch
         XCTAssertTrue(block.waitForExistence(timeout: 12), app.debugDescription)
         let image = app.buttons["chat-mermaid-image"].firstMatch
@@ -262,7 +262,7 @@ final class ChatUXSmokeTests: XCTestCase {
         // A relaunch draws nothing: the diagram comes back from the disk cache, at the size
         // it was shown at and still at the screen's scale.
         app.terminate()
-        let relaunched = launch(mermaid: true)
+        let relaunched = launch(mermaid: true, environment: ["HERDR_CHAT_UX_STATIC": "1"])
         let cachedImage = relaunched.buttons["chat-mermaid-image"].firstMatch
         XCTAssertTrue(cachedImage.waitForExistence(timeout: 30), relaunched.debugDescription)
         XCTAssertEqual(cachedImage.value as? String, drawn + "disk")

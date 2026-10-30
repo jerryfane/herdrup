@@ -1,0 +1,86 @@
+{
+  "state": "gram-loading",
+  "ping": {
+    "type": "pong",
+    "version": "0.9.5",
+    "protocol": 22,
+    "capabilities": {
+      "live_handoff": true,
+      "pane_input_stream": true,
+      "gram_upload_stream": true,
+      "agent_session_transfer": true,
+      "agent_session_transfer_harnesses": [
+        "claude",
+        "codex",
+        "omp"
+      ],
+      "events_v2": true,
+      "agent_forget": true,
+      "api_bridge_multi": true,
+      "pane_history": true,
+      "agent_transcript": true,
+      "agent_answer": true,
+      "agent_avatar": true
+    }
+  },
+  "agent.list": {
+    "type": "agent_list",
+    "agents": [
+      {
+        "pane_id": "w1:p1",
+        "terminal_id": "t1",
+        "workspace_id": "w1",
+        "tab_id": "w1:t1",
+        "focused": false,
+        "revision": 20,
+        "name": "vetrina",
+        "agent": "codex",
+        "agent_status": "idle",
+        "cwd": "/home/dev/reference",
+        "terminal_title_stripped": "Ready",
+        "status_since_unix_ms": 1793180220000
+      },
+      {
+        "pane_id": "hetzner-1/w1:p2",
+        "terminal_id": "t2",
+        "workspace_id": "w1",
+        "tab_id": "w1:t1",
+        "focused": false,
+        "revision": 21,
+        "name": "hetzner-1/clientloop",
+        "agent": "claude",
+        "agent_status": "idle",
+        "cwd": "/home/dev/reference",
+        "terminal_title_stripped": "Ready",
+        "status_since_unix_ms": 1793178240000,
+        "machine_id": "hetzner-1",
+        "machine_label": "hetzner-1",
+        "reachability": "reachable"
+      },
+      {
+        "pane_id": "w1:p3",
+        "terminal_id": "t3",
+        "workspace_id": "w1",
+        "tab_id": "w1:t1",
+        "focused": false,
+        "revision": 22,
+        "name": "clientloop",
+        "agent": "claude",
+        "agent_status": "idle",
+        "cwd": "/home/dev/reference",
+        "status_since_unix_ms": 1793172660000,
+        "terminal_title_stripped": "Ready"
+      }
+    ]
+  },
+  "gram.list": {
+    "type": "gram_list",
+    "messages": [],
+    "unread_count": 0,
+    "has_more": false
+  },
+  "accounts.list": {
+    "type": "accounts_list",
+    "accounts": []
+  }
+}

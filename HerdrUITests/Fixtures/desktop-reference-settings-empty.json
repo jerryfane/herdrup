@@ -1,0 +1,27 @@
+{
+  "state": "settings",
+  "ping": {
+    "type": "pong",
+    "version": "0.9.5",
+    "protocol": 22,
+    "capabilities": { "events_v2": true }
+  },
+  "agent.list": { "type": "agent_list", "agents": [] },
+  "machine.status": { "type": "machine_status", "machines": {} },
+  "server.staged_update": {
+    "type": "staged_update",
+    "running_version": "0.9.5",
+    "running_protocol": 22,
+    "running_sha": "4c1e9a2",
+    "staged": null
+  },
+  "accounts.list": { "type": "accounts_list", "accounts": [] },
+  "guest.list": {
+    "type": "guest_list",
+    "guests": [],
+    "invites": [],
+    "link": { "state": "off", "last_error": null }
+  },
+  "guest.audit": { "type": "guest_audit", "entries": [] },
+  "gram.list": { "type": "gram_list", "messages": [], "unread_count": 0 }
+}

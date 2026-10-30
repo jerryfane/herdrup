@@ -1,0 +1,32 @@
+{
+  "environment": {
+    "HERDR_DESKTOPREF_CAPTURE": "1",
+    "HERDR_STEADY_CARET": "1",
+    "HERDR_MOCK_STILL": "1",
+    "HERDR_MOCK_CHAT_OPENS_IN": "chat"
+  },
+  "writerDraft": "Review the native terminal and chat controls, keeping the conversation visible above this inline writer. Preserve the keyboard, attachment, microphone and send actions in their original positions. The writer grows upward as the draft wraps, and its handle expands the same editor rather than opening a different modal. Keep this draft intact while comparing the collapsed and expanded states. Do not send it; this is a synthetic reference capture with no network connection.",
+  "savedHosts": [
+    {
+      "id": "D0310A00-0000-4000-8000-000000000001",
+      "host": "reference-hub.example.invalid",
+      "username": "demo",
+      "nickname": "Reference hub",
+      "authKind": "key"
+    },
+    {
+      "id": "D0310A00-0000-4000-8000-000000000002",
+      "host": "build-laptop.example.invalid",
+      "username": "builder",
+      "nickname": "Build laptop",
+      "authKind": "key"
+    },
+    {
+      "id": "D0310A00-0000-4000-8000-000000000003",
+      "host": "linux-workstation.example.invalid",
+      "username": "demo",
+      "nickname": "Linux workstation",
+      "authKind": "key"
+    }
+  ]
+}

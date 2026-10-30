@@ -16,6 +16,84 @@ conclusions remain unverified.
 > both entirely outside the 89.6–102.1 ms range recorded here. Batches differ;
 > neither table corrects the other.
 
+## Gram transfers — 2026-10-29 (#573, #576)
+
+Owner SSH uploads now use the existing `remote-api-bridge` streaming command
+instead of the unsupported `api-bridge --duplex` command, which forced the
+48 KiB fallback. At most four 512 KiB frames may await acknowledgment; completion
+waits for every acknowledgment and propagates delayed errors. SSH channels offer
+a 2 MiB receive window instead of 128 KiB. Download APIs and guest relay framing
+are unchanged. The server request-reader improvement is separate:
+[herdr#349](https://github.com/jerryfane/herdr/pull/349).
+
+### Synthetic protocol measurements, not native app speeds
+
+These are **10 MiB transfers over emulated 120 ms RTT / 100 Mbit SSH**, using
+Python/Paramiko with app-like windows, a sandbox daemon, and SHA-256 download
+checks. “Old/new app” below means the corresponding protocol configuration, not
+a run of the Swift app. Values are measured MiB/s (the original script mislabeled
+them MB/s); their application to native Citadel/NIOSSH was inferred.
+
+| Protocol configuration | Upload | Download (`gram.get_file`) |
+|---|---:|---:|
+| Old app model + old server | 0.17 | 0.70 |
+| New app model + old server | 5.60 | 4.97 |
+| Old app model + new server | 0.29 | 0.70 |
+| New app model + new server | 5.60 | 5.70 |
+
+The old server was `8a9d5df234fcfca6c256a0ba24877b267c2008e3`; the measured
+new binary was CI-built `2030ee8bf6c903539a46abb350e06b5e05ace492`.
+The merged server head is `d175b50315244e0290e7cf2244647d0d4fb99d26`:
+the reader, upload stream, guest gate, and Gram storage production code are
+unchanged from the measured revision (the reader's tests changed).
+The merged binary was not benchmarked in this synthetic series. Raw tables and methodology:
+`/root/fleet-tools/state/gram-transfer-speed-20261029/measure.md` and its
+`before-appwin-rtt120-100mbit.table.md` / `after-appwin-rtt120-100mbit.table.md`.
+
+The runtime app head is `df5288bf8134b13b4108e5f2d2876f58cbb7566c`.
+[Focused hosted run 40881508049](https://github.com/themartianapp/herdrup/actions/runs/40881508049)
+passed at that exact head. Its native iPhone simulator Gram smoke covers the
+mock-backed UI, including attachment cards, image preview, sending, and download
+actions; screenshots were inspected. It does **not** measure a real transfer.
+Channel behavior tests cover backpressure, final acknowledgment drain, and
+delayed errors using injected acknowledgments, not the Citadel wire path.
+
+Guest relay upload/download throughput was **not measured**. Guests keep the
+chunked request path; the SSH window and streaming-upload changes do not apply
+to RelayTransport. Less server request-reader CPU for guest upload chunks is
+an inference from the shared reader, not a relay speed result. The experimental
+four-in-flight chunked-download benchmark is not a shipped download change.
+Physical-phone/cellular throughput and end-to-end relay throughput remain unverified.
+
+### Production Citadel measurements — 2026-10-30
+
+[Hosted run 40986544916](https://github.com/themartianapp/herdrup/actions/runs/40986544916)
+ran an optimized Swift 6.1 Linux consumer of the unchanged production HerdrKit
+library through real OpenSSH and an isolated daemon. Each row transfers one
+10 MiB payload over an emulated 120 ms RTT / 100 Mbit connection. Checksums and
+posted metadata matched. These are actual Citadel measurements, not UIKit or
+physical-phone measurements.
+
+| App code + server | Upload (MiB/s) | Full download (MiB/s) |
+|---|---:|---:|
+| Old + old | 0.261 | 0.462 |
+| New + old | 4.300 | 4.315 |
+| Old + new | 0.354 | 0.462 |
+| New + new | 4.452 | 4.228 |
+
+Old/new app commits: `9876878edea599b347a9788c387107775d848fdc` /
+`ea7f4f5c9c505f449c592b18c6bd05c1d5d7f7f3`. Old/new server binaries:
+`8a9d5df234fcfca6c256a0ba24877b267c2008e3` /
+`d175b50315244e0290e7cf2244647d0d4fb99d26`; published binary hashes were verified.
+OpenSSH observed the actual receive window change from 131072 to 2097152 bytes.
+Command receipts confirmed the old `api-bridge --duplex` attempt and the new
+`remote-api-bridge` path. All four scenarios passed without a test retry.
+
+These are single samples after capability discovery, not cold-cache or
+real-internet claims. The benchmark also verified sequential chunked downloads,
+but did not exercise the guest relay. Sanitized receipts and source/lockfile
+hashes: `/root/fleet-tools/state/gram-transfer-speed-20261029/native-citadel-40986544916/`.
+
 ## Measured phase latencies
 
 | phase | latency | what it is |

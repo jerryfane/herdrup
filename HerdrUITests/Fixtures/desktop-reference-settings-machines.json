@@ -1,0 +1,165 @@
+{
+  "state": "settings",
+  "ping": {
+    "type": "pong",
+    "version": "0.9.5",
+    "protocol": 22,
+    "capabilities": { "events_v2": true }
+  },
+  "agent.list": {
+    "type": "agent_list",
+    "agents": [
+      {
+        "pane_id": "11111111111111111111111111111111/w1:p1",
+        "terminal_id": "atlas-t1",
+        "workspace_id": "11111111111111111111111111111111/w1",
+        "tab_id": "11111111111111111111111111111111/w1:t1",
+        "focused": false,
+        "revision": 1,
+        "name": "11111111111111111111111111111111/review",
+        "agent": "codex",
+        "agent_status": "idle",
+        "cwd": "/srv/review",
+        "machine_id": "11111111111111111111111111111111",
+        "machine_label": "atlas-mini",
+        "reachability": "reachable",
+        "status_since_unix_ms": 1793180220000
+      },
+      {
+        "pane_id": "11111111111111111111111111111111/w1:p2",
+        "terminal_id": "atlas-t2",
+        "workspace_id": "11111111111111111111111111111111/w1",
+        "tab_id": "11111111111111111111111111111111/w1:t1",
+        "focused": false,
+        "revision": 2,
+        "name": "11111111111111111111111111111111/docs",
+        "agent": "claude",
+        "agent_status": "idle",
+        "cwd": "/srv/docs",
+        "machine_id": "11111111111111111111111111111111",
+        "machine_label": "atlas-mini",
+        "reachability": "reachable",
+        "status_since_unix_ms": 1793180220000
+      },
+      {
+        "pane_id": "22222222222222222222222222222222/w1:p1",
+        "terminal_id": "birch-t1",
+        "workspace_id": "22222222222222222222222222222222/w1",
+        "tab_id": "22222222222222222222222222222222/w1:t1",
+        "focused": false,
+        "revision": 3,
+        "name": "22222222222222222222222222222222/build",
+        "agent": "omp",
+        "agent_status": "unknown",
+        "last_known_status": "idle",
+        "cwd": "/srv/build",
+        "machine_id": "22222222222222222222222222222222",
+        "machine_label": "birch-air",
+        "reachability": "degraded",
+        "status_since_unix_ms": 1793180220000
+      },
+      {
+        "pane_id": "33333333333333333333333333333333/w1:p1",
+        "terminal_id": "cedar-t1",
+        "workspace_id": "33333333333333333333333333333333/w1",
+        "tab_id": "33333333333333333333333333333333/w1:t1",
+        "focused": false,
+        "revision": 4,
+        "name": "33333333333333333333333333333333/archive",
+        "agent": "codex",
+        "agent_status": "unknown",
+        "last_known_status": "idle",
+        "cwd": "/srv/archive",
+        "machine_id": "33333333333333333333333333333333",
+        "machine_label": "cedar-linux",
+        "reachability": "unreachable",
+        "status_since_unix_ms": 1793180220000
+      },
+      {
+        "pane_id": "guest-lab/w1:p1",
+        "terminal_id": "guest-t1",
+        "workspace_id": "guest-lab/w1",
+        "tab_id": "guest-lab/w1:t1",
+        "focused": false,
+        "revision": 5,
+        "name": "guest-lab/scratch",
+        "agent": "claude",
+        "agent_status": "idle",
+        "cwd": "/srv/scratch",
+        "machine_id": "guest-lab",
+        "machine_label": "guest-lab",
+        "reachability": "reachable",
+        "status_since_unix_ms": 1793180220000
+      }
+    ]
+  },
+  "machine.status": {
+    "type": "machine_status",
+    "machines": {
+      "11111111111111111111111111111111": {
+        "profile_id": "11111111111111111111111111111111",
+        "display_label": "atlas-mini",
+        "saved_state": "coordinated",
+        "federation_configured": true,
+        "federation_reachability": "reachable",
+        "stale": false
+      },
+      "22222222222222222222222222222222": {
+        "profile_id": "22222222222222222222222222222222",
+        "display_label": "birch-air",
+        "saved_state": "coordinated",
+        "federation_configured": true,
+        "federation_reachability": "degraded",
+        "stale": false
+      },
+      "33333333333333333333333333333333": {
+        "profile_id": "33333333333333333333333333333333",
+        "display_label": "cedar-linux",
+        "saved_state": "coordinated",
+        "federation_configured": true,
+        "federation_reachability": "offline",
+        "stale": false
+      },
+      "44444444444444444444444444444444": {
+        "profile_id": "44444444444444444444444444444444",
+        "display_label": "delta-nas",
+        "saved_state": "disabled",
+        "federation_configured": false,
+        "federation_reachability": null,
+        "stale": false
+      },
+      "55555555555555555555555555555555": {
+        "profile_id": "55555555555555555555555555555555",
+        "display_label": "ember-box",
+        "saved_state": "coordinator_disabled",
+        "federation_configured": true,
+        "federation_reachability": null,
+        "stale": false
+      },
+      "66666666666666666666666666666666": {
+        "profile_id": "66666666666666666666666666666666",
+        "display_label": "fjord-laptop",
+        "saved_state": "saved",
+        "federation_configured": false,
+        "federation_reachability": null,
+        "stale": true
+      }
+    }
+  },
+  "server.staged_update": {
+    "type": "staged_update",
+    "running_version": "0.9.5",
+    "running_protocol": 22,
+    "running_sha": "4c1e9a2",
+    "staged": null
+  },
+  "accounts.list": { "type": "accounts_list", "accounts": [] },
+  "guest.list": {
+    "type": "guest_list",
+    "guests": [],
+    "invites": [],
+    "link": { "state": "off", "last_error": null }
+  },
+  "guest.audit": { "type": "guest_audit", "entries": [] },
+  "gram.list": { "type": "gram_list", "messages": [], "unread_count": 0 }
+}

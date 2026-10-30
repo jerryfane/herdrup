@@ -63,13 +63,17 @@ final class NeedsYouPillTests: XCTestCase {
             throw XCTSkip("needs a list several screens tall; the iPhone roster")
         }
         let app = XCUIApplication.launched(mock: "needsyou", environment: [
-            "HERDR_MOCK_WAITING": "3", "HERDR_MOCK_WAITING_AFTER": "20",
+            "HERDR_MOCK_WAITING": "3", "HERDR_MOCK_WAITING_MANUAL": "1",
         ])
         waitForTopOfList(app, firstRow: "w2:p1")
         let pill = needsYouPill(app)
         scrollDown(app)
         XCTAssertFalse(onScreen(row(app, "w2:p1")), "the list is scrolled down")
         XCTAssertFalse(pill.exists, "nobody waits yet, so no pill")
+
+        let startWaiting = app.buttons["fixture-start-waiting"]
+        XCTAssertTrue(startWaiting.waitForHittable(timeout: 5))
+        startWaiting.tap()
 
         XCTAssertTrue(pill.waitForExistence(timeout: 30), "the pill appears when agents start waiting off screen")
         XCTAssertEqual(pill.label, "3 agents need you")
