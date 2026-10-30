@@ -984,6 +984,7 @@ struct TerminalInteractionRoot: View {
     let control: Bool
     @Environment(\.horizontalSizeClass) private var sizeClass
     @State private var compactLayout = false
+    @State private var editorDiagnostics = ""
     private let layoutTransitions = ProcessInfo.processInfo.environment["HERDR_LAYOUT_TRANSITIONS"] == "1"
     /// ONLY the spacer, never the harness itself: the probe's ten-per-second tick would
     /// otherwise re-render the pane under test (see `KeyboardSpacerBox`).
@@ -998,8 +999,11 @@ struct TerminalInteractionRoot: View {
                         .accessibilityIdentifier("fixture-layout-compact")
                     Button("Regular") { compactLayout = false }
                         .accessibilityIdentifier("fixture-layout-regular")
+                    Button("Inspect editors") { editorDiagnostics = inspectEditors() }
+                        .accessibilityIdentifier("fixture-inspect-editors")
                     Text(compactLayout ? "compact" : "regular")
                         .accessibilityIdentifier("fixture-layout-state")
+                        .accessibilityValue(editorDiagnostics)
                 }
                 .buttonStyle(.bordered)
             }
@@ -1028,6 +1032,40 @@ struct TerminalInteractionRoot: View {
         // and focus never moved. That cost two rounds and looked like a SwiftUI focus
         // bug. Stacking it above the pane leaves the reply bar and the keyboard region
         // untouched.
+    }
+
+    private func inspectEditors() -> String {
+        var records: [[String: Any]] = []
+        func walk(_ view: UIView, window: UIWindow) {
+            if let editor = view as? UITextView,
+               let identifier = editor.accessibilityIdentifier,
+               identifier.contains("composer") || identifier.contains("reply") {
+                let rect = editor.convert(editor.bounds, to: window)
+                let hit = window.hitTest(CGPoint(x: rect.midX, y: rect.midY), with: nil)
+                var ancestors: [String] = []
+                var node: UIView? = editor
+                while let current = node {
+                    ancestors.append("\(type(of: current)) frame=\(current.frame) hidden=\(current.isHidden) alpha=\(current.alpha) interactive=\(current.isUserInteractionEnabled)")
+                    node = current.superview
+                }
+                records.append([
+                    "identifier": identifier, "frame": NSStringFromCGRect(rect),
+                    "accessibilityFrame": NSStringFromCGRect(editor.accessibilityFrame),
+                    "editable": editor.isEditable, "firstResponder": editor.isFirstResponder,
+                    "hitClass": hit.map { String(describing: type(of: $0)) } ?? "nil",
+                    "hitIdentifier": hit?.accessibilityIdentifier ?? "",
+                    "hitInsideEditor": hit.map { $0 === editor || $0.isDescendant(of: editor) } ?? false,
+                    "ancestors": ancestors,
+                ])
+            }
+            for child in view.subviews { walk(child, window: window) }
+        }
+        for scene in UIApplication.shared.connectedScenes.compactMap({ $0 as? UIWindowScene }) {
+            for window in scene.windows { walk(window, window: window) }
+        }
+        guard let data = try? JSONSerialization.data(withJSONObject: records, options: [.sortedKeys]),
+              let text = String(data: data, encoding: .utf8) else { return "encoding failed" }
+        return text
     }
 }
 

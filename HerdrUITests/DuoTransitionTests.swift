@@ -19,9 +19,19 @@ final class DuoTransitionTests: TerminalInteractionTestCase {
 
     private func editor(_ identifier: String) throws -> XCUIElement {
         let candidates = app.textViews.matching(identifier: identifier)
-        XCTAssertTrue(poll(10, every: 0.1) {
+        let hittable = poll(10, every: 0.1) {
             candidates.allElementsBoundByIndex.contains { $0.isHittable }
-        })
+        }
+        if !hittable {
+            app.buttons["fixture-inspect-editors"].tap()
+            let native = app.staticTexts["fixture-layout-state"].value as? String ?? "missing"
+            let receipt = XCTAttachment(string: native + "\n\n" + app.debugDescription)
+            receipt.name = "composer-hit-test-diagnostics"
+            receipt.lifetime = .keepAlways
+            add(receipt)
+            attach("composer-not-hittable")
+        }
+        XCTAssertTrue(hittable)
         return try XCTUnwrap(candidates.allElementsBoundByIndex.first { $0.isHittable })
     }
 
