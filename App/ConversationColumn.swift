@@ -138,15 +138,12 @@ private struct ConversationColumnResizer: View {
     @State private var dragStartWidth: Double?
     @State private var readoutShown = false
     @State private var hideReadout: Task<Void, Never>?
-    /// The last short, still touch on a handle: a second one soon after on the same edge resets.
-    @State private var lastTap: (edge: ConversationColumnWidth.Edge, at: Date)?
+    /// A new readout per showing: see the overlay in `body`.
+    @State private var readoutShowing = 0
 
     /// The Mac: a pointer, so a narrower hit band and nothing drawn at rest.
     private static let onMac = ProcessInfo.processInfo.isiOSAppOnMac
     private static let hitWidth: CGFloat = onMac ? 20 : 44
-    private static let doubleTapInterval: TimeInterval = 0.45
-    /// A touch that moves less than this is a tap, not a drag.
-    private static let tapSlop: CGFloat = 6
     private static let readoutHold: Duration = {
         #if DEBUG
         // UI tests read the readout after XCUITest releases the drag.
@@ -169,9 +166,15 @@ private struct ConversationColumnResizer: View {
             handle(.trailing).offset(x: reach)
         }
         .frame(maxWidth: .infinity, maxHeight: .infinity)
+        // Each showing inserts a NEW readout (`id`). Re-showing the one that is fading out
+        // revived a view in its removal transition, and iOS 27 left it out for good: in CI
+        // 40850683066 a drag began 59 ms into the 0.15 s fade and the readout never came back.
+        // With a fresh identity the old one finishes fading while the new one fades in. It
+        // stays inserted and removed rather than kept transparent: an always-mounted readout
+        // stayed in the accessibility tree at rest despite `accessibilityHidden` (40865545206).
         .overlay(alignment: .top) {
             ZStack {
-                if readoutShown { readout.transition(.opacity) }
+                if readoutShown { readout.id(readoutShowing).transition(.opacity) }
             }
             .animation(reduceMotion ? nil : .easeOut(duration: 0.15), value: readoutShown)
         }
@@ -217,6 +220,12 @@ private struct ConversationColumnResizer: View {
             if inside { hovered = edge } else if hovered == edge { hovered = nil }
         }
         .gesture(drag(edge))
+        // Its own recogniser, beside the drag rather than ahead of it, so the drag is never
+        // held back waiting for the tap to fail. Counting taps inside the drag stopped
+        // working on iOS 27: a quick double tap reaches the drag as ONE sequence (its first
+        // `onChanged` arrives after the second touch begins, `onEnded` once), so it never
+        // saw two taps (CI 40847167282).
+        .simultaneousGesture(TapGesture(count: 2).onEnded { reset() })
         .accessibilityElement()
         .accessibilityIdentifier("\(surface.rawValue)-width-handle-\(edge == .leading ? "left" : "right")")
         .accessibilityLabel("\(surface.name) width")
@@ -232,9 +241,8 @@ private struct ConversationColumnResizer: View {
         .accessibilityAction { reset() }
     }
 
-    /// One gesture for drag and double tap: a drag that starts on touch-down, so the column
-    /// follows the finger at once, and that counts as a tap when it ends where it began.
-    /// Global space, because the handle moves with the column while it is dragged.
+    /// A drag that starts with the finger, so the column follows it at once. Global space,
+    /// because the handle moves with the column while it is dragged.
     private func drag(_ edge: ConversationColumnWidth.Edge) -> some Gesture {
         DragGesture(minimumDistance: 0, coordinateSpace: .global)
             .onChanged { value in
@@ -249,23 +257,11 @@ private struct ConversationColumnResizer: View {
                                                    edge: edge, available: availableWidth)
                 stored = ConversationColumnWidth.stored(for: next, available: availableWidth)
             }
-            .onEnded { value in
-                let moved = hypot(value.translation.width, value.translation.height)
+            .onEnded { _ in
                 dragStartWidth = nil
                 if dragging != nil {
                     dragging = nil
                     scheduleReadoutHide()
-                }
-                guard moved < Self.tapSlop else {
-                    lastTap = nil
-                    return
-                }
-                let now = Date()
-                if let last = lastTap, last.edge == edge, now.timeIntervalSince(last.at) < Self.doubleTapInterval {
-                    lastTap = nil
-                    reset()
-                } else {
-                    lastTap = (edge, now)
                 }
             }
     }
@@ -283,6 +279,7 @@ private struct ConversationColumnResizer: View {
     private func showReadout() {
         hideReadout?.cancel()
         hideReadout = nil
+        if !readoutShown { readoutShowing += 1 }
         readoutShown = true
     }
 
