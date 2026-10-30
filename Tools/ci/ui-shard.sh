@@ -595,14 +595,16 @@ case "$shard" in
     check_classes_ran TestReceipts/iPhone26Paging-first.xcresult PagingTests || failed=1
     ;;
   ios26-ipad)
-    run_suite iPad26Launch "$IPAD_UDID" 5m \
-      -only-testing:HerdrUITests/OnboardingTests/testInstallAndPairCommandsAreCopyable || failed=1
-    check_classes_ran TestReceipts/iPad26Launch-first.xcresult OnboardingTests || failed=1
-    # The resize round is recorded, as in the ipad shard; the launch round booted the iPad.
+    # Prepare the display before the first XCTest session, as in the ipad shard.
+    # Run 40962340059 started Launch before the recorder and timed out in the
+    # simulator launcher without executing a test; the recorded resize round ran.
     boot_simulator "$IPAD_UDID" TestReceipts/iPad26Recording-boot.log || exit 1
     xcrun simctl io "$IPAD_UDID" recordVideo TestReceipts/terminal-resize-iPad26.mp4 \
       > TestReceipts/terminal-resize-iPad26-video.log 2>&1 &
     recorder=$!
+    run_suite iPad26Launch "$IPAD_UDID" 5m \
+      -only-testing:HerdrUITests/OnboardingTests/testInstallAndPairCommandsAreCopyable || failed=1
+    check_classes_ran TestReceipts/iPad26Launch-first.xcresult OnboardingTests || failed=1
     run_suite iPad26Resize "$IPAD_UDID" 25m -only-testing:HerdrUITests/TerminalResizeTests || failed=1
     stop_recording
     check_classes_ran TestReceipts/iPad26Resize-first.xcresult TerminalResizeTests || failed=1

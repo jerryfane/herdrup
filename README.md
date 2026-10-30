@@ -204,6 +204,18 @@ It saves a successful build before testing, so a test failure does not discard t
 Cache hits still run the Settings regression and attached-crash check; test results are
 never cached. Release archives and TestFlight builds are unchanged.
 
+The separate [`iOS 26` workflow](.github/workflows/ios26.yml) runs on pushes to `main`
+and manual dispatch, not on pull requests. It installs iOS 26.5 on the Xcode 27
+runner and checks one iPhone and one iPad: launch, Chat UX and terminal resize,
+plus Gram/paging on iPhone and agent-list layout on iPad. A red run on `main` is
+a real main-branch failure. Each selected class must execute tests; an empty
+result cannot pass. The iPad display recorder starts before its first test session,
+matching the main iPad shard's cold-start preparation.
+
+The runtime cache stores Xcode's complete `.exportedBundle`, keyed by OS version
+and runner architecture, rather than live simulator state. A cache hit still
+imports the runtime and runs every selected test; test results are never cached.
+
 The shared native composer reconciles external text edits after the SwiftUI layout pass,
 using the current binding rather than a captured layout value. This preserves newer
 keystrokes while still applying dictation, mention completion, restored drafts, and send clears.
