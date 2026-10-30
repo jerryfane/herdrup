@@ -2578,6 +2578,7 @@ struct TerminalHomeView: View {
                     }
                     .tag(HomeTab.agents)
                     .tabItem { Label(HomeTab.agents.label, systemImage: HomeTab.agents.icon) }
+                    .toolbar(hSizeClass == .regular || frontID != nil ? .hidden : .visible, for: .tabBar)
 
                     GramView(client: client, unread: gramUnread,
                              showingSaved: $gramShowingSaved,
@@ -2588,6 +2589,7 @@ struct TerminalHomeView: View {
                         .tag(HomeTab.gram)
                         .tabItem { Label(HomeTab.gram.label, systemImage: HomeTab.gram.icon) }
                         .modifier(GramUnreadBadge(unread: gramUnread))
+                        .toolbar(hSizeClass == .regular ? .hidden : .visible, for: .tabBar)
 
                     SettingsView(
                         client: client,
@@ -2601,9 +2603,9 @@ struct TerminalHomeView: View {
                         .tag(HomeTab.settings)
                         .badge(settingsBadge)
                         .tabItem { Label(HomeTab.settings.label, systemImage: HomeTab.settings.icon) }
+                        .toolbar(hSizeClass == .regular ? .hidden : .visible, for: .tabBar)
                 }
                 .tint(Palette.text)
-                .toolbar(hSizeClass == .regular ? .hidden : .visible, for: .tabBar)
                 // A hidden front pane drops key focus and the PTY lock without unmounting.
                 PaneKeepAliveContainer(
                     client: client, slots: slots, frontID: frontID,
