@@ -198,6 +198,8 @@ and failed readiness or install steps fail the round.
 Debug resize receipts are per pane, so a background terminal's fixed grid
 cannot overwrite the foreground terminal's keyboard-resize result.
 The built-version check selects `Herdr.app`, not the separate UI test runner bundle.
+Focused `Class/method` selectors keep their XCTest selector intact but replace the
+slash with a hyphen in receipt filenames, so the boot log remains inside `TestReceipts`.
 Gram search regressions check matching results and older-page fetch counts, not prompt wording.
 Gram state checks poll completed accessibility queries directly, preserving their conditions
 when a slow lookup consumes the waiter's deadline. Synchronous queries can exceed that deadline.

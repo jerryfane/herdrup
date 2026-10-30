@@ -636,7 +636,7 @@ case "$shard" in
         recorder=$!
       fi
       echo "::notice::focused dispatch: HerdrUITests/$ONLY_SUITE on $label only"
-      run_suite "$label-$ONLY_SUITE" "$udid" 25m "-only-testing:HerdrUITests/$ONLY_SUITE" || failed=1
+      run_suite "$label-${ONLY_SUITE//\//-}" "$udid" 25m "-only-testing:HerdrUITests/$ONLY_SUITE" || failed=1
       stop_recording
     fi
     ;;
