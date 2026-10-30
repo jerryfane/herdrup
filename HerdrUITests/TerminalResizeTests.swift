@@ -326,7 +326,9 @@ final class TerminalResizeTests: TerminalInteractionTestCase {
         }
         let originalColumns = try XCTUnwrap(probe()["cols"] as? Int)
         let originalFont = try XCTUnwrap(probe()["fontPoints"] as? Double)
-        menuItem("terminal-actions", "terminal-font-increase") {
+        // By title: on iOS 27 the Text size entries lose their identifiers (see `menuEntry`),
+        // and `onscreen` matches an identifier or a label.
+        menuItem("terminal-actions", "Increase") {
             ($0["fontPoints"] as? Double ?? 0) > originalFont
         }
         wait { state in
@@ -334,7 +336,7 @@ final class TerminalResizeTests: TerminalInteractionTestCase {
             return columns < originalColumns
         }
         settled(); anchor(); attach("larger-font-history")
-        menuItem("terminal-actions", "terminal-font-decrease") {
+        menuItem("terminal-actions", "Decrease") {
             ($0["fontPoints"] as? Double) == originalFont
         }
         settled(cols: originalColumns); anchor()

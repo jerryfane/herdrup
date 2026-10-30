@@ -143,9 +143,10 @@ final class AgentAvatarUITests: XCTestCase {
         XCTAssertTrue(actions.waitForExistence(timeout: 10), "the guest pane should offer ⋯")
         actions.tap()
         // The menu is open once one of its known entries shows; only then does the missing
-        // Avatar… entry mean anything.
-        let entries = app.buttons.matching(NSPredicate(format: "identifier IN %@",
-                                                       ["guest-font-increase", "guest-notifications"]))
+        // Avatar… entry mean anything. Increase by its label too: on iOS 27 it loses its
+        // identifier inside the Text size section (`menuEntry`).
+        let entries = app.buttons.matching(NSPredicate(format: "identifier IN %@ OR label == %@",
+                                                       ["guest-font-increase", "guest-notifications"], "Increase"))
         XCTAssertTrue(entries.firstMatch.waitForExistence(timeout: 5), "the guest ⋯ menu should open")
         XCTAssertFalse(app.buttons["agent-avatar-edit"].exists, "guests have no Avatar… entry")
         XCTAssertFalse(app.buttons["Avatar…"].exists)

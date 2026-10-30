@@ -17,12 +17,13 @@ final class GuestPaneTests: XCTestCase {
         return probe.label
     }
 
-    /// Opens the header's ⋯ and taps `item`, waiting for the menu to present it.
-    private func tapMenuItem(_ app: XCUIApplication, _ item: String, _ what: String) {
+    /// Opens the header's ⋯ and taps the entry `item` (titled `label`), waiting for the menu
+    /// to present it.
+    private func tapMenuItem(_ app: XCUIApplication, _ item: String, label: String, _ what: String) {
         let actions = app.buttons["guest-actions"]
         XCTAssertTrue(actions.waitForExistence(timeout: 5), "the guest header should offer ⋯")
         actions.tap()
-        let entry = app.buttons[item]
+        let entry = app.menuEntry(item, label: label)
         XCTAssertTrue(entry.waitForExistence(timeout: 5), what)
         entry.tap()
     }
@@ -81,14 +82,14 @@ final class GuestPaneTests: XCTestCase {
         attach(app, "guest-resize-before")
 
         // The guest's own text size lives in ⋯ → Text size, where the owner's is.
-        tapMenuItem(app, "guest-font-increase", "the guest pane's ⋯ should offer Increase")
+        tapMenuItem(app, "guest-font-increase", label: "Increase", "the guest pane's ⋯ should offer Increase")
         let after = waitForGrid(app, "A+ should make the agent's grid narrower") {
             $0.cols < before.cols && $0.font > before.font
         }
         Thread.sleep(forTimeInterval: 1)
         attach(app, "guest-resize-after")
 
-        tapMenuItem(app, "guest-font-decrease", "the guest pane's ⋯ should offer Decrease")
+        tapMenuItem(app, "guest-font-decrease", label: "Decrease", "the guest pane's ⋯ should offer Decrease")
         waitForGrid(app, "A− should widen the agent's grid again") {
             $0.cols > after.cols && $0.font < after.font
         }
@@ -122,8 +123,8 @@ final class GuestPaneTests: XCTestCase {
         XCTAssertTrue(actions.waitForExistence(timeout: 5))
         actions.tap()
         XCTAssertTrue(app.buttons["Copy screen"].waitForExistence(timeout: 5), "the ⋯ menu should open")
-        XCTAssertFalse(app.buttons["guest-font-increase"].exists, "no size controls on an older host")
-        XCTAssertFalse(app.buttons["guest-font-decrease"].exists, "no size controls on an older host")
+        XCTAssertFalse(app.menuEntry("guest-font-increase", label: "Increase").exists, "no size controls on an older host")
+        XCTAssertFalse(app.menuEntry("guest-font-decrease", label: "Decrease").exists, "no size controls on an older host")
         dismissMenu(app)
         // Fitted: the widest whole-pixel cell that keeps all 120 columns inside the width.
         let fitsWidth = { (reading: (cols: Int, font: Double, fill: Double)) -> Bool in
