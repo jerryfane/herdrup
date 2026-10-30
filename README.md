@@ -22,6 +22,10 @@ herdr's JSON API exposes both, so panes and agents become real UI objects instea
   On iPad and Mac, the empty detail column is a live terminal field: it stirs under the pointer
   or a finger, ripples on a tap, and your agents type their current activity into it. Hovering a
   row types that agent's line beside it. With Reduce Motion on, only the typing remains.
+- **Settings** — the connected machine's profile card opens Machines, with its herdr update
+  card, connection actions and federation. Pending updates and exhausted accounts appear as
+  suggestions above the Your herd, Preferences, Help and About groups. iPad and Mac keep the
+  same index beside the selected detail page; guest Settings uses the shared agent as its header.
 - **Live terminal** — a full SwiftTerm terminal for any pane, one tap behind its card, with gestures
   to page between agents, tail the output, and scroll history.
   History keeps its original row layout, including plain text, so resizing does not rewrap old
@@ -42,7 +46,7 @@ herdr's JSON API exposes both, so panes and agents become real UI objects instea
   machine and per network (Wi-Fi or cellular): the wait to send, the server's reply, the echo
   and the painted frame, typical and slow (90%). Type in a terminal, then open it; Copy report
   gives plain text to paste into an issue. It is always on and keeps the last 1000 keys each.
-  Instant typing (Settings → Typing; Auto, Always or Off) draws what you type at once, mosh-style,
+  Instant typing (Settings → Preferences → Instant typing; Auto, Always or Off) draws what you type at once, mosh-style,
   then checks each guess against the machine's own screen once it has the key: a right guess
   stays, a wrong one disappears. Nothing shows until the pane has echoed a key once, so a
   password prompt never shows your typing. Auto shows guesses only on a slow link (round trip
@@ -54,7 +58,7 @@ herdr's JSON API exposes both, so panes and agents become real UI objects instea
   your prompts as bubbles, its replies in rendered markdown, its thinking and tool steps folded
   into one expandable line, notes, the current checklist and questions you answer with a tap
   ("Answer in Terminal" when the server cannot). The Chat | Terminal switch under the header
-  flips to the live terminal; Settings → omp Chat sets which one opens first. Older turns load
+  flips to the live terminal; Settings → Preferences → omp agents open in sets which one opens first. Older turns load
   as you scroll up. Needs a herdr that serves `agent.transcript`; other agents keep the terminal.
   Sending adds a local bubble immediately. Its receipt distinguishes sending, agent acceptance,
   uncertain delivery and definite refusal; a matching new transcript prompt replaces it once.
@@ -195,9 +199,12 @@ when a slow lookup consumes the waiter's deadline. Synchronous queries can excee
 Terminal UI queries match the exact `terminal-surface` accessibility identifier rather than
 searching unrelated labels and values. Focus, input and viewport assertions remain unchanged.
 
-The four simulator jobs run in parallel. Gram shares the iPhone terminal job; the other
-iPhone job runs font, status-motion and remaining app tests. A failed first run still fails
-its job even if the diagnostic rerun passes; manual reruns execute the entire selected job.
+The four simulator jobs run in parallel. Gram shares the optimized Settings job; the other
+iPhone app job runs font, status-motion, agent-list and server-update tests in their own rounds
+before the remaining app tests. The server-update round has a ten-minute budget and checks
+that its class actually ran; the combined app round keeps its thirty-minute budget.
+A failed first run still fails its job even if the diagnostic rerun passes; manual reruns
+execute the entire selected job.
 The optimized Settings job builds only the selected simulator architecture and caches
 `Build/Products` for the same workflow run, commit, Xcode/SDK, OS, architecture and workspace.
 It saves a successful build before testing, so a test failure does not discard the build.
