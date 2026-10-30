@@ -184,6 +184,9 @@ public final class GramDownloadStore {
         return try await withTaskCancellationHandler {
             try await withCheckedThrowingContinuation { (continuation: CheckedContinuation<Fetched?, Error>) in
                 if Task.isCancelled {
+                    // Retire synchronously: this path owns no registered waiter and
+                    // must not depend on the separately scheduled cancellation task.
+                    if let entry { leave(waiter, entry: entry, id: id) }
                     continuation.resume(throwing: CancellationError())
                     return
                 }
