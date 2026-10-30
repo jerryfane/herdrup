@@ -313,6 +313,9 @@ The active page reserves its result before scheduling its wait, so an immediate 
 still opens or exports the file. The reservation owns those bytes only while the page waits;
 the store does not keep completed successful payloads after the page leaves. Sign-out also
 invalidates a completed reservation before it can be presented.
+Image prefetches have no such owner: cancelling the last waiter retires their transfer,
+including cancellation before the waiter registers. Another waiter or an explicit
+Open/Save keeps the shared transfer alive.
 
 Gram's composer is the terminal's: attach, mic and send sit where they do in a pane. Type @ to
 send to one agent: a “Send to one agent” list opens above the composer, and picking one puts a
