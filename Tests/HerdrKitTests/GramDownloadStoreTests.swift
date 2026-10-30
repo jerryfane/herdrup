@@ -95,7 +95,7 @@ final class GramDownloadStoreTests: XCTestCase {
     /// Cancellation races fetch's registration, including after it creates the transfer.
     /// Every schedule must release an unowned transfer; no timing outcome is required.
     func testCancellationRacingPrefetchRegistrationRetiresTheTransfer() async {
-        for _ in 0..<100 {
+        for _ in 0..<2000 {
             let store = GramDownloadStore()
             let entered = DispatchSemaphore(value: 0)
             let fetch = Task { @MainActor in
