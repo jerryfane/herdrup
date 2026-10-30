@@ -566,9 +566,13 @@ func testDictationStartDisarmsEvenIfPermissionIsDenied() throws {
         XCTAssertTrue((field.value as? String)?.contains("after-scroll") == true,
                       "scrolling overflow text should keep the composer focused and editable")
         command("reply-multiline-pasteboard")
+        // The first tap puts the caret at the end of the visible text; a second tap ON
+        // that caret opens the edit menu. Not a long press: over text, iOS 27's long press
+        // only drives the loupe and lifts with no edit menu (an empty field still gets one,
+        // see `pasteIntoReply`), where iOS 26 showed the menu on lift.
         let end = field.coordinate(withNormalizedOffset: CGVector(dx: 0.9, dy: 0.8))
         end.tap()
-        end.press(forDuration: 1)
+        end.tap()
         let paste = app.descendants(matching: .any)
             .matching(NSPredicate(format: "label == %@", "Paste"))
             .firstMatch
@@ -577,7 +581,7 @@ func testDictationStartDisarmsEvenIfPermissionIsDenied() throws {
         XCTAssertTrue((field.value as? String)?.contains("pasted-tail") == true,
                       "a multiline paste should remain in the scrolling composer")
         field.typeText(" after-paste")
-        // The caret after a long-press paste is wherever the coordinate tap placed it.
+        // The caret after the paste is wherever the coordinate tap placed it.
         // The contract here is that the multiline paste remains and the composer stays
         // focused/editable afterward — not that a normalized tap maps past the last
         // glyph. A 5pt inset legitimately changes that coordinate mapping.

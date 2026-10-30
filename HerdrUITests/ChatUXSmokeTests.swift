@@ -38,7 +38,7 @@ final class ChatUXSmokeTests: XCTestCase {
     }
 
     private func dismissTextSizeMenu(_ app: XCUIApplication) {
-        if app.buttons["terminal-font-increase"].exists {
+        if app.menuEntry("terminal-font-increase", label: "Increase").exists {
             app.descendants(matching: .any)["chat-view"].firstMatch.coordinate(withNormalizedOffset: CGVector(dx: 0.02, dy: 0.4)).tap()
         }
     }
@@ -82,7 +82,7 @@ final class ChatUXSmokeTests: XCTestCase {
         let initialHeight = model.frame.height
         for _ in 0..<4 {
             app.buttons["terminal-actions"].tap()
-            app.buttons["terminal-font-increase"].tap()
+            app.menuEntry("terminal-font-increase", label: "Increase").tap()
             dismissTextSizeMenu(app)
         }
         XCTAssertGreaterThan(model.frame.height, initialHeight)
@@ -830,7 +830,7 @@ final class ChatUXSmokeTests: XCTestCase {
         let codeHeight = code.frame.height
         for _ in 0..<4 {
             app.buttons["terminal-actions"].tap()
-            app.buttons["terminal-font-increase"].tap()
+            app.menuEntry("terminal-font-increase", label: "Increase").tap()
             dismissTextSizeMenu(app)
         }
         let deadline = Date().addingTimeInterval(5)
@@ -864,14 +864,14 @@ final class ChatUXSmokeTests: XCTestCase {
     }
 
     /// A real touch drag on the column's right-edge handle: press just inside the edge (still
-    /// on the handle's band, and clear of a window edge when the column is Full) at the chat's
-    /// mid-height, then drag `dx` points sideways.
+    /// on the handle's band, and clear of a window edge when the column is Full) at the
+    /// handle's mid-height, which is the chat's, then drag `dx` points sideways.
     private func dragRightEdge(_ app: XCUIApplication, by dx: CGFloat) {
         let column = element(app, "chat-column").frame
-        let chat = element(app, "chat-area").frame
+        let handle = element(app, "chat-width-handle-right").frame
         let origin = app.frame.origin
         let start = app.coordinate(withNormalizedOffset: .zero)
-            .withOffset(CGVector(dx: column.maxX - 6 - origin.x, dy: chat.midY - origin.y))
+            .withOffset(CGVector(dx: column.maxX - 6 - origin.x, dy: handle.midY - origin.y))
         start.press(forDuration: 0.2, thenDragTo: start.withOffset(CGVector(dx: dx, dy: 0)))
     }
 
@@ -889,7 +889,7 @@ final class ChatUXSmokeTests: XCTestCase {
     /// both handles, named for VoiceOver.
     func testChatWidthHandlesOnlyOnRegularWidth() {
         let app = launch()
-        let chat = element(app, "chat-area")
+        let chat = element(app, "chat-width-area")
         let column = element(app, "chat-column")
         XCTAssertTrue(column.waitForExistence(timeout: 10), app.debugDescription)
         let left = element(app, "chat-width-handle-left")
@@ -932,7 +932,7 @@ final class ChatUXSmokeTests: XCTestCase {
         rotated = true
         let hold = ["HERDR_COLUMN_WIDTH_READOUT_HOLD": "8"]
         let app = launch(environment: hold)
-        let chat = element(app, "chat-area")
+        let chat = element(app, "chat-width-area")
         let column = element(app, "chat-column")
         let right = element(app, "chat-width-handle-right")
         XCTAssertTrue(right.waitForExistence(timeout: 10), app.debugDescription)
@@ -991,7 +991,7 @@ final class ChatUXSmokeTests: XCTestCase {
         Thread.sleep(forTimeInterval: 1)
         app.terminate()
         let again = launch(environment: hold.merging(["HERDR_MOCK_COLUMN_WIDTH": "keep"]) { _, new in new })
-        let againChat = element(again, "chat-area")
+        let againChat = element(again, "chat-width-area")
         let againColumn = element(again, "chat-column")
         let againRight = element(again, "chat-width-handle-right")
         XCTAssertTrue(againRight.waitForExistence(timeout: 10), again.debugDescription)
@@ -1020,7 +1020,7 @@ final class ChatUXSmokeTests: XCTestCase {
         XCUIDevice.shared.orientation = .landscapeLeft
         rotated = true
         let app = launch()
-        let chat = element(app, "chat-area")
+        let chat = element(app, "chat-width-area")
         let column = element(app, "chat-column")
         let right = element(app, "chat-width-handle-right")
         XCTAssertTrue(right.waitForExistence(timeout: 10), app.debugDescription)
