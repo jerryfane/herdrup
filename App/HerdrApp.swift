@@ -8077,7 +8077,7 @@ struct SettingsView: View {
         switch serverUpdate?.card {
         case .available(_, let new, _, _, _, _)?: return "Update herdr to \(new)"
         case .restartPending(let new, _)?: return "herdr \(new) finishes on next restart"
-        case .failed?: return "herdr update didn't finish"
+        case .failed?: return "herdr update needs attention"
         case .tooOld?: return "herdr needs a one-time update"
         default: return "Update herdr"
         }
@@ -8091,7 +8091,7 @@ struct SettingsView: View {
                 ? "A newer herdr is ready for \(machineName)"
                 : "\(ServerUpdateCardView.sentence(missing)) need\(missing.count == 1 ? "s" : "") it"
         case .restartPending?: return "Restarting herdr closes terminals. Your layout comes back."
-        case .failed?: return "Nothing changed. Open Machines to try again."
+        case .failed?: return "Open Machines for the update status and next steps."
         case .tooOld?: return "This version can't update itself from the app."
         default: return nil
         }
