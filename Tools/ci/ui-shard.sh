@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
-# Runs one simulator shard of the CI device suite. ci.yml runs the shards as
-# parallel jobs; each job has already built the app and test bundles into .build-dd
+# Runs one simulator shard of the CI device suite. ci.yml and ios26.yml run the shards
+# as parallel jobs; each job has already built the app and test bundles into .build-dd
 # (build-for-testing) and exported IPHONE_UDID / IPAD_UDID.
 #
 #   iphone-terminal  TERMINAL_CLASSES, then ChatViewTests and PagingTests in rounds of
@@ -14,6 +14,10 @@
 #                    with the device-sized stack (herdrup#416), even on cache hits; then
 #                    GramTests on the iPhone with the Debug build
 #   focused          ONLY_SUITE on ONLY_DEVICE (manual dispatch)
+#   ios26-iphone     ios26.yml, on iOS 26.5: a launch smoke, then ChatUXSmokeTests,
+#                    TerminalResizeTests, GramTests and PagingTests on iPhone
+#   ios26-ipad       ios26.yml, on iOS 26.5: a launch smoke, then TerminalResizeTests,
+#                    ChatUXSmokeTests and, last, AgentListChromeTests on iPad
 #
 # The iPhone rounds are complementary BY CONSTRUCTION: iphone-terminal runs exactly
 # TERMINAL_CLASSES plus ChatViewTests and PagingTests and settings-gram runs GramTests,
@@ -22,7 +26,7 @@
 # iphone-terminal fails unless its result bundles show every listed class executed tests.
 set -uo pipefail
 
-shard="${1:?usage: ui-shard.sh iphone-terminal|iphone-app|ipad|settings-build|settings-gram|focused}"
+shard="${1:?usage: ui-shard.sh iphone-terminal|iphone-app|ipad|settings-build|settings-gram|focused|ios26-iphone|ios26-ipad}"
 TERMINAL_CLASSES=(TerminalControlTests TerminalResizeTests TerminalSearchTests TerminalSelectionTests)
 mkdir -p TestReceipts
 
@@ -639,6 +643,48 @@ case "$shard" in
       run_suite "$label-${ONLY_SUITE//\//-}" "$udid" 25m "-only-testing:HerdrUITests/$ONLY_SUITE" || failed=1
       stop_recording
     fi
+    ;;
+  # THE iOS 26 LANE (ios26.yml): the Xcode 27 image has no iOS 26 runtime, so the job
+  # downloads 26.5 and these rounds run on it. A slice, not the suite: the classes nearest
+  # the iOS 27 changes, each on the device the main shards run it on, with their budgets.
+  # First a launch smoke: the first screen of a fresh install, so a lane that cannot launch
+  # the app at all says that in one round instead of in every class.
+  # On Xcode 27 / iOS 27.0 (run 40877742408) the iPhone rounds took ChatUX 731 s,
+  # TerminalResize 369 s, Gram 1082 s and Paging 229 s; the iPad rounds TerminalResize
+  # 769 s, ChatUX 788 s and AgentListChrome 29 s.
+  ios26-iphone)
+    run_suite iPhone26Launch "$IPHONE_UDID" 5m \
+      -only-testing:HerdrUITests/OnboardingTests/testInstallAndPairCommandsAreCopyable || failed=1
+    check_classes_ran TestReceipts/iPhone26Launch-first.xcresult OnboardingTests || failed=1
+    run_suite iPhone26ChatUX "$IPHONE_UDID" 20m -only-testing:HerdrUITests/ChatUXSmokeTests || failed=1
+    check_classes_ran TestReceipts/iPhone26ChatUX-first.xcresult ChatUXSmokeTests || failed=1
+    run_suite iPhone26Resize "$IPHONE_UDID" 15m -only-testing:HerdrUITests/TerminalResizeTests || failed=1
+    check_classes_ran TestReceipts/iPhone26Resize-first.xcresult TerminalResizeTests || failed=1
+    run_suite iPhone26Gram "$IPHONE_UDID" 35m -only-testing:HerdrUITests/GramTests || failed=1
+    check_classes_ran TestReceipts/iPhone26Gram-first.xcresult GramTests || failed=1
+    run_suite iPhone26Paging "$IPHONE_UDID" 10m -only-testing:HerdrUITests/PagingTests || failed=1
+    check_classes_ran TestReceipts/iPhone26Paging-first.xcresult PagingTests || failed=1
+    ;;
+  ios26-ipad)
+    # Prepare the display before the first XCTest session, as in the ipad shard.
+    # Run 40962340059 started Launch before the recorder and timed out in the
+    # simulator launcher without executing a test; the recorded resize round ran.
+    boot_simulator "$IPAD_UDID" TestReceipts/iPad26Recording-boot.log || exit 1
+    xcrun simctl io "$IPAD_UDID" recordVideo TestReceipts/terminal-resize-iPad26.mp4 \
+      > TestReceipts/terminal-resize-iPad26-video.log 2>&1 &
+    recorder=$!
+    run_suite iPad26Launch "$IPAD_UDID" 5m \
+      -only-testing:HerdrUITests/OnboardingTests/testInstallAndPairCommandsAreCopyable || failed=1
+    check_classes_ran TestReceipts/iPad26Launch-first.xcresult OnboardingTests || failed=1
+    run_suite iPad26Resize "$IPAD_UDID" 25m -only-testing:HerdrUITests/TerminalResizeTests || failed=1
+    stop_recording
+    check_classes_ran TestReceipts/iPad26Resize-first.xcresult TerminalResizeTests || failed=1
+    run_suite iPad26ChatUX "$IPAD_UDID" 20m -only-testing:HerdrUITests/ChatUXSmokeTests || failed=1
+    check_classes_ran TestReceipts/iPad26ChatUX-first.xcresult ChatUXSmokeTests || failed=1
+    # Last: AgentListChromeTests shrinks the app into a window, which iPadOS keeps for later
+    # launches (see the ipad shard).
+    run_suite iPad26AgentListChrome "$IPAD_UDID" 5m -only-testing:HerdrUITests/AgentListChromeTests || failed=1
+    check_classes_ran TestReceipts/iPad26AgentListChrome-first.xcresult AgentListChromeTests || failed=1
     ;;
   *)
     echo "::error::unknown shard $shard"
