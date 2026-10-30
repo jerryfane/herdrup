@@ -102,6 +102,10 @@ herdr's JSON API exposes both, so panes and agents become real UI objects instea
   back to live output. On iPad, the composer stays focused; use Collapse keyboard to dismiss it.
   Files can upload to a named agent even while it is asking a question. If the host refuses
   the accompanying prompt, the composer keeps the text and sent-file chips for retry.
+  Drop files on the terminal surface or its composer to attach and upload them before Send.
+  File-only drops share the composer's size/count limits; text-only drags do not attach files.
+  Send waits while accepted files are being prepared, including in guest panes.
+  Copied file references attach the document rather than its Finder icon or path text.
 - **Host picker** — native system typography for names, addresses, and guidance, with
   higher-contrast supporting text and the app's text-size preference respected.
   Copyable shell commands and terminal output retain their monospaced fonts.
@@ -180,6 +184,15 @@ swift test --package-path Vendor/SwiftTerm
 `HerdrKit` contains no UIKit or SwiftUI, so it stays Linux-buildable and can be exercised against a real
 herdr server; the iOS app consumes it unchanged. Floors: macOS 14+, iOS 17+ (declared in `Package.swift`
 — macOS 14 because Citadel requires it).
+The streaming upload channel requires macOS 15; macOS 14 keeps the per-chunk path.
+Tests that open the streaming channel skip on macOS 14, matching the production
+availability guard; teardown and never-started-channel checks still run there.
+
+The reconnect-history UI receipt recognizes the fixture's numbered history rows
+before and after real swipes, requiring earlier rows to become visible instead of
+requiring a fixed percentage of changed pixels. Update-retry coverage reads the
+retained failed state directly after its failure reason appears; it does not add
+a second short polling deadline to that already-observed state.
 
 SwiftTerm is vendored at [`Vendor/SwiftTerm`](Vendor/SwiftTerm), based on upstream v1.15.0,
 commit `dd2fb8ac5b861e7bf617c872895e338f38165648`. Local changes retain viewport anchors and terminal
