@@ -65,14 +65,37 @@ files = {name: {"present": (root / name).is_file(),
                 "sha256": hashlib.sha256((root / name).read_bytes()).hexdigest()
                 if (root / name).is_file() else None} for name in paths}
 target.write_text(json.dumps({"git_rev_parse_HEAD": sha, "files": files,
-    "configuration": "release with -enable-testing", "platform": "hosted Linux / swift:6.1",
+    "configuration": "release, standalone public-API consumer", "platform": "hosted Linux / swift:6.1",
     "not_device_or_relay_evidence": True}, indent=2) + "\n")
 PY
+# Build a standalone public-API consumer, not the app package's DEBUG-only fixture
+# tests. The app checkout and its production manifest remain completely unchanged.
+consumer="$state/consumer"
+mkdir -p "$consumer/Tests/HerdrKitTests"
 cp "$evidence/Tests/HerdrKitTests/GramRealCitadelEvidenceTests.swift" \
-   "$app/Tests/HerdrKitTests/GramRealCitadelEvidenceTests.swift"
-cd "$app"
-echo 'Building production app tests once; no existing test suite is executed.'
-timeout --kill-after=15s 1080s swift build -c release --build-tests --force-resolved-versions -Xswiftc -enable-testing
+   "$consumer/Tests/HerdrKitTests/GramRealCitadelEvidenceTests.swift"
+cp "$app/Package.resolved" "$consumer/Package.resolved"
+cat > "$consumer/Package.swift" <<EOF
+// swift-tools-version:5.9
+import PackageDescription
+let package = Package(
+    name: "GramRealCitadelEvidence",
+    products: [],
+    dependencies: [
+        .package(path: "$app"),
+        .package(url: "https://github.com/apple/swift-crypto.git", from: "3.0.0")
+    ],
+    targets: [
+        .testTarget(name: "HerdrKitTests", dependencies: [
+            .product(name: "HerdrKit", package: "app"),
+            .product(name: "Crypto", package: "swift-crypto")
+        ])
+    ]
+)
+EOF
+cd "$consumer"
+echo 'Building optimized real HerdrKit and isolated consumer once; no existing suite is compiled or executed.'
+timeout --kill-after=15s 1080s swift build -c release --build-tests --force-resolved-versions
 
 mkdir -p "$state/keys" "$state/bin" "$state/account/.ssh" "$state/account/.local/bin"
 chmod 755 "$state/bin"
@@ -228,7 +251,7 @@ PY
     GRAM_EVIDENCE_USER="$account" GRAM_EVIDENCE_PRIVATE_KEY_FILE="$state/keys/client" \
     GRAM_EVIDENCE_APP_SHA="$app_sha" GRAM_EVIDENCE_SERVER_SHA="$server_sha" \
     GRAM_EVIDENCE_RECEIPT="$receipt" GRAM_EVIDENCE_SIZES=10 \
-    timeout --kill-after=15s 300s swift test -c release --skip-build -Xswiftc -enable-testing \
+    timeout --kill-after=15s 300s swift test -c release --skip-build --force-resolved-versions \
       --filter 'HerdrKitTests.GramRealCitadelEvidenceTests/testRealCitadelRoundTrip' \
       > "$state/test-$scenario.log" 2>&1 || status=$?
   stop_scenario
