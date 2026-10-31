@@ -2517,34 +2517,16 @@ struct TerminalHomeView: View {
             .toolbar(.hidden, for: .navigationBar)
         }
         .navigationSplitViewStyle(.balanced)
-        // The split's own sidebar carries the FULL list; minimising hides that column and
-        // hands its job to the rail.
-        //
-        // ONE-WAY on purpose. The preference -> layout edge restores the owner's choice at
-        // launch. The reverse edge (layout -> preference) is deliberately absent: this
-        // binding is written by iPadOS itself, and a handler cannot tell an owner gesture
-        // from a system layout decision. Persisting the latter meant one system collapse
-        // (a rotation, a Stage Manager resize) silently rewrote a durable preference, and
-        // since only an explicit expand clears it, the app would then open on the rail
-        // forever with no record that the owner ever asked for it. `sidebarMinimized` is
-        // now written ONLY by `toggleSidebar` and `railSectionButton` - real gestures.
-        // `initial: true` IS LOAD-BEARING and was wrongly removed for one round.
-        //
-        // The initialiser above runs once per view LIFETIME; this handler re-fires on
-        // every REMOUNT. `iPadLayout` unmounts and remounts across compact<->regular
-        // transitions (Stage Manager, a window resize), while `columnVisibility` is
-        // `@State` on `TerminalHomeView`, whose identity survives them. Because the
-        // layout -> preference edge is deliberately absent, an iPadOS-initiated collapse
-        // leaves `columnVisibility == .detailOnly` with `sidebarMinimized == false`; this
-        // handler is what re-applied the real preference on reappearance and self-healed
-        // it. Without it, a system collapse STICKS until an explicit ⌘K or rail tap.
-        //
-        // It is not redundant with the initialiser and it is not merely "for later
-        // preference changes": both in-scene writers (`toggleSidebar`, `railSectionButton`)
-        // set `columnVisibility` themselves in the same transaction, so a same-value
-        // re-apply is all this can ever do for a gesture. Its real job is the remount.
+        // The preference is user-owned; system collapses must not rewrite it. The home
+        // tree now survives narrowing, so restore that choice when returning to regular
+        // width instead of relying on the former layout remount.
         .onChange(of: sidebarMinimized, initial: true) { _, minimized in
             columnVisibility = minimized ? .detailOnly : .all
+        }
+        .onChange(of: hSizeClass) { _, sizeClass in
+            if sizeClass == .regular {
+                columnVisibility = sidebarMinimized ? .detailOnly : .all
+            }
         }
         .tint(Palette.brand)
         // Hardware-keyboard shortcuts (iPad): ⌘K minimises/expands the sidebar, ⌘/ opens the
@@ -3476,8 +3458,7 @@ struct TerminalHomeView: View {
     }
 
     private var agentsTab: some View {
-        agentActions(
-            NavigationStack {
+        NavigationStack {
             ZStack {
                 Palette.ground.ignoresSafeArea()
                 VStack(spacing: 0) {
@@ -3495,12 +3476,7 @@ struct TerminalHomeView: View {
                 }
             }
             .toolbar(.hidden, for: .navigationBar)
-            // Hide the tab bar while a terminal is fronted so the pane is truly
-            // full-screen (the pane overlay covers it too; this animates it away and
-            // guards against the bar drawing over the overlay on some iOS versions).
-            .toolbar(frontID != nil ? .hidden : .automatic, for: .tabBar)
         }
-        )
     }
 
     /// The rename form for an agent or a terminal. Agent names are coerced to the server grammar
