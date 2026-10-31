@@ -294,11 +294,15 @@ without moving the pane between size-class branches. Changing size class changes
 navigation chrome, not composer identity. Agent actions have one presentation owner.
 Sidebar visibility is derived from compact adaptation and the user's regular-width
 choice; system writebacks cannot replace that choice. Gram keeps its shared search
-query, with compact controls to edit or clear it.
+query, with compact controls to edit or clear it. Its floating header is layered above
+the stable feed so search controls remain separate from scrolling message content.
 
 The DEBUG `HERDR_LAYOUT_TRANSITIONS=1` interaction fixture changes width and size class
 without relaunching, so draft, stream-lifetime, and active-search regressions exercise
 a live transition. Terminal tab roundtrips also check the exact draft and stream count.
+Search coverage includes emptying a query and continuing to type without refocusing,
+then closing and reopening the editor with normal taps and checking the exact query
+and filtered results before returning to the regular layout.
 
 Gram reads like iMessage in herdr's colours: your messages are violet bubbles on the right,
 agents' sit on the left under their name, machine (“vetrina · mac-studio”) and avatar, with
