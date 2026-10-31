@@ -35,7 +35,6 @@ final class SettingsTests: XCTestCase {
             window.waitForSettledFrame()
         }
         XCTAssertLessThan(window.frame.width, 600, "The regression must exercise compact Settings")
-        let compactWidth = window.frame.width
         app.buttons["Settings"].firstMatch.tap()
         let machines = app.buttons.matching(NSPredicate(format: "label BEGINSWITH %@", "Machines")).firstMatch
         XCTAssertTrue(machines.waitForExistence(timeout: 5))
@@ -54,11 +53,12 @@ final class SettingsTests: XCTestCase {
         back.tap()
         XCTAssertTrue(machines.waitForExistence(timeout: 5))
         XCTAssertTrue(machines.isHittable)
-        // Exercise a real narrow regular window, not only compact and full screen.
-        // The requested width is not proof: assert the size iPadOS actually settles on.
+        // iPadOS resizes this floating window around its centre: a 275-point handle
+        // movement widened 375 to 915, moving both edges. Request half the width delta.
         window.coordinate(withNormalizedOffset: CGVector(dx: 0.997, dy: 0.997))
             .press(forDuration: 0.3, thenDragTo: window.coordinate(withNormalizedOffset: .zero)
-                .withOffset(CGVector(dx: 650, dy: window.frame.height)))
+                .withOffset(CGVector(dx: (window.frame.width + 650) / 2,
+                                     dy: window.frame.height)))
         XCTAssertTrue(app.wait(for: .runningForeground, timeout: 5))
         window.waitForSettledFrame()
         XCTAssertGreaterThanOrEqual(window.frame.width, 600)
@@ -69,10 +69,12 @@ final class SettingsTests: XCTestCase {
         // Returning to full width must preserve that navigation too.
         window.coordinate(withNormalizedOffset: CGVector(dx: 0.997, dy: 0.997))
             .press(forDuration: 0.3, thenDragTo: window.coordinate(withNormalizedOffset: .zero)
-                .withOffset(CGVector(dx: max(initialSize.width, 800) - 50,
+                .withOffset(CGVector(dx: max(initialSize.width, 900) - 50,
                                      dy: max(initialSize.height, 700) - 50)))
         XCTAssertTrue(app.wait(for: .runningForeground, timeout: 5))
-        XCTAssertGreaterThan(window.frame.width, compactWidth + 100, "The regression must expand the window")
+        window.waitForSettledFrame()
+        XCTAssertGreaterThanOrEqual(window.frame.width, 800,
+                                    "The final resize must leave the narrow regular-width range")
         let settings = app.buttons["Settings"].firstMatch
         XCTAssertTrue(settings.waitForExistence(timeout: 5))
         XCTAssertTrue(settings.isHittable)

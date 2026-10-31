@@ -3331,18 +3331,17 @@ struct GramPageFailureLabel: View {
 private struct GramFloatingHeader<Bar: View>: ViewModifier {
     let bar: Bar
     /// The header's height, as the scroll content's top margin. Only the bar's own content
-    /// sets it (the overlay is proposed the feed's size but never moves with it).
+    /// sets it; it remains independent of the feed's current content.
     @State private var barHeight: CGFloat = 0
 
     func body(content: Content) -> some View {
-        // The feed switches between views (list, "No matches", loading). Wrapped in a stack,
-        // the switch is a child and the header stays one view across it; attached straight
-        // to the switch, the header was rebuilt when the search hit "No matches", and the
-        // search field lost focus mid-word (the keyboard went down after "zz").
-        VStack(spacing: 0) { content }
-            .contentMargins(.top, barHeight, for: .scrollContent)
-            .overlay(alignment: .top) {
-                bar
+        // Keep the header stable as the feed switches between messages and "No matches".
+        // Give it a higher sibling layer than the native scroll view, so the visible
+        // search controls also own touches when the message feed returns.
+        ZStack(alignment: .top) {
+            VStack(spacing: 0) { content }
+                .contentMargins(.top, barHeight, for: .scrollContent)
+            bar
                     .onGeometryChange(for: CGFloat.self) { $0.size.height } action: { height in
                         if abs(height - barHeight) > 0.5 { barHeight = height }
                     }
@@ -3352,13 +3351,10 @@ private struct GramFloatingHeader<Bar: View>: ViewModifier {
                             .allowsHitTesting(false)
                             .accessibilityHidden(true)
                     }
-                    // The controls sit on top of the page, so VoiceOver meets them before
-                    // the feed, as when the header was the first row: without this the
-                    // overlay, laid down after the scroll view, came after the whole feed.
                     .accessibilitySortPriority(1)
-            }
-            // One container for the feed and its header, so the priority above orders them.
-            .accessibilityElement(children: .contain)
+                    .zIndex(1)
+        }
+        .accessibilityElement(children: .contain)
     }
 }
 
