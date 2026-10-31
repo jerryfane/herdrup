@@ -96,6 +96,7 @@ final class DuoTransitionTests: TerminalInteractionTestCase {
 
         toggle.tap()
         if !compactField.allElementsBoundByIndex.contains(where: { $0.isHittable }) {
+            XCTFail("Reopened search field was not hittable before diagnostics")
             app.buttons["fixture-search-inspect"].tap()
             let diagnostic = XCTAttachment(string: app.staticTexts["fixture-search-trace"].label
                 + "\n" + app.debugDescription)

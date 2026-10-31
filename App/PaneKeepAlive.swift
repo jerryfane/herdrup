@@ -48,7 +48,7 @@ struct PaneKeepAliveContainer: View {
     var body: some View {
         ZStack {
             ForEach(slots) { slot in
-                let isFront = slot.paneID == frontID
+                let isForeground = slot.paneID == frontID && isPresented
                 TerminalPaneContent(
                     client: client,
                     paneID: slot.paneID,
@@ -58,20 +58,20 @@ struct PaneKeepAliveContainer: View {
                     // Foreground = the front slot AND the container is actually on screen. The
                     // `isPresented` term is what stops a hidden-behind-Settings pane (iPad/Mac,
                     // frontID still set) from holding key focus + the PTY width-lock.
-                    isForeground: isFront && isPresented,
+                    isForeground: isForeground,
                     onNavigate: { onNavigate(slot, $0) },
                     onClose: onClose)
                     // STABLE identity — the pane id, NEVER a swipe-varying `currentID`. So a
                     // swipe or an LRU reorder flips visibility without giving the subtree a new
                     // identity (which would dismantle it and re-stream from a cold handshake).
                     .id(slot.paneID)
-                    .opacity(isFront ? 1 : 0)
-                    .allowsHitTesting(isFront)
-                    .zIndex(isFront ? 1 : 0)
+                    .opacity(isForeground ? 1 : 0)
+                    .allowsHitTesting(isForeground)
+                    .zIndex(isForeground ? 1 : 0)
                     // A hidden warm pane is invisible AND inert — keep it out of the
                     // accessibility tree too (VoiceOver shouldn't read an offscreen pane; it
                     // also makes the paging XCUITest's assertions unambiguous).
-                    .accessibilityHidden(!isFront)
+                    .accessibilityHidden(!isForeground)
             }
         }
     }
