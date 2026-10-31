@@ -117,9 +117,11 @@ final class DuoTransitionTests: TerminalInteractionTestCase {
         XCTAssertFalse(compactField.allElementsBoundByIndex.contains { $0.isHittable })
 
         toggle.tap()
-        let reopened = try XCTUnwrap(compactField.allElementsBoundByIndex.first { $0.isHittable })
+        let reopened = compactField.firstMatch
+        XCTAssertTrue(reopened.exists)
         reopened.tap()
         reopened.typeText("zzzz")
+        XCTAssertEqual(reopened.value as? String, "zzzz")
         XCTAssertTrue(app.staticTexts["No matches"].waitForExistence(timeout: 5))
         transition("regular")
         XCTAssertEqual(sidebarField.value as? String, "zzzz")
