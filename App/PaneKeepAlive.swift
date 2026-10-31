@@ -65,9 +65,7 @@ struct PaneKeepAliveContainer: View {
                     .opacity(isForeground ? 1 : 0)
                     .allowsHitTesting(isForeground)
                     .zIndex(isForeground ? 1 : 0)
-                    // Hide the pane's accessibility subtree, including UIKit descendants,
-                    // rather than leaving individually exposed controls behind another tab.
-                    .accessibilityElement(children: isForeground ? .contain : .ignore)
+                    // Inactive warm panes do not participate in accessibility navigation.
                     .accessibilityHidden(!isForeground)
             }
         }

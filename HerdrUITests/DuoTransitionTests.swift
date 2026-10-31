@@ -45,6 +45,17 @@ final class DuoTransitionTests: TerminalInteractionTestCase {
                            "The selected pane must not remount or reopen its stream")
             attach("terminal-\(layout)")
         }
+
+        for section in ["Gram", "Settings"] {
+            try XCTUnwrap(onscreen(section, requiringHittable: true)).tap()
+            XCTAssertFalse(app.buttons["terminal-find"].exists,
+                           "The covered terminal must not expose controls over \(section)")
+            try XCTUnwrap(onscreen("Agents", requiringHittable: true)).tap()
+            XCTAssertEqual(try editor("terminal-reply-input").value as? String, draft)
+            XCTAssertEqual(probe()["opens"] as? Int, originalOpens,
+                           "Changing tabs must keep the terminal stream mounted")
+            attach("terminal-return-from-\(section)")
+        }
     }
 
     func testGramDraftSurvivesCompactRegularTransitions() throws {
