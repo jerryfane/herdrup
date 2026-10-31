@@ -290,9 +290,14 @@ with a device-sized 1008 KiB main stack, and rejects attached crashes even if XC
 
 Compact and regular home layouts share one split-view detail tree and one mounted
 terminal container. Changing the window's size class changes navigation chrome,
-not the identity of the terminal reply or Gram composer. The DEBUG
-`HERDR_LAYOUT_TRANSITIONS=1` interaction fixture changes width and size class
-without relaunching, so draft and stream-lifetime regressions exercise a live transition.
+not the identity of the terminal reply or Gram composer. Agent actions have one
+presentation owner in both layouts. Returning to regular width restores the user's
+sidebar choice; system collapses do not overwrite it. Gram keeps its shared search
+query, with compact controls to edit or clear it.
+
+The DEBUG `HERDR_LAYOUT_TRANSITIONS=1` interaction fixture changes width and size class
+without relaunching, so draft, stream-lifetime, and active-search regressions exercise
+a live transition.
 
 Gram reads like iMessage in herdr's colours: your messages are violet bubbles on the right,
 agents' sit on the left under their name, machine (“vetrina · mac-studio”) and avatar, with
