@@ -7,7 +7,7 @@ final class DuoTransitionTests: TerminalInteractionTestCase {
         guard UIDevice.current.userInterfaceIdiom == .pad else {
             throw XCTSkip("Needs room for the regular layout and a 390-point compact viewport")
         }
-        launch("resize", environment: ["HERDR_LAYOUT_TRANSITIONS": "1"])
+        launch("resize", environment: ["HERDR_LAYOUT_TRANSITIONS": "1", "HERDR_TRACE_SEARCH": "1"])
     }
 
     private func transition(_ layout: String) {
@@ -95,6 +95,14 @@ final class DuoTransitionTests: TerminalInteractionTestCase {
         XCTAssertFalse(compactField.allElementsBoundByIndex.contains { $0.isHittable })
 
         toggle.tap()
+        if !compactField.allElementsBoundByIndex.contains(where: { $0.isHittable }) {
+            app.buttons["fixture-search-inspect"].tap()
+            let diagnostic = XCTAttachment(string: app.staticTexts["fixture-search-trace"].label
+                + "\n" + app.debugDescription)
+            diagnostic.name = "search-reopen-native-trace"
+            diagnostic.lifetime = .keepAlways
+            add(diagnostic)
+        }
         let reopened = try XCTUnwrap(compactField.allElementsBoundByIndex.first { $0.isHittable })
         reopened.tap()
         reopened.typeText("zzzz")

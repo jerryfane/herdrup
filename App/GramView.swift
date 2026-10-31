@@ -658,6 +658,9 @@ struct GramView: View {
     /// what restores the unfiltered list, so a hidden field can never leave the list
     /// silently filtered.
     private func toggleSearch() {
+        #if DEBUG
+        DebugTouchRedraw.traceSearch("toggle before open=\(searchOpen) query=\(search) compact=\(hSizeClass != .regular)")
+        #endif
         if searchFieldIsOpen {
             searchOpen = false
             search = ""
@@ -666,6 +669,9 @@ struct GramView: View {
             searchOpen = true
             searchFocused = true
         }
+        #if DEBUG
+        DebugTouchRedraw.traceSearch("toggle after open=\(searchOpen) query=\(search)")
+        #endif
     }
 
     /// Command-F opens search or focuses the visible field. Only a regular-width host

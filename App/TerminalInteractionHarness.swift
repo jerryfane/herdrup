@@ -984,6 +984,7 @@ struct TerminalInteractionRoot: View {
     let control: Bool
     @Environment(\.horizontalSizeClass) private var sizeClass
     @State private var compactLayout = false
+    @State private var searchTrace = ""
     private let layoutTransitions = ProcessInfo.processInfo.environment["HERDR_LAYOUT_TRANSITIONS"] == "1"
     /// ONLY the spacer, never the harness itself: the probe's ten-per-second tick would
     /// otherwise re-render the pane under test (see `KeyboardSpacerBox`).
@@ -1000,6 +1001,14 @@ struct TerminalInteractionRoot: View {
                         .accessibilityIdentifier("fixture-layout-regular")
                     Text(compactLayout ? "compact" : "regular")
                         .accessibilityIdentifier("fixture-layout-state")
+                    if ProcessInfo.processInfo.environment["HERDR_TRACE_SEARCH"] == "1" {
+                        Button("Inspect search") { searchTrace = DebugTouchRedraw.searchTrace }
+                            .accessibilityIdentifier("fixture-search-inspect")
+                        Text(searchTrace)
+                            .font(.system(size: 1))
+                            .frame(width: 1, height: 1)
+                            .accessibilityIdentifier("fixture-search-trace")
+                    }
                 }
                 .buttonStyle(.bordered)
             }
