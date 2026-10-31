@@ -104,13 +104,10 @@ final class DuoTransitionTests: TerminalInteractionTestCase {
         retained.tap()
         retained.typeText(String(repeating: XCUIKeyboardKey.delete.rawValue, count: 4))
         XCTAssertTrue(app.staticTexts["clientloop"].waitForExistence(timeout: 5))
-        // The feed replaces "No matches"; a cached accessibility index need not
-        // still name the same field. Resolve the visible editor again.
-        let emptied = try XCTUnwrap(compactField.allElementsBoundByIndex.first { $0.isHittable },
-                                    "Emptying an inherited query must keep its editor open\n\(app.debugDescription)")
-        // No tap: typing must continue in the already-focused search editor.
-        emptied.typeText("zzzz")
-        XCTAssertEqual(emptied.value as? String, "zzzz")
+        // Continue the existing keyboard interaction, without another hit test or tap.
+        // Losing focus must fail the exact-query and filtering assertions below.
+        app.typeText("zzzz")
+        XCTAssertTrue(compactField.matching(NSPredicate(format: "value == %@", "zzzz")).firstMatch.exists)
         XCTAssertTrue(app.staticTexts["No matches"].waitForExistence(timeout: 5))
 
         let toggle = app.buttons["gram-search"]

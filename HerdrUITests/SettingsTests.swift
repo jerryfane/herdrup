@@ -54,7 +54,19 @@ final class SettingsTests: XCTestCase {
         back.tap()
         XCTAssertTrue(machines.waitForExistence(timeout: 5))
         XCTAssertTrue(machines.isHittable)
-        // Expanding also remounts the adaptive host; shrinking alone misses #416.
+        // Exercise a real narrow regular window, not only compact and full screen.
+        // The requested width is not proof: assert the size iPadOS actually settles on.
+        window.coordinate(withNormalizedOffset: CGVector(dx: 0.997, dy: 0.997))
+            .press(forDuration: 0.3, thenDragTo: window.coordinate(withNormalizedOffset: .zero)
+                .withOffset(CGVector(dx: 650, dy: window.frame.height)))
+        XCTAssertTrue(app.wait(for: .runningForeground, timeout: 5))
+        window.waitForSettledFrame()
+        XCTAssertGreaterThanOrEqual(window.frame.width, 600)
+        XCTAssertLessThan(window.frame.width, 800)
+        XCTAssertTrue(machines.waitForExistence(timeout: 5))
+        XCTAssertTrue(machines.isHittable, "Narrow regular width must keep Settings navigation reachable")
+        attach(app, "settings-narrow-regular-width-\(Int(window.frame.width))")
+        // Returning to full width must preserve that navigation too.
         window.coordinate(withNormalizedOffset: CGVector(dx: 0.997, dy: 0.997))
             .press(forDuration: 0.3, thenDragTo: window.coordinate(withNormalizedOffset: .zero)
                 .withOffset(CGVector(dx: max(initialSize.width, 800) - 50,
