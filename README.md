@@ -181,6 +181,10 @@ swift test --package-path Vendor/SwiftTerm
 herdr server; the iOS app consumes it unchanged. Floors: macOS 14+, iOS 17+ (declared in `Package.swift`
 — macOS 14 because Citadel requires it).
 
+The reconnect-history UI receipt recognizes the fixture's numbered history rows
+before and after real swipes, requiring earlier rows to become visible instead of
+requiring a fixed percentage of changed pixels.
+
 SwiftTerm is vendored at [`Vendor/SwiftTerm`](Vendor/SwiftTerm), based on upstream v1.15.0,
 commit `dd2fb8ac5b861e7bf617c872895e338f38165648`. Local changes retain viewport anchors and terminal
 modes during geometry/font commits, preserve archived row widths when the app opts in, and expose
