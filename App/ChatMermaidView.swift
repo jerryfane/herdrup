@@ -25,6 +25,9 @@ struct ChatMermaidView: View {
     @State private var receipt = CopiedCommandReceipt.shared
     @State private var rendered: MermaidRenderer.Rendered?
     @State private var failed = false
+    #if DEBUG
+    @State private var failureDiagnostic = ""
+    #endif
     @State private var showCode = false
     @State private var viewing = false
     @State private var width: CGFloat = 0
@@ -75,10 +78,16 @@ struct ChatMermaidView: View {
                 rendered = hit
                 return
             }
+            #if DEBUG
+            let started = Date.timeIntervalSinceReferenceDate
+            #endif
             do {
                 rendered = try await MermaidRenderer.shared.render(request)
                 failed = false
             } catch {
+                #if DEBUG
+                failureDiagnostic = "type=\(type(of: error)); error=\(error); elapsed=\(Date.timeIntervalSinceReferenceDate - started); width=\(width); scale=\(displayScale)"
+                #endif
                 failed = true
             }
         }
@@ -192,6 +201,9 @@ struct ChatMermaidView: View {
                 .font(Typography.app(12 * textScale))
                 .foregroundStyle(Palette.textFaint)
                 .accessibilityIdentifier("\(tag)-error")
+                #if DEBUG
+                .accessibilityValue(failureDiagnostic)
+                #endif
         }
     }
 
