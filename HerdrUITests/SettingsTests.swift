@@ -23,6 +23,7 @@ final class SettingsTests: XCTestCase {
         // Check process state before queries/activate can relaunch a crashed app.
         XCTAssertTrue(app.wait(for: .runningForeground, timeout: 5))
         window.waitForSettledFrame()
+        attach(app, "settings-first-settled-width-\(Int(window.frame.width))")
         // iPadOS can settle a corner drag out of full screen at a system window size just over
         // 600 pt (CI run 39966934030 stopped at 613 pt, #491), so Settings would never be
         // compact. Drag this window's own corner once more, to 480 pt from its left edge.
@@ -49,6 +50,7 @@ final class SettingsTests: XCTestCase {
         let back = app.buttons["Back"].firstMatch
         XCTAssertTrue(back.waitForExistence(timeout: 5))
         XCTAssertTrue(back.isHittable)
+        attach(app, "settings-compact-resumed-width-\(Int(window.frame.width))")
         back.tap()
         XCTAssertTrue(machines.waitForExistence(timeout: 5))
         XCTAssertTrue(machines.isHittable)
@@ -64,6 +66,7 @@ final class SettingsTests: XCTestCase {
         XCTAssertTrue(settings.isHittable)
         XCTAssertTrue(machines.waitForExistence(timeout: 5))
         XCTAssertTrue(machines.isHittable)
+        attach(app, "settings-expanded-width-\(Int(window.frame.width))")
     }
 
 
