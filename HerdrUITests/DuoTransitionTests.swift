@@ -85,8 +85,17 @@ final class DuoTransitionTests: TerminalInteractionTestCase {
         })
         let retained = try XCTUnwrap(compactField.allElementsBoundByIndex.first { $0.isHittable })
         XCTAssertEqual(retained.value as? String, "zzzz")
+        XCTAssertFalse(app.buttons["terminal-find"].exists,
+                       "A hidden terminal must not expose controls over Gram")
         XCTAssertTrue(app.staticTexts["No matches"].exists)
         attach("gram-search-compact")
+
+        retained.tap()
+        retained.typeText(String(repeating: XCUIKeyboardKey.delete.rawValue, count: 4))
+        XCTAssertTrue(app.staticTexts["clientloop"].waitForExistence(timeout: 5))
+        XCTAssertTrue(retained.isHittable, "Emptying an inherited query must keep its editor open")
+        retained.typeText("zzzz")
+        XCTAssertTrue(app.staticTexts["No matches"].waitForExistence(timeout: 5))
 
         let toggle = app.buttons["gram-search"]
         XCTAssertTrue(toggle.isHittable)

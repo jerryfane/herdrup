@@ -65,9 +65,9 @@ struct PaneKeepAliveContainer: View {
                     .opacity(isForeground ? 1 : 0)
                     .allowsHitTesting(isForeground)
                     .zIndex(isForeground ? 1 : 0)
-                    // A hidden warm pane is invisible AND inert — keep it out of the
-                    // accessibility tree too (VoiceOver shouldn't read an offscreen pane; it
-                    // also makes the paging XCUITest's assertions unambiguous).
+                    // Hide the pane's accessibility subtree, including UIKit descendants,
+                    // rather than leaving individually exposed controls behind another tab.
+                    .accessibilityElement(children: isForeground ? .contain : .ignore)
                     .accessibilityHidden(!isForeground)
             }
         }

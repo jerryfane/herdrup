@@ -439,6 +439,11 @@ struct GramView: View {
         // just-selected section with "No matches", which reads as a bug. Only the page's OWN
         // field: a host's sidebar search (`searchText`) is the reader's and outlives the switch.
         .onChange(of: showingSaved) { _, _ in localSearch = "" }
+        // An inherited sidebar query opens the compact editor. Keep that editing intent
+        // after the final backspace; only the explicit close action dismisses the field.
+        .onChange(of: offersOwnSearch && !search.isEmpty, initial: true) { _, inheritedQuery in
+            if inheritedQuery { searchOpen = true }
+        }
         // A new search (or clearing it) starts from the newest window again, and ends the
         // previous query's search of older history. On the page, not the feed: from "No
         // matches" the feed is unmounted, and a reset inside it would miss the clear.
